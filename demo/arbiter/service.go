@@ -1,9 +1,9 @@
-// Package arbiter 提供仅用于测试与协议演示的最小仲裁服务端。
+// Package arbiter provides an in-memory arbitration workflow example. It is
+// intentionally transport-neutral; adapters submit and publish CBOR messages.
 package arbiter
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -11,38 +11,28 @@ import (
 	"time"
 
 	core "github.com/bsv8/go-bitfs/bitfs"
-	bitfspb "github.com/bsv8/go-bitfs/proto/bitfspb"
-	pool2of3pb "github.com/bsv8/go-bitfs/proto/pool2of3pb"
+	pool "github.com/bsv8/go-bitfs/settlement"
 )
 
-// PoolClient 是 demo 在业务裁决后调用的正式 2-of-3 结算客户端。
 type PoolClient interface {
-	ArbitrateSessionPool(context.Context, *pool2of3pb.ArbitrateSessionPoolRequestV1) (*pool2of3pb.ArbitrateSessionPoolResponseV1, error)
+	StartArbitration(context.Context, *pool.ArbitrationRequest) (*pool.CloseSignatureRequest, error)
+	CompleteArbitration(context.Context, *pool.CloseSignature) (*pool.PoolArbitrated, error)
 }
 
-// SessionPoolRef 是仲裁服务执行结算所需的最小会话映射真值。
 type SessionPoolRef struct {
-	SpendTxID              string
+	SpendTxID              []byte
 	CurrentSellerAmountSat uint64
 }
 
-// SessionResolver 将 BitFS 会话和 seller 绑定解析为对应费用池。
 type SessionResolver interface {
 	ResolveSessionPool(context.Context, string, []byte) (SessionPoolRef, error)
 }
-
-// PayloadResolver 在买方未收到 payload 时尝试恢复真实二进制。
 type PayloadResolver interface {
-	RecoverPayload(context.Context, *bitfspb.HashGetTicketV1) ([]byte, error)
+	RecoverPayload(context.Context, *core.HashGetTicket) ([]byte, error)
 }
-
-// DecisionSigner 为 pool 层仲裁决定摘要生成仲裁方签名。
 type DecisionSigner func(context.Context, [32]byte) ([]byte, error)
-
-// CloseTxSigner 为第一阶段 close 交易 sighash 生成仲裁方签名。
 type CloseTxSigner func(context.Context, [32]byte) ([]byte, error)
 
-// Config 是 demo 仲裁服务的可测试运行配置。
 type Config struct {
 	Now            func() time.Time
 	TicketVerifier core.TicketSignatureVerifier
@@ -50,18 +40,13 @@ type Config struct {
 	CloseTxSigner  CloseTxSigner
 }
 
-// Dependencies 是 demo 仲裁服务接入运行时的外部依赖。
 type Dependencies struct {
 	Pool            PoolClient
 	SessionResolver SessionResolver
 	PayloadResolver PayloadResolver
 }
 
-// Service 是 BitfsArbitrationService 的内存实现。
-// 它只演示自动证据验证和正式 pool 收尾，不提供持久化、钱包或链广播。
 type Service struct {
-	bitfspb.UnimplementedBitfsArbitrationServiceServer
-
 	pool            PoolClient
 	sessionResolver SessionResolver
 	payloadResolver PayloadResolver
@@ -69,12 +54,10 @@ type Service struct {
 	ticketVerifier  core.TicketSignatureVerifier
 	decisionSigner  DecisionSigner
 	closeTxSigner   CloseTxSigner
-
-	mu      sync.RWMutex
-	records map[string]*bitfspb.ArbitrationRecordV1
+	mu              sync.RWMutex
+	records         map[string]*core.ArbitrationRecord
 }
 
-// New 构造最小仲裁 demo 服务。
 func New(config Config, dependencies Dependencies) (*Service, error) {
 	if dependencies.Pool == nil {
 		return nil, errors.New("pool client is required")
@@ -94,165 +77,128 @@ func New(config Config, dependencies Dependencies) (*Service, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Service{
-		pool:            dependencies.Pool,
-		sessionResolver: dependencies.SessionResolver,
-		payloadResolver: dependencies.PayloadResolver,
-		now:             config.Now,
-		ticketVerifier:  config.TicketVerifier,
-		decisionSigner:  config.DecisionSigner,
-		closeTxSigner:   config.CloseTxSigner,
-		records:         make(map[string]*bitfspb.ArbitrationRecordV1),
-	}, nil
+	return &Service{pool: dependencies.Pool, sessionResolver: dependencies.SessionResolver, payloadResolver: dependencies.PayloadResolver, now: config.Now, ticketVerifier: config.TicketVerifier, decisionSigner: config.DecisionSigner, closeTxSigner: config.CloseTxSigner, records: make(map[string]*core.ArbitrationRecord)}, nil
 }
 
-// SubmitClaim 实现自动仲裁：验票、验证或恢复 payload、形成裁决并完成 pool 两阶段收尾。
-func (service *Service) SubmitClaim(ctx context.Context, request *bitfspb.SubmitArbitrationClaimRequestV1) (*bitfspb.SubmitArbitrationClaimResponseV1, error) {
+// SubmitClaim is the application handler for an ArbitrationClaim packet.
+// A network adapter publishes the returned ArbitrationDecision as a new packet.
+func (service *Service) SubmitClaim(ctx context.Context, claim *core.ArbitrationClaim) (*core.ArbitrationDecision, error) {
 	if service == nil {
 		return nil, errors.New("arbiter demo service is required")
 	}
-	if request == nil || request.GetClaim() == nil || request.GetClaim().GetTicket() == nil {
-		return submitError("invalid_claim", "arbitration claim and ticket are required"), nil
+	if claim == nil || claim.Ticket == nil {
+		return nil, errors.New("arbitration claim and ticket are required")
 	}
-	claim := request.GetClaim()
 	evidence, err := core.ValidateArbitrationClaim(claim, service.now(), service.ticketVerifier)
 	if err != nil {
-		return submitError("invalid_evidence", err.Error()), nil
+		return nil, fmt.Errorf("invalid evidence: %w", err)
 	}
 	if !evidence.PayloadVerified && service.payloadResolver != nil {
-		recoveredPayload, recoverErr := service.payloadResolver.RecoverPayload(ctx, claim.GetTicket())
+		payload, recoverErr := service.payloadResolver.RecoverPayload(ctx, claim.Ticket)
 		if recoverErr == nil {
-			claim = &bitfspb.ArbitrationClaimV1{
-				Ticket:       claim.GetTicket(),
-				Payload:      recoveredPayload,
-				ClaimantRole: claim.GetClaimantRole(),
-			}
+			claim = &core.ArbitrationClaim{Ticket: claim.Ticket, Payload: payload, ClaimantRole: claim.ClaimantRole}
 			evidence, err = core.ValidateArbitrationClaim(claim, service.now(), service.ticketVerifier)
 			if err != nil {
-				return submitError("recovered_payload_invalid", err.Error()), nil
+				return nil, fmt.Errorf("recovered payload invalid: %w", err)
 			}
 		}
 	}
-	poolRef, err := service.sessionResolver.ResolveSessionPool(ctx, claim.GetTicket().GetSessionId(), claim.GetTicket().GetSellerPubkey())
+	poolRef, err := service.sessionResolver.ResolveSessionPool(ctx, claim.Ticket.SessionID, claim.Ticket.SellerPubkey)
 	if err != nil {
-		return submitError("session_pool_not_found", err.Error()), nil
+		return nil, fmt.Errorf("session pool not found: %w", err)
 	}
-	if poolRef.SpendTxID == "" {
-		return submitError("session_pool_not_found", "resolved spend_txid is empty"), nil
+	if len(poolRef.SpendTxID) != 32 {
+		return nil, errors.New("resolved spend_txid is empty")
 	}
 	decision, err := service.buildDecision(claim, evidence, poolRef)
 	if err != nil {
-		return submitError("decision_invalid", err.Error()), nil
+		return nil, err
 	}
 	if err := service.settle(ctx, poolRef.SpendTxID, decision); err != nil {
-		return submitError("pool_settlement_failed", err.Error()), nil
+		return nil, err
 	}
-	state := bitfspb.ArbitrationStateV1_ARBITRATION_STATE_CLOSED
-	if !decision.GetApproved() {
-		state = bitfspb.ArbitrationStateV1_ARBITRATION_STATE_REJECTED
+	state := core.ArbitrationStateClosed
+	if !decision.Approved {
+		state = core.ArbitrationStateRejected
 	}
-	nowUnix := service.now().Unix()
-	record := &bitfspb.ArbitrationRecordV1{
-		SessionId:     decision.GetSessionId(),
-		Sequence:      decision.GetSequence(),
-		State:         state,
-		Claim:         claim,
-		Decision:      decision,
-		CreatedAtUnix: nowUnix,
-		UpdatedAtUnix: nowUnix,
-	}
-	service.store(record)
-	return &bitfspb.SubmitArbitrationClaimResponseV1{Submitted: true, Decision: decision}, nil
+	now := service.now().Unix()
+	service.store(&core.ArbitrationRecord{SessionID: decision.SessionID, Sequence: decision.Sequence, State: state, Claim: claim, Decision: decision, CreatedAtUnix: now, UpdatedAtUnix: now})
+	return decision, nil
 }
 
-// GetArbitration 返回一个指定会话和 sequence 的仲裁记录。
-func (service *Service) GetArbitration(_ context.Context, request *bitfspb.GetArbitrationRequestV1) (*bitfspb.GetArbitrationResponseV1, error) {
+func (service *Service) GetArbitration(sessionID string, sequence uint64) (*core.ArbitrationRecord, error) {
 	if service == nil {
 		return nil, errors.New("arbiter demo service is required")
 	}
-	if request == nil || request.GetSessionId() == "" {
-		return &bitfspb.GetArbitrationResponseV1{Error: &bitfspb.BitfsErrorV1{Code: "invalid_request", Message: "session_id is required"}}, nil
+	if sessionID == "" {
+		return nil, errors.New("session_id is required")
 	}
 	service.mu.RLock()
-	record := service.records[recordKey(request.GetSessionId(), request.GetSequence())]
+	record := service.records[recordKey(sessionID, sequence)]
 	service.mu.RUnlock()
 	if record == nil {
-		return &bitfspb.GetArbitrationResponseV1{Error: &bitfspb.BitfsErrorV1{Code: "not_found", Message: "arbitration record not found"}}, nil
+		return nil, errors.New("arbitration record not found")
 	}
-	return &bitfspb.GetArbitrationResponseV1{Record: record}, nil
+	return record, nil
 }
 
-// ListArbitrations 返回一个会话下的全部内存仲裁记录。
-func (service *Service) ListArbitrations(_ context.Context, request *bitfspb.ListArbitrationsRequestV1) (*bitfspb.ListArbitrationsResponseV1, error) {
+func (service *Service) ListArbitrations(sessionID string) ([]*core.ArbitrationRecord, error) {
 	if service == nil {
 		return nil, errors.New("arbiter demo service is required")
 	}
-	if request == nil || request.GetSessionId() == "" {
-		return &bitfspb.ListArbitrationsResponseV1{Error: &bitfspb.BitfsErrorV1{Code: "invalid_request", Message: "session_id is required"}}, nil
+	if sessionID == "" {
+		return nil, errors.New("session_id is required")
 	}
 	service.mu.RLock()
-	items := make([]*bitfspb.ArbitrationRecordV1, 0)
+	defer service.mu.RUnlock()
+	items := make([]*core.ArbitrationRecord, 0)
 	for _, record := range service.records {
-		if record.GetSessionId() == request.GetSessionId() {
+		if record.SessionID == sessionID {
 			items = append(items, record)
 		}
 	}
-	service.mu.RUnlock()
-	return &bitfspb.ListArbitrationsResponseV1{Items: items}, nil
+	return items, nil
 }
 
-// buildDecision 把已验证证据转换为业务裁决。
-func (service *Service) buildDecision(claim *bitfspb.ArbitrationClaimV1, evidence *core.ArbitrationEvidence, poolRef SessionPoolRef) (*bitfspb.ArbitrationDecisionV1, error) {
-	if claim == nil || claim.GetTicket() == nil || evidence == nil {
+func (service *Service) buildDecision(claim *core.ArbitrationClaim, evidence *core.ArbitrationEvidence, poolRef SessionPoolRef) (*core.ArbitrationDecision, error) {
+	if claim == nil || claim.Ticket == nil || evidence == nil {
 		return nil, errors.New("claim evidence is required")
 	}
-	decision := &bitfspb.ArbitrationDecisionV1{
-		SessionId:    claim.GetTicket().GetSessionId(),
-		Sequence:     claim.GetTicket().GetSequence(),
-		TicketId:     evidence.TicketID,
-		SellerPubkey: claim.GetTicket().GetSellerPubkey(),
-	}
+	decision := &core.ArbitrationDecision{SessionID: claim.Ticket.SessionID, Sequence: claim.Ticket.Sequence, TicketID: evidence.TicketID, SellerPubkey: claim.Ticket.SellerPubkey}
 	if !evidence.PayloadVerified {
-		decision.Approved = false
 		decision.ReasonCode = "payload_unavailable"
 		return decision, nil
 	}
-	if poolRef.CurrentSellerAmountSat > math.MaxUint64-claim.GetTicket().GetPriceSat() {
+	if poolRef.CurrentSellerAmountSat > math.MaxUint64-claim.Ticket.PriceSat {
 		return nil, errors.New("final payout overflows uint64")
 	}
-	decision.Approved = true
-	decision.ReasonCode = "payload_verified"
-	decision.FinalPayoutSat = poolRef.CurrentSellerAmountSat + claim.GetTicket().GetPriceSat()
-	if claim.GetClaimantRole() == bitfspb.ArbitrationClaimantRoleV1_ARBITRATION_CLAIMANT_ROLE_BUYER {
-		decision.RecoveredPayload = claim.GetPayload()
+	decision.Approved, decision.ReasonCode = true, "payload_verified"
+	decision.FinalPayoutSat = poolRef.CurrentSellerAmountSat + claim.Ticket.PriceSat
+	if claim.ClaimantRole == core.ArbitrationClaimantRoleBuyer {
+		decision.RecoveredPayload = claim.Payload
 	}
 	return decision, nil
 }
 
-// settle 调用正式 pool 仲裁接口，完成两阶段 close。
-func (service *Service) settle(ctx context.Context, spendTxID string, decision *bitfspb.ArbitrationDecisionV1) error {
-	digest := core.PoolArbitrationSigningDigest(spendTxID, decision.GetApproved(), decision.GetReasonCode(), decision.GetFinalPayoutSat())
+func (service *Service) settle(ctx context.Context, spendTxID []byte, decision *core.ArbitrationDecision) error {
+	request := pool.NewArbitrationRequest(spendTxID, decision.Approved, decision.ReasonCode, []byte{1}, decision.FinalPayoutSat)
+	digest, err := pool.ArbitrationSigningDigest(request)
+	if err != nil {
+		return err
+	}
 	decisionSignature, err := service.decisionSigner(ctx, digest)
 	if err != nil {
 		return fmt.Errorf("sign pool decision: %w", err)
 	}
-	first, err := service.pool.ArbitrateSessionPool(ctx, &pool2of3pb.ArbitrateSessionPoolRequestV1{
-		SpendTxid:        spendTxID,
-		Approved:         decision.GetApproved(),
-		Reason:           decision.GetReasonCode(),
-		ArbiterSignature: decisionSignature,
-		FinalPayoutSat:   decision.GetFinalPayoutSat(),
-	})
+	request.ArbiterSignature = decisionSignature
+	first, err := service.pool.StartArbitration(ctx, request)
 	if err != nil {
 		return fmt.Errorf("start pool arbitration: %w", err)
 	}
-	if !first.GetSuccess() || first.GetError() != nil {
+	if first == nil {
 		return errors.New("pool arbitration first phase was rejected")
 	}
-	if !first.GetNeedsArbiterSignature() {
-		return nil
-	}
-	sighash, err := decodeSighash(first.GetClosingTxSighashHex())
+	sighash, err := decodeSighash(first.CloseSighash)
 	if err != nil {
 		return err
 	}
@@ -260,47 +206,27 @@ func (service *Service) settle(ctx context.Context, spendTxID string, decision *
 	if err != nil {
 		return fmt.Errorf("sign pool close transaction: %w", err)
 	}
-	second, err := service.pool.ArbitrateSessionPool(ctx, &pool2of3pb.ArbitrateSessionPoolRequestV1{
-		SpendTxid:                 spendTxID,
-		Approved:                  decision.GetApproved(),
-		Reason:                    decision.GetReasonCode(),
-		ArbiterSignature:          decisionSignature,
-		FinalPayoutSat:            decision.GetFinalPayoutSat(),
-		ArbiterSignatureOnCloseTx: closeSignature,
-	})
+	second, err := service.pool.CompleteArbitration(ctx, &pool.CloseSignature{Version: pool.MajorVersion, MessageKind: pool.KindCloseSignature, SpendTxID: spendTxID, ArbitrationID: first.ArbitrationID, ArbiterSignatureOnCloseTransaction: closeSignature})
 	if err != nil {
 		return fmt.Errorf("finish pool arbitration: %w", err)
 	}
-	if !second.GetSuccess() || second.GetError() != nil || second.GetClosingTxHex() == "" {
+	if second == nil || len(second.ClosingTransaction) == 0 {
 		return errors.New("pool arbitration second phase was rejected")
 	}
 	return nil
 }
 
-// store 保存一条仲裁记录。
-func (service *Service) store(record *bitfspb.ArbitrationRecordV1) {
+func (service *Service) store(record *core.ArbitrationRecord) {
 	service.mu.Lock()
-	service.records[recordKey(record.GetSessionId(), record.GetSequence())] = record
+	service.records[recordKey(record.SessionID, record.Sequence)] = record
 	service.mu.Unlock()
 }
-
-// recordKey 生成内存记录的复合键。
 func recordKey(sessionID string, sequence uint64) string {
 	return fmt.Sprintf("%s\x00%d", sessionID, sequence)
 }
 
-// submitError 构造不产生裁决的标准申诉响应。
-func submitError(code string, message string) *bitfspb.SubmitArbitrationClaimResponseV1 {
-	return &bitfspb.SubmitArbitrationClaimResponseV1{Error: &bitfspb.BitfsErrorV1{Code: code, Message: message}}
-}
-
-// decodeSighash 把 pool 第一阶段返回的 32 字节十六进制 sighash 解析为摘要。
-func decodeSighash(value string) ([32]byte, error) {
+func decodeSighash(raw []byte) ([32]byte, error) {
 	var sighash [32]byte
-	raw, err := hex.DecodeString(value)
-	if err != nil {
-		return sighash, fmt.Errorf("decode closing transaction sighash: %w", err)
-	}
 	if len(raw) != len(sighash) {
 		return sighash, fmt.Errorf("closing transaction sighash length must be %d, got %d", len(sighash), len(raw))
 	}

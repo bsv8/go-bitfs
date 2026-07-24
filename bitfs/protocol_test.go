@@ -6,8 +6,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	bitfspb "github.com/bsv8/go-bitfs/proto/bitfspb"
 )
 
 // TestSeedBytesAreOnlyConcatenatedHashes 验证 seed 不含 BSE1 头或任何元数据。
@@ -57,9 +55,9 @@ func TestValidateDeliveryUsesRawFinalBlockHash(t *testing.T) {
 	payload := []byte("tail")
 	contentHash := sha256.Sum256(payload)
 	ticket := testTicket(contentHash[:], 0, uint64(len(payload)))
-	delivery := &bitfspb.HashDeliveryV1{
-		SessionId:   ticket.GetSessionId(),
-		Sequence:    ticket.GetSequence(),
+	delivery := &HashDelivery{
+		SessionID:   ticket.SessionID,
+		Sequence:    ticket.Sequence,
 		ContentHash: contentHash[:],
 		Payload:     payload,
 	}
@@ -73,9 +71,9 @@ func TestValidateArbitrationClaimRequiresSellerPayload(t *testing.T) {
 	contentHash := sha256.Sum256([]byte("block"))
 	ticket := testTicket(contentHash[:], 0, 5)
 	ticket.BuyerSignature = []byte{0x01}
-	claim := &bitfspb.ArbitrationClaimV1{
+	claim := &ArbitrationClaim{
 		Ticket:       ticket,
-		ClaimantRole: bitfspb.ArbitrationClaimantRoleV1_ARBITRATION_CLAIMANT_ROLE_SELLER,
+		ClaimantRole: ArbitrationClaimantRoleSeller,
 	}
 	_, err := ValidateArbitrationClaim(claim, time.Unix(100, 0), testVerifier)
 	if err == nil || err.Error() != "seller arbitration claim payload is required" {
@@ -89,10 +87,10 @@ func TestValidateArbitrationClaimAcceptsVerifiedSellerEvidence(t *testing.T) {
 	contentHash := sha256.Sum256(payload)
 	ticket := testTicket(contentHash[:], 0, uint64(len(payload)))
 	ticket.BuyerSignature = []byte{0x01}
-	claim := &bitfspb.ArbitrationClaimV1{
+	claim := &ArbitrationClaim{
 		Ticket:       ticket,
 		Payload:      payload,
-		ClaimantRole: bitfspb.ArbitrationClaimantRoleV1_ARBITRATION_CLAIMANT_ROLE_SELLER,
+		ClaimantRole: ArbitrationClaimantRoleSeller,
 	}
 	evidence, err := ValidateArbitrationClaim(claim, time.Unix(100, 0), testVerifier)
 	if err != nil {
@@ -104,10 +102,10 @@ func TestValidateArbitrationClaimAcceptsVerifiedSellerEvidence(t *testing.T) {
 }
 
 // testTicket 构造满足基础结构约束的 block 票据。
-func testTicket(contentHash []byte, contentIndex int64, expectedSize uint64) *bitfspb.HashGetTicketV1 {
+func testTicket(contentHash []byte, contentIndex int64, expectedSize uint64) *HashGetTicket {
 	rootHash := bytes.Repeat([]byte{0x44}, sha256.Size)
-	return &bitfspb.HashGetTicketV1{
-		SessionId:     "session-1",
+	return &HashGetTicket{
+		SessionID:     "session-1",
 		Sequence:      1,
 		RootSeedHash:  rootHash,
 		ContentHash:   contentHash,

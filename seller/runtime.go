@@ -1,4 +1,4 @@
-// Package seller 实现 BitFS 卖方的最小标准交易流程。
+// Package seller implements seller-side BitFS validation and delivery without binding it to a wire transport.
 package seller
 
 import (
@@ -8,39 +8,30 @@ import (
 	"time"
 
 	core "github.com/bsv8/go-bitfs/bitfs"
-	bitfspb "github.com/bsv8/go-bitfs/proto/bitfspb"
 )
 
-// BuyerClient 是卖方向 buyer 主动提交报价的最小客户端抽象。
-type BuyerClient interface {
-	SubmitFileQuote(context.Context, *bitfspb.FileQuoteV1) (*bitfspb.SubmitFileQuoteResponseV1, error)
-}
+// QuoteReceiver is a local workflow port implemented by an asynchronous transport adapter.
+type QuoteReceiver interface{ ReceiveQuote(*core.FileQuote) error }
 
-// PayloadProvider 是 seller 从本地内容系统读取真实二进制的抽象。
 type PayloadProvider interface {
-	PayloadForTicket(context.Context, *bitfspb.HashGetTicketV1) ([]byte, error)
+	PayloadForTicket(context.Context, *core.HashGetTicket) ([]byte, error)
 }
 
-// Config 是 seller Runtime 的可测试运行配置。
 type Config struct {
 	Now      func() time.Time
 	Verifier core.TicketSignatureVerifier
 }
 
-// Runtime 同时承担 seller 的报价客户端和交付服务端。
 type Runtime struct {
-	bitfspb.UnimplementedBitfsSellerServiceServer
-
-	buyer    BuyerClient
+	buyer    QuoteReceiver
 	provider PayloadProvider
 	now      func() time.Time
 	verifier core.TicketSignatureVerifier
 }
 
-// New 构造 seller Runtime。buyer 与 provider 分别提供报价目标和文件真值。
-func New(config Config, buyer BuyerClient, provider PayloadProvider) (*Runtime, error) {
+func New(config Config, buyer QuoteReceiver, provider PayloadProvider) (*Runtime, error) {
 	if buyer == nil {
-		return nil, errors.New("buyer client is required")
+		return nil, errors.New("buyer quote receiver is required")
 	}
 	if provider == nil {
 		return nil, errors.New("payload provider is required")
@@ -54,26 +45,22 @@ func New(config Config, buyer BuyerClient, provider PayloadProvider) (*Runtime, 
 	return &Runtime{buyer: buyer, provider: provider, now: config.Now, verifier: config.Verifier}, nil
 }
 
-// Offer 主动向 buyer 服务端提交一份有效的文件级报价。
-func (runtime *Runtime) Offer(ctx context.Context, quote *bitfspb.FileQuoteV1) error {
+// Offer validates a quote before handing it to the selected local transport adapter.
+func (runtime *Runtime) Offer(_ context.Context, quote *core.FileQuote) error {
 	if runtime == nil {
 		return errors.New("seller runtime is required")
 	}
 	if err := core.ValidateFileQuoteAt(quote, runtime.now()); err != nil {
 		return err
 	}
-	response, err := runtime.buyer.SubmitFileQuote(ctx, quote)
-	if err != nil {
-		return fmt.Errorf("submit file quote: %w", err)
-	}
-	if !response.GetAccepted() || response.GetError() != nil {
-		return errors.New("buyer rejected file quote")
+	if err := runtime.buyer.ReceiveQuote(quote); err != nil {
+		return fmt.Errorf("receive file quote: %w", err)
 	}
 	return nil
 }
 
-// Deliver 实现 seller 服务端：验票后从内容系统读取并返回真实 payload。
-func (runtime *Runtime) Deliver(ctx context.Context, ticket *bitfspb.HashGetTicketV1) (*bitfspb.HashDeliveryV1, error) {
+// Deliver validates a ticket and creates the corresponding HashDelivery business message.
+func (runtime *Runtime) Deliver(ctx context.Context, ticket *core.HashGetTicket) (*core.HashDelivery, error) {
 	if runtime == nil {
 		return nil, errors.New("seller runtime is required")
 	}
@@ -87,12 +74,7 @@ func (runtime *Runtime) Deliver(ctx context.Context, ticket *bitfspb.HashGetTick
 	if err != nil {
 		return nil, fmt.Errorf("load payload: %w", err)
 	}
-	delivery := &bitfspb.HashDeliveryV1{
-		SessionId:   ticket.GetSessionId(),
-		Sequence:    ticket.GetSequence(),
-		ContentHash: ticket.GetContentHash(),
-		Payload:     payload,
-	}
+	delivery := &core.HashDelivery{SessionID: ticket.SessionID, Sequence: ticket.Sequence, ContentHash: ticket.ContentHash, Payload: payload}
 	if err := core.ValidateDelivery(ticket, delivery); err != nil {
 		return nil, err
 	}

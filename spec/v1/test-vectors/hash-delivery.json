@@ -1,0 +1,5 @@
+{
+  "description": "HashDelivery with session_id=s, sequence=7, content_hash=000102...1f, payload=010203",
+  "cbor_hex": "8601036173075820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f43010203",
+  "packet_id_sha256": "7613600cd1068d3762bb09c332daa856dff9c91fdb5b88a29d0e9ca09fae030f"
+}

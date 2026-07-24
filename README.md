@@ -2,7 +2,9 @@
 
 BitFS v1 的 Go 协议真值库，覆盖文件交换、自动仲裁与 2-of-3 费用池结算。
 
-正式规范见 [docs](docs/)；所有 wire 对象以 `proto/` 为准。生成 proto 后执行：
+正式 wire schema 位于 [`spec/v1/bitfs.cddl`](spec/v1/bitfs.cddl)，并使用严格 deterministic CBOR 编码；业务语义位于 [`spec/v1/protocol.md`](spec/v1/protocol.md)。BitFS 不定义发现或网络传输，队列、WebSocket、TCP、libp2p 等适配器只负责投递同一组 CBOR bytes。
+
+执行测试：
 
 ```bash
 go test ./...
@@ -10,8 +12,8 @@ go test ./...
 
 目录职责：
 
-- `bitfs/`：协议真值、seed、哈希、票据签名与证据校验；
-- `buyer/`：报价服务端、取货与付款客户端；
-- `seller/`：主动报价客户端、票据与交付服务端；
-- `arbiterclient/`：买卖双方使用的正式仲裁客户端；
-- `demo/arbiter/`：只用于测试和标准演示的内存仲裁服务端，能走完整两阶段 pool 收尾。
+- `bitfs/`：CBOR 报文、seed、哈希、票据签名与证据校验；
+- `buyer/`、`seller/`：不绑定网络的买卖工作流；
+- `arbiterclient/`：仲裁工作流的本地端口包装；
+- `demo/arbiter/`：只用于测试和标准演示的内存仲裁处理器；
+- `settlement/`：独立的 CBOR 结算协议；当前结算机制使用 2-of-3。

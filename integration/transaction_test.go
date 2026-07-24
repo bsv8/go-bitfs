@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -13,9 +12,8 @@ import (
 	core "github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/arbiter"
-	bitfspb "github.com/bsv8/go-bitfs/proto/bitfspb"
-	pool2of3pb "github.com/bsv8/go-bitfs/proto/pool2of3pb"
 	"github.com/bsv8/go-bitfs/seller"
+	settlement "github.com/bsv8/go-bitfs/settlement"
 )
 
 // TestBuyerSellerTransaction 验证报价、验票、交付、验货和付款顺序。
@@ -34,7 +32,7 @@ func TestBuyerSellerTransaction(t *testing.T) {
 		t.Fatalf("seller.New() error = %v", err)
 	}
 	sellerProxy.runtime = sellerRuntime
-	quote := &bitfspb.FileQuoteV1{
+	quote := &core.FileQuote{
 		SeedHash:            bytes.Repeat([]byte{0x01}, sha256.Size),
 		SeedPriceSat:        1,
 		BlockPriceSat:       2,
@@ -52,11 +50,11 @@ func TestBuyerSellerTransaction(t *testing.T) {
 		t.Fatal("buyer did not retain seller quote")
 	}
 	ticket := transactionTicket(contentHash[:], uint64(len(payload)))
-	delivery, err := buyerRuntime.Purchase(context.Background(), "spend-1", ticket)
+	delivery, err := buyerRuntime.Purchase(context.Background(), bytes.Repeat([]byte{0x09}, sha256.Size), ticket)
 	if err != nil {
 		t.Fatalf("Purchase() error = %v", err)
 	}
-	if !bytes.Equal(delivery.GetPayload(), payload) {
+	if !bytes.Equal(delivery.Payload, payload) {
 		t.Fatal("buyer received an unexpected payload")
 	}
 	if !pools.prepared || !pools.committed {
@@ -83,31 +81,29 @@ func TestArbiterDemoSellerClaim(t *testing.T) {
 		t.Fatalf("arbiter.New() error = %v", err)
 	}
 	ticket := transactionTicket(contentHash[:], uint64(len(payload)))
-	response, err := service.SubmitClaim(context.Background(), &bitfspb.SubmitArbitrationClaimRequestV1{
-		Claim: &bitfspb.ArbitrationClaimV1{
-			Ticket:       ticket,
-			Payload:      payload,
-			ClaimantRole: bitfspb.ArbitrationClaimantRoleV1_ARBITRATION_CLAIMANT_ROLE_SELLER,
-		},
+	decision, err := service.SubmitClaim(context.Background(), &core.ArbitrationClaim{
+		Ticket:       ticket,
+		Payload:      payload,
+		ClaimantRole: core.ArbitrationClaimantRoleSeller,
 	})
 	if err != nil {
 		t.Fatalf("SubmitClaim() error = %v", err)
 	}
-	if !response.GetSubmitted() || !response.GetDecision().GetApproved() {
-		t.Fatalf("seller claim was not approved: %#v", response)
+	if !decision.Approved {
+		t.Fatalf("seller claim was not approved: %#v", decision)
 	}
-	if response.GetDecision().GetFinalPayoutSat() != 12 {
-		t.Fatalf("final payout = %d, want 12", response.GetDecision().GetFinalPayoutSat())
+	if decision.FinalPayoutSat != 12 {
+		t.Fatalf("final payout = %d, want 12", decision.FinalPayoutSat)
 	}
 	if pools.calls != 2 || !pools.closed {
 		t.Fatal("arbiter demo did not complete two-phase pool close")
 	}
-	record, err := service.GetArbitration(context.Background(), &bitfspb.GetArbitrationRequestV1{SessionId: ticket.GetSessionId(), Sequence: ticket.GetSequence()})
+	record, err := service.GetArbitration(ticket.SessionID, ticket.Sequence)
 	if err != nil {
 		t.Fatalf("GetArbitration() error = %v", err)
 	}
-	if record.GetRecord().GetState() != bitfspb.ArbitrationStateV1_ARBITRATION_STATE_CLOSED {
-		t.Fatalf("arbitration state = %v, want closed", record.GetRecord().GetState())
+	if record.State != core.ArbitrationStateClosed {
+		t.Fatalf("arbitration state = %v, want closed", record.State)
 	}
 }
 
@@ -115,7 +111,7 @@ func TestArbiterDemoSellerClaim(t *testing.T) {
 type staticPayloadProvider struct{ payload []byte }
 
 // PayloadForTicket 实现 seller.PayloadProvider。
-func (provider staticPayloadProvider) PayloadForTicket(_ context.Context, _ *bitfspb.HashGetTicketV1) ([]byte, error) {
+func (provider staticPayloadProvider) PayloadForTicket(_ context.Context, _ *core.HashGetTicket) ([]byte, error) {
 	return provider.payload, nil
 }
 
@@ -123,7 +119,7 @@ func (provider staticPayloadProvider) PayloadForTicket(_ context.Context, _ *bit
 type sellerDeliveryProxy struct{ runtime *seller.Runtime }
 
 // Deliver 把 buyer 请求转发到实际 seller 服务端。
-func (proxy *sellerDeliveryProxy) Deliver(ctx context.Context, ticket *bitfspb.HashGetTicketV1) (*bitfspb.HashDeliveryV1, error) {
+func (proxy *sellerDeliveryProxy) Deliver(ctx context.Context, ticket *core.HashGetTicket) (*core.HashDelivery, error) {
 	if proxy.runtime == nil {
 		return nil, errors.New("seller runtime is not configured")
 	}
@@ -137,21 +133,21 @@ type transactionPool struct {
 }
 
 // PrepareTicketPayment 实现 buyer.PoolClient。
-func (pool *transactionPool) PrepareTicketPayment(_ context.Context, request *pool2of3pb.PrepareTicketPaymentRequestV1) (*pool2of3pb.PrepareTicketPaymentResponseV1, error) {
-	if request.GetSpendTxid() == "" || request.GetTicket() == nil {
+func (pool *transactionPool) PrepareTicketPayment(_ context.Context, request *settlement.PaymentPrepare) (*settlement.PaymentPrepared, error) {
+	if request == nil || len(request.Ticket.SpendTxID) != sha256.Size {
 		return nil, errors.New("invalid prepare request")
 	}
 	pool.prepared = true
-	return &pool2of3pb.PrepareTicketPaymentResponseV1{ProposalId: "proposal-1"}, nil
+	return &settlement.PaymentPrepared{Version: settlement.MajorVersion, MessageKind: settlement.KindPaymentPrepared, TicketID: request.Ticket.TicketID, ProposalID: bytes.Repeat([]byte{5}, sha256.Size)}, nil
 }
 
 // CommitTicketPayment 实现 buyer.PoolClient。
-func (pool *transactionPool) CommitTicketPayment(_ context.Context, request *pool2of3pb.CommitTicketPaymentRequestV1) (*pool2of3pb.CommitTicketPaymentResponseV1, error) {
-	if request.GetProposalId() != "proposal-1" {
+func (pool *transactionPool) CommitTicketPayment(_ context.Context, request *settlement.PaymentCommit) (*settlement.PaymentCommitted, error) {
+	if request == nil || len(request.ProposalID) != sha256.Size {
 		return nil, errors.New("unexpected proposal")
 	}
 	pool.committed = true
-	return &pool2of3pb.CommitTicketPaymentResponseV1{Success: true, Result: pool2of3pb.PoolUpdateTxResultV1_POOL_UPDATE_TX_RESULT_COMMITTED}, nil
+	return &settlement.PaymentCommitted{Version: settlement.MajorVersion, MessageKind: settlement.KindPaymentCommitted, TicketID: request.Ticket.TicketID}, nil
 }
 
 // staticSessionResolver 返回仲裁 demo 的固定业务会话映射。
@@ -159,7 +155,7 @@ type staticSessionResolver struct{}
 
 // ResolveSessionPool 实现 arbiter.SessionResolver。
 func (staticSessionResolver) ResolveSessionPool(_ context.Context, _ string, _ []byte) (arbiter.SessionPoolRef, error) {
-	return arbiter.SessionPoolRef{SpendTxID: "spend-1", CurrentSellerAmountSat: 7}, nil
+	return arbiter.SessionPoolRef{SpendTxID: bytes.Repeat([]byte{9}, sha256.Size), CurrentSellerAmountSat: 7}, nil
 }
 
 // arbitrationPool 是两阶段仲裁收尾的费用池测试替身。
@@ -169,29 +165,27 @@ type arbitrationPool struct {
 }
 
 // ArbitrateSessionPool 实现 arbiter.PoolClient。
-func (pool *arbitrationPool) ArbitrateSessionPool(_ context.Context, request *pool2of3pb.ArbitrateSessionPoolRequestV1) (*pool2of3pb.ArbitrateSessionPoolResponseV1, error) {
+func (pool *arbitrationPool) StartArbitration(_ context.Context, request *settlement.ArbitrationRequest) (*settlement.CloseSignatureRequest, error) {
 	pool.calls++
-	if request.GetSpendTxid() != "spend-1" || !request.GetApproved() || request.GetFinalPayoutSat() != 12 {
+	if request == nil || len(request.SpendTxID) != sha256.Size || !request.Approved || request.FinalPayoutSat != 12 {
 		return nil, errors.New("unexpected arbitration request")
 	}
-	if pool.calls == 1 {
-		return &pool2of3pb.ArbitrateSessionPoolResponseV1{
-			Success:               true,
-			NeedsArbiterSignature: true,
-			ClosingTxSighashHex:   hex.EncodeToString(bytes.Repeat([]byte{0x09}, sha256.Size)),
-		}, nil
-	}
-	if len(request.GetArbiterSignatureOnCloseTx()) == 0 {
+	return &settlement.CloseSignatureRequest{Version: settlement.MajorVersion, MessageKind: settlement.KindCloseSignatureRequest, SpendTxID: request.SpendTxID, ArbitrationID: bytes.Repeat([]byte{8}, sha256.Size), UnsignedCloseTransaction: []byte{0xde, 0xad}, CloseSighash: bytes.Repeat([]byte{9}, sha256.Size)}, nil
+}
+
+func (pool *arbitrationPool) CompleteArbitration(_ context.Context, request *settlement.CloseSignature) (*settlement.PoolArbitrated, error) {
+	pool.calls++
+	if request == nil || len(request.ArbiterSignatureOnCloseTransaction) == 0 {
 		return nil, errors.New("close signature is required")
 	}
 	pool.closed = true
-	return &pool2of3pb.ArbitrateSessionPoolResponseV1{Success: true, ClosingTxHex: "deadbeef"}, nil
+	return &settlement.PoolArbitrated{Version: settlement.MajorVersion, MessageKind: settlement.KindPoolArbitrated, SpendTxID: request.SpendTxID, ArbitrationID: request.ArbitrationID, ClosingTransactionID: bytes.Repeat([]byte{7}, sha256.Size), ClosingTransaction: []byte{0xde, 0xad, 0xbe, 0xef}}, nil
 }
 
 // transactionTicket 构造可被卖方与仲裁 demo 验证的 block 票据。
-func transactionTicket(contentHash []byte, expectedSize uint64) *bitfspb.HashGetTicketV1 {
-	return &bitfspb.HashGetTicketV1{
-		SessionId:      "session-1",
+func transactionTicket(contentHash []byte, expectedSize uint64) *core.HashGetTicket {
+	return &core.HashGetTicket{
+		SessionID:      "session-1",
 		Sequence:       1,
 		RootSeedHash:   bytes.Repeat([]byte{0x01}, sha256.Size),
 		ContentHash:    contentHash,

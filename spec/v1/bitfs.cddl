@@ -1,0 +1,24 @@
+; BitFS CBOR wire schema, major version 1.
+; Every top-level item is a definite-length CBOR array.  Array positions are
+; normative: V1 never appends, removes, or reorders positions.
+
+bitfs-message = file-quote / hash-get-ticket / hash-delivery / arbitration-claim / arbitration-decision / arbitration-record
+
+file-quote = [1, 1, seed-hash, uint, uint, uint, uint, filename, int, uint, pubkey, * pubkey]
+hash-get-ticket = [1, 2, session-id, uint, seed-hash, content-hash, int, uint, uint, pubkey, pubkey, int, signature]
+hash-delivery = [1, 3, session-id, uint, content-hash, payload]
+arbitration-claim = [1, 4, hash-get-ticket, payload, claimant-role]
+arbitration-decision = [1, 5, session-id, uint, ticket-id, bool, reason-code, uint, pubkey, payload]
+arbitration-record = [1, 6, session-id, uint, arbitration-state, arbitration-claim, arbitration-decision, int, int, reason-code]
+
+seed-hash = bstr .size 32
+content-hash = bstr .size 32
+ticket-id = bstr .size 32
+session-id = tstr
+filename = tstr
+reason-code = tstr
+pubkey = bstr
+signature = bstr
+payload = bstr
+claimant-role = 1 / 2 ; buyer / seller
+arbitration-state = 1 / 2 / 3 / 4 / 5 ; pending / approved / rejected / delivered / closed

@@ -1,0 +1,15 @@
+; Settlement deterministic CBOR wire schema, major version 1.
+pool-message = payment-prepare / payment-prepared / payment-commit / payment-committed / payment-abort / payment-aborted / payment-rejected / arbitration-request / close-signature-request / close-signature / pool-arbitrated
+id = bstr .size 32
+ticket-ref = [id, uint, id, uint, id]
+payment-prepare = [1, 1, ticket-ref]
+payment-prepared = [1, 2, id, id]
+payment-commit = [1, 3, ticket-ref, id]
+payment-committed = [1, 4, id, uint, uint, uint]
+payment-abort = [1, 5, ticket-ref, id, tstr]
+payment-aborted = [1, 6, id, tstr]
+payment-rejected = [1, 7, id, uint, tstr]
+arbitration-request = [1, 8, id, bool, tstr, bstr, uint]
+close-signature-request = [1, 9, id, id, bstr, id]
+close-signature = [1, 10, id, id, bstr]
+pool-arbitrated = [1, 11, id, id, id, bstr]

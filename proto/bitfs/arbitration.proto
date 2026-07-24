@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package bitfs.v1;
+
+option go_package = "github.com/bsv8/go-bitfs/proto/bitfspb;bitfspb";
+
+import "proto/bitfs/common.proto";
+import "proto/bitfs/transfer.proto";
+
+// ArbitrationClaimantRoleV1 是提交 BitFS 仲裁申诉的一方。
+enum ArbitrationClaimantRoleV1 {
+  ARBITRATION_CLAIMANT_ROLE_UNSPECIFIED = 0;
+  ARBITRATION_CLAIMANT_ROLE_BUYER = 1;
+  ARBITRATION_CLAIMANT_ROLE_SELLER = 2;
+}
+
+// ArbitrationStateV1 是一次仲裁的可恢复状态机。
+enum ArbitrationStateV1 {
+  ARBITRATION_STATE_UNSPECIFIED = 0;
+  ARBITRATION_STATE_PENDING = 1;
+  ARBITRATION_STATE_APPROVED = 2;
+  ARBITRATION_STATE_REJECTED = 3;
+  ARBITRATION_STATE_DELIVERED = 4;
+  ARBITRATION_STATE_CLOSED = 5;
+}
+
+// ArbitrationClaimV1 是自动仲裁的最小证据包。
+// seller 申诉必须提供 payload；buyer 申诉可以不提供，由仲裁方尝试恢复。
+message ArbitrationClaimV1 {
+  HashGetTicketV1 ticket = 1;
+  bytes payload = 2;
+  ArbitrationClaimantRoleV1 claimant_role = 3;
+}
+
+// ArbitrationDecisionV1 是仲裁方根据票据与二进制证据给出的业务裁定。
+// 资金池的签名与 close 交易由 pool2of3.v1 的仲裁协议承载。
+message ArbitrationDecisionV1 {
+  string session_id = 1;
+  uint64 sequence = 2;
+  bytes ticket_id = 3;
+  bool approved = 4;
+  string reason_code = 5;
+  uint64 final_payout_sat = 6;
+  bytes seller_pubkey = 7;
+  bytes recovered_payload = 8;
+}
+
+// ArbitrationRecordV1 是仲裁服务保存与查询的真值记录。
+message ArbitrationRecordV1 {
+  string session_id = 1;
+  uint64 sequence = 2;
+  ArbitrationStateV1 state = 3;
+  ArbitrationClaimV1 claim = 4;
+  ArbitrationDecisionV1 decision = 5;
+  int64 created_at_unix = 6;
+  int64 updated_at_unix = 7;
+  string reject_reason_code = 8;
+}
+
+message SubmitArbitrationClaimRequestV1 {
+  ArbitrationClaimV1 claim = 1;
+}
+
+message SubmitArbitrationClaimResponseV1 {
+  bool submitted = 1;
+  ArbitrationDecisionV1 decision = 2;
+  BitfsErrorV1 error = 3;
+}
+
+message GetArbitrationRequestV1 {
+  string session_id = 1;
+  uint64 sequence = 2;
+}
+
+message GetArbitrationResponseV1 {
+  ArbitrationRecordV1 record = 1;
+  BitfsErrorV1 error = 2;
+}
+
+message ListArbitrationsRequestV1 {
+  string session_id = 1;
+}
+
+message ListArbitrationsResponseV1 {
+  repeated ArbitrationRecordV1 items = 1;
+  BitfsErrorV1 error = 2;
+}
+
+// BitfsArbitrationService 是买方、卖方与仲裁程序之间的正式仲裁 RPC。
+service BitfsArbitrationService {
+  rpc SubmitClaim(SubmitArbitrationClaimRequestV1) returns (SubmitArbitrationClaimResponseV1);
+  rpc GetArbitration(GetArbitrationRequestV1) returns (GetArbitrationResponseV1);
+  rpc ListArbitrations(ListArbitrationsRequestV1) returns (ListArbitrationsResponseV1);
+}

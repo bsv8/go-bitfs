@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package bitfs.v1;
+
+option go_package = "github.com/bsv8/go-bitfs/proto/bitfspb;bitfspb";
+
+// DemandBroadcastV1 是 BitFS 发现阶段的最小对象。
+// 发现只围绕 seed_hash，禁止混入 block_hash、文件大小或块序号。
+message DemandBroadcastV1 {
+  bytes seed_hash = 1;
+}

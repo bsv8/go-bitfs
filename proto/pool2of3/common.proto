@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package pool2of3.v1;
+
+option go_package = "github.com/bsv8/go-bitfs/proto/pool2of3pb;pool2of3pb";
+
+// PoolErrorV1 是费用池对外稳定错误对象。
+message PoolErrorV1 {
+  string code = 1;
+  string message = 2;
+}
+
+enum PoolSessionStateV1 {
+  POOL_SESSION_STATE_UNSPECIFIED = 0;
+  POOL_SESSION_STATE_OPENING = 1;
+  POOL_SESSION_STATE_ACTIVE = 2;
+  POOL_SESSION_STATE_UPDATING = 3;
+  POOL_SESSION_STATE_DISPUTED = 4;
+  POOL_SESSION_STATE_CLOSED = 5;
+  POOL_SESSION_STATE_ARBITRATED = 6;
+}
+
+enum PoolUpdateTxResultV1 {
+  POOL_UPDATE_TX_RESULT_UNSPECIFIED = 0;
+  POOL_UPDATE_TX_RESULT_COMMITTED = 1;
+  POOL_UPDATE_TX_RESULT_REJECTED = 2;
+}
+
+// PoolSessionRefV1 按 spend_txid 标识一条 2-of-3 费用池。
+// BitFS session_id 不进入本层；业务侧自行维护映射。
+message PoolSessionRefV1 {
+  string spend_txid = 1;
+  string base_txid = 2;
+  string current_tx_hex = 3;
+  string final_txid = 4;
+  bytes buyer_pubkey = 5;
+  bytes seller_pubkey = 6;
+  bytes arbiter_pubkey = 7;
+  bytes root_seed_hash = 8;
+  PoolSessionStateV1 state = 9;
+  uint64 balance_satoshi = 10;
+  uint64 current_server_amount = 11;
+  uint64 current_client_amount = 12;
+  uint32 sequence = 13;
+  int64 created_at_unix = 14;
+  int64 updated_at_unix = 15;
+  int64 service_deadline_unix = 16;
+}

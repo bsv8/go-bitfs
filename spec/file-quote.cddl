@@ -1,0 +1,33 @@
+; Self-verifying file quote credential.
+; Every value is encoded with RFC 8949 core deterministic CBOR.
+
+file-quote-terms = [
+  1,
+  seed-hash,
+  buyer-pubkey,
+  uint,               ; seed_price_sat
+  uint,               ; full_block_price_sat
+  uint,               ; file_size
+  int,                ; quote_expires_at_unix
+  arbiter-pubkeys-cbor
+]
+
+signed-file-quote = [
+  1,
+  file-quote-terms-cbor,
+  seller-pubkey,
+  terms-signature,
+  recommended-filename
+]
+
+seed-hash = bstr .size 32
+buyer-pubkey = bstr
+seller-pubkey = bstr
+terms-signature = bstr
+recommended-filename = tstr
+
+; This bstr is the deterministic CBOR encoding of an array of distinct
+; non-empty public-key byte strings. Its inner CBOR bytes are validated before
+; the outer terms are accepted.
+arbiter-pubkeys-cbor = bstr
+file-quote-terms-cbor = bstr

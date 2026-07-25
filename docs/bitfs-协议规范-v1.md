@@ -14,6 +14,8 @@
 
 发现不属于 BitFS 核心协议。DHT、pubsub、tracker 或手工连接可自行使用 `seed_hash` 发现对端，但其地址、端口、广播和反滥用规则不进入 BitFS wire schema。
 
+> 本节的 `FileQuote` 是为 V1 兼容保留的旧无签名报文。新的 1 对 1、自证明报价必须使用 [`001-报价凭证规范.md`](001-报价凭证规范.md) 中的 `SignedFileQuote`。
+
 卖方以一个 `seed_hash` 对应的完整文件报价，使用 `FileQuote` CBOR 报文。报价必须含 seed、普通 block、最后 block 的价格，文件大小、建议文件名与过期时间。若文件大小整除 block 大小，`endblock_price_sat` 必须等于 `block_price_sat`。
 
 ## 会话

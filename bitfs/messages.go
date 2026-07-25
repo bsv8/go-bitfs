@@ -1,7 +1,8 @@
 package bitfs
 
-// FileQuote is a seller's price for a complete file identified by SeedHash.
-// It is an asynchronous BitFS business message, not an RPC request.
+// FileQuote is the legacy unsigned V1 seller price message. New integrations
+// should use SignedFileQuote, whose signed FileQuoteTerms are self-verifying.
+// It is retained for V1 wire compatibility.
 type FileQuote struct {
 	SeedHash                []byte
 	SeedPriceSat            uint64
@@ -13,6 +14,33 @@ type FileQuote struct {
 	BlockCount              uint32
 	SellerPubkey            []byte
 	SupportedArbiterPubkeys [][]byte
+}
+
+// FileQuoteTerms is the seller-signed commercial commitment for one buyer and
+// one file. It deliberately contains no display metadata: metadata such as a
+// suggested filename is not part of the economic truth of a quote.
+//
+// The wire representation is obtained with EncodeFileQuoteTerms. Its exact
+// canonical CBOR bytes are the input to TermsSignature.
+type FileQuoteTerms struct {
+	SeedHash                    []byte
+	BuyerPubkey                 []byte
+	SeedPriceSat                uint64
+	FullBlockPriceSat           uint64
+	FileSize                    uint64
+	QuoteExpiresAtUnix          int64
+	SupportedArbiterPubkeysCBOR []byte
+}
+
+// SignedFileQuote is a portable, self-verifying seller quote credential.
+// TermsSignature is a seller signature over TermsCBOR. RecommendedFilename is
+// deliberately unsigned display metadata and must not be used for any payment,
+// identity, path, or content decision.
+type SignedFileQuote struct {
+	TermsCBOR           []byte
+	SellerPubkey        []byte
+	TermsSignature      []byte
+	RecommendedFilename string
 }
 
 // HashGetTicket is a buyer-signed authorization to deliver exactly one hash.

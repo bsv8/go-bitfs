@@ -4,6 +4,8 @@ BitFS v1 的 Go 协议真值库，覆盖文件交换、自动仲裁与 2-of-3 �
 
 正式 wire schema 位于 [`spec/v1/bitfs.cddl`](spec/v1/bitfs.cddl)，并使用严格 deterministic CBOR 编码；业务语义位于 [`spec/v1/protocol.md`](spec/v1/protocol.md)。BitFS 不定义发现或网络传输，队列、WebSocket、TCP、libp2p 等适配器只负责投递同一组 CBOR bytes。
 
+新的 1 对 1、自证明报价凭证使用独立的 deterministic CBOR 子结构；见 [`docs/001-报价凭证规范.md`](docs/001-报价凭证规范.md) 与 [`spec/file-quote.cddl`](spec/file-quote.cddl)。
+
 执行测试：
 
 ```bash

@@ -17,6 +17,9 @@ const (
 	KindCloseSignatureRequest
 	KindCloseSignature
 	KindPoolArbitrated
+	KindPoolRefundPresignRequest
+	KindPoolRefundPresignResponse
+	KindPoolFundingTxDelivery
 )
 
 type State uint8
@@ -131,6 +134,40 @@ type PoolArbitrated struct {
 	ClosingTransaction   []byte
 }
 
+// PoolRefundPresignRequest asks the seller to pre-sign the timelocked refund
+// transaction before the buyer reveals the funding transaction. FundingTx is
+// deliberately absent: the seller receives it only after returning the
+// pre-signature.
+type PoolRefundPresignRequest struct {
+	_                    struct{} `cbor:",toarray"`
+	Version              uint64
+	MessageKind          Kind
+	RefundTx             []byte
+	FundingTxID          []byte
+	PoolOutputIndex      uint32
+	PoolOutputSatoshis   uint64
+	PoolLockingScript    []byte
+	BuyerRefundSignature []byte
+}
+
+// PoolRefundPresignResponse contains only the seller's signature. The
+// signature itself binds it to the exact request transaction and source output.
+type PoolRefundPresignResponse struct {
+	_                     struct{} `cbor:",toarray"`
+	Version               uint64
+	MessageKind           Kind
+	SellerRefundSignature []byte
+}
+
+// PoolFundingTxDelivery reveals the buyer-signed funding transaction after
+// the buyer has already verified and persisted the seller's pre-signature.
+type PoolFundingTxDelivery struct {
+	_           struct{} `cbor:",toarray"`
+	Version     uint64
+	MessageKind Kind
+	FundingTx   []byte
+}
+
 func NewPaymentPrepare(ticket TicketRef) *PaymentPrepare {
 	return &PaymentPrepare{Version: MajorVersion, MessageKind: KindPaymentPrepare, Ticket: ticket}
 }
@@ -139,4 +176,33 @@ func NewPaymentCommit(ticket TicketRef, proposalID []byte) *PaymentCommit {
 }
 func NewArbitrationRequest(spendTxID []byte, approved bool, reasonCode string, signature []byte, payout uint64) *ArbitrationRequest {
 	return &ArbitrationRequest{Version: MajorVersion, MessageKind: KindArbitrationRequest, SpendTxID: spendTxID, Approved: approved, ReasonCode: reasonCode, ArbiterSignature: signature, FinalPayoutSat: payout}
+}
+
+func NewPoolRefundPresignRequest(refundTx, fundingTxID []byte, poolOutputIndex uint32, poolOutputSatoshis uint64, poolLockingScript, buyerRefundSignature []byte) *PoolRefundPresignRequest {
+	return &PoolRefundPresignRequest{
+		Version:              MajorVersion,
+		MessageKind:          KindPoolRefundPresignRequest,
+		RefundTx:             append([]byte(nil), refundTx...),
+		FundingTxID:          append([]byte(nil), fundingTxID...),
+		PoolOutputIndex:      poolOutputIndex,
+		PoolOutputSatoshis:   poolOutputSatoshis,
+		PoolLockingScript:    append([]byte(nil), poolLockingScript...),
+		BuyerRefundSignature: append([]byte(nil), buyerRefundSignature...),
+	}
+}
+
+func NewPoolRefundPresignResponse(sellerRefundSignature []byte) *PoolRefundPresignResponse {
+	return &PoolRefundPresignResponse{
+		Version:               MajorVersion,
+		MessageKind:           KindPoolRefundPresignResponse,
+		SellerRefundSignature: append([]byte(nil), sellerRefundSignature...),
+	}
+}
+
+func NewPoolFundingTxDelivery(fundingTx []byte) *PoolFundingTxDelivery {
+	return &PoolFundingTxDelivery{
+		Version:     MajorVersion,
+		MessageKind: KindPoolFundingTxDelivery,
+		FundingTx:   append([]byte(nil), fundingTx...),
+	}
 }

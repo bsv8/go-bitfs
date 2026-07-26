@@ -99,6 +99,12 @@ func messageForKind(kind Kind) (any, error) {
 		return new(CloseSignature), nil
 	case KindPoolArbitrated:
 		return new(PoolArbitrated), nil
+	case KindPoolRefundPresignRequest:
+		return new(PoolRefundPresignRequest), nil
+	case KindPoolRefundPresignResponse:
+		return new(PoolRefundPresignResponse), nil
+	case KindPoolFundingTxDelivery:
+		return new(PoolFundingTxDelivery), nil
 	default:
 		return nil, fmt.Errorf("unsupported pool message kind %d", kind)
 	}
@@ -176,6 +182,24 @@ func validate(message any) error {
 		}
 		if err := requireID("closing_txid", value.ClosingTransactionID); err != nil {
 			return err
+		}
+	case *PoolRefundPresignRequest:
+		version, kind = value.Version, value.MessageKind
+		expected = KindPoolRefundPresignRequest
+		if err := validatePoolRefundPresignRequest(value); err != nil {
+			return err
+		}
+	case *PoolRefundPresignResponse:
+		version, kind = value.Version, value.MessageKind
+		expected = KindPoolRefundPresignResponse
+		if len(value.SellerRefundSignature) == 0 {
+			return errors.New("seller_refund_signature is required")
+		}
+	case *PoolFundingTxDelivery:
+		version, kind = value.Version, value.MessageKind
+		expected = KindPoolFundingTxDelivery
+		if len(value.FundingTx) == 0 {
+			return errors.New("funding_tx is required")
 		}
 	default:
 		return fmt.Errorf("unsupported pool message %T", message)

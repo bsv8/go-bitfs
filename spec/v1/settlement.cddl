@@ -1,5 +1,5 @@
 ; Settlement deterministic CBOR wire schema, major version 1.
-pool-message = payment-prepare / payment-prepared / payment-commit / payment-committed / payment-abort / payment-aborted / payment-rejected / arbitration-request / close-signature-request / close-signature / pool-arbitrated
+pool-message = payment-prepare / payment-prepared / payment-commit / payment-committed / payment-abort / payment-aborted / payment-rejected / arbitration-request / close-signature-request / close-signature / pool-arbitrated / pool-refund-presign-request / pool-refund-presign-response / pool-funding-tx-delivery
 id = bstr .size 32
 ticket-ref = [id, uint, id, uint, id]
 payment-prepare = [1, 1, ticket-ref]
@@ -13,3 +13,30 @@ arbitration-request = [1, 8, id, bool, tstr, bstr, uint]
 close-signature-request = [1, 9, id, id, bstr, id]
 close-signature = [1, 10, id, id, bstr]
 pool-arbitrated = [1, 11, id, id, id, bstr]
+
+; 002: generic 2-of-3 pool opening. No BitFS purchase fields appear here.
+pool-refund-presign-request = [
+  1, 12,
+  bstr,               ; refund_tx
+  id,                 ; funding_txid (FundingTx txid before publication)
+  uint,               ; pool_output_index
+  uint,               ; pool_output_satoshis
+  bstr,               ; pool_locking_script
+  bstr                ; buyer_refund_signature
+]
+pool-refund-presign-response = [1, 13, bstr] ; seller_refund_signature
+pool-funding-tx-delivery = [1, 14, bstr]     ; funding_tx
+
+; Local portable evidence, encoded separately from pool-message. Empty
+; funding_tx denotes the seller's pending pre-sign proof.
+pool-opening-proof = [
+  1,
+  bstr,               ; refund_tx
+  id,                 ; funding_txid
+  uint,               ; pool_output_index
+  uint,               ; pool_output_satoshis
+  bstr,               ; pool_locking_script
+  bstr,               ; buyer_refund_signature
+  bstr,               ; seller_refund_signature
+  bstr                ; funding_tx, empty while pending
+]

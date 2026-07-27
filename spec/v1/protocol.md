@@ -1,5 +1,7 @@
 # BitFS CBOR Protocol v1
 
+> **Historical compatibility schema.** The `FileQuote` / `HashGetTicket` / `HashDelivery` model below is retained only for existing V1 code. New protocol construction follows `docs/001-*` through `docs/006-*`; it must not mix this session-based ticket model with the new self-proving voucher chain.
+
 `bitfs.cddl` is the normative wire schema.  This document defines constraints
 that CDDL cannot express.
 

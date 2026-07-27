@@ -1,5 +1,7 @@
 # BitFS 协议规范 v1
 
+> **历史兼容文档，不作为新施工依据。** 本文描述的 `FileQuote`、`HashGetTicket`、`session_id`、`content_index`、`expected_size`、票据价格和签名域，均属于旧 V1 会话模型。新设计按业务顺序以 [001-报价凭证规范](001-报价凭证规范.md) 至 [006-费用池无条件关闭规范](006-费用池无条件关闭规范.md) 为准；新实现不得混用两套字段或把本文件的会话 ID 当作真值。
+
 本文件说明 BitFS 的业务规则。wire schema 以 [`../spec/v1/bitfs.cddl`](../spec/v1/bitfs.cddl) 为准，编码、稳定 ID 和签名规则以 [`../spec/v1/protocol.md`](../spec/v1/protocol.md) 为准。买方、卖方、仲裁方及其运行时不得自行复制或改变这些规则。
 
 ## 文件模型

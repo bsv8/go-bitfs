@@ -1,4 +1,6 @@
-; BitFS CBOR wire schema, major version 1.
+; Historical compatibility wire schema, major version 1.
+; New protocol construction follows docs/001-* through docs/006-* and must not
+; mix this session-based ticket model with the new self-proving voucher chain.
 ; Every top-level item is a definite-length CBOR array.  Array positions are
 ; normative: V1 never appends, removes, or reorders positions.
 

@@ -27,6 +27,8 @@ func TripleFeePoolSpentScript(
 }
 
 // 从创建花费脚本,客户端签名
+// Deprecated: use MergeTriplePoolServerA or MergeTriplePoolServerB so the
+// CHECKMULTISIG role order is explicit.
 func MergeTripleFeePoolSigForSpendTx(
 	txHex string,
 	aSignByte *[]byte,

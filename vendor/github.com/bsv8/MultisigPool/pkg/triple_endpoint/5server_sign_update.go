@@ -13,6 +13,7 @@ import (
 
 // 双端费用池，分配资金, server 签名
 // client -> server 修改金额和版本号
+// Deprecated: use SignTriplePoolAsB for the explicit B/arbiter role.
 func ClientBTripleFeePoolSpendTXUpdateSign(
 	tx *tx.Transaction,
 	serverPublicKey *ec.PublicKey,

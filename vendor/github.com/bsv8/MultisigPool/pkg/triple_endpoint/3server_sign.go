@@ -12,6 +12,7 @@ import (
 )
 
 // 服务器 回签
+// Deprecated: use SignTriplePoolAsB for the explicit B/arbiter role.
 func SpendTXTripleFeePoolBSign(
 	transactionObject *tx.Transaction,
 	targetAmount uint64,

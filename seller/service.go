@@ -222,10 +222,6 @@ func (service *Service) DeliverRequestedContent(ctx context.Context, request *bi
 		Previous:             previous,
 		PaymentSequenceAfter: previous.PaymentSequence + 1,
 		SellerAmountAfterSat: previous.SellerAmountSat + price,
-		// The buyer chooses the actual miner fee in 005. Zero here is the
-		// conservative pre-delivery capacity check; the signed transaction is
-		// checked again with its actual outputs when accepted.
-		MinerFeeRateSatPerKB: opening.MinerFeeRateSatPerKB,
 	}); err != nil {
 		return nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}

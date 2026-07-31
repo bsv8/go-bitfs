@@ -141,14 +141,12 @@ type PaymentUpdateInput struct {
 	Previous             *PaymentState
 	PaymentSequenceAfter uint32
 	SellerAmountAfterSat uint64
-	MinerFeeRateSatPerKB uint64
 }
 
 type CloseInput struct {
 	Opening              *OpeningProof
 	Latest               *PaymentState
 	SellerAmountAfterSat uint64
-	MinerFeeRateSatPerKB uint64
 }
 
 type UpdateAcceptance struct {

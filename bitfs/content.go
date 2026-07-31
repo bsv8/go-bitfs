@@ -30,7 +30,9 @@ type ContentRef struct {
 	Hash []byte
 }
 
-// ContentRequestTerms is the unsigned, signed-bytes portion of 003.
+// ContentRequestTerms is the unsigned, signed-bytes portion of the canonical
+// 003 final payment authorization. The historical type name is retained so
+// callers do not accidentally create a second authorization model.
 type ContentRequestTerms struct {
 	QuoteTermsHash        []byte
 	SpendTxID             []byte
@@ -46,7 +48,7 @@ type ContentRequestTerms struct {
 	DeliveryDeadlineUnix  int64
 }
 
-// SignedContentRequest is the complete 003 credential.
+// SignedContentRequest is the complete 003 final payment authorization.
 type SignedContentRequest struct {
 	TermsCBOR      []byte
 	BuyerSignature []byte

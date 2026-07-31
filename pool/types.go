@@ -97,8 +97,10 @@ const (
 	PendingConflict    PendingAcquireResult = 3
 )
 
-// PaymentUpdate is the 005 transport container. Amounts and sequence are
-// derived from PartialSpendTx by MultisigPoolPort, never from this wrapper.
+// PaymentUpdate is the 005 transport container. ContentRequestTermsHash is
+// the hash of the final 003 payment authorization (the historical field name
+// is retained); amounts and sequence are derived from PartialSpendTx by
+// MultisigPoolPort, never from this wrapper.
 type PaymentUpdate struct {
 	Version                 uint64
 	ContentRequestTermsHash []byte

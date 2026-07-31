@@ -10,12 +10,12 @@ import (
 // context-aware opening workflow port.  Production applications can replace
 // it with a database-backed calculator or a node/SDK implementation.
 type BSVTransactionIDCalculator struct {
-	Engine *BSVEngine
+	Engine *MultisigPoolEngine
 }
 
 func (calculator BSVTransactionIDCalculator) TransactionID(_ context.Context, rawTx []byte) (Hash32, error) {
 	if calculator.Engine == nil {
-		return Hash32{}, fmt.Errorf("%w: BSV engine is required", ErrInvalidEvidence)
+		return Hash32{}, fmt.Errorf("%w: MultisigPool engine is required", ErrInvalidEvidence)
 	}
 	return calculator.Engine.TransactionID(rawTx)
 }
@@ -49,14 +49,21 @@ func (store *MemoryStore) SaveOpeningProof(ctx context.Context, proof *OpeningPr
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
 	}
-	if err := ValidateOpeningProof(proof); err != nil {
+	cloned := cloneOpeningProof(proof)
+	if cloned != nil && len(cloned.SpendTxID) == 0 {
+		spendTxID, err := store.calculator.TransactionID(ctx, append([]byte(nil), cloned.RefundTx...))
+		if err != nil {
+			return fmt.Errorf("calculate opening spend transaction ID: %w", err)
+		}
+		cloned.SpendTxID = append([]byte(nil), spendTxID[:]...)
+	}
+	if err := ValidateOpeningProof(cloned); err != nil {
 		return err
 	}
-	spendTxID, err := SpendTxID(ctx, proof, store.calculator)
+	spendTxID, err := SpendTxID(ctx, cloned, store.calculator)
 	if err != nil {
 		return err
 	}
-	cloned := cloneOpeningProof(proof)
 	cloned.Version = MajorVersion
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -190,12 +197,12 @@ func openingProofEqual(left, right *OpeningProof) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.Version == right.Version && left.PoolOutputIndex == right.PoolOutputIndex && left.PoolOutputSatoshis == right.PoolOutputSatoshis && string(left.RefundTx) == string(right.RefundTx) && string(left.FundingTxID) == string(right.FundingTxID) && string(left.PoolLockingScript) == string(right.PoolLockingScript) && string(left.BuyerRefundSignature) == string(right.BuyerRefundSignature) && string(left.SellerRefundSignature) == string(right.SellerRefundSignature) && string(left.FundingTx) == string(right.FundingTx)
+	return left.Version == right.Version && left.PoolOutputIndex == right.PoolOutputIndex && left.PoolOutputSatoshis == right.PoolOutputSatoshis && left.MinerFeeRateSatPerKB == right.MinerFeeRateSatPerKB && string(left.RefundTx) == string(right.RefundTx) && string(left.SpendTxID) == string(right.SpendTxID) && string(left.FundingTxID) == string(right.FundingTxID) && string(left.PoolLockingScript) == string(right.PoolLockingScript) && string(left.ServerPubKey) == string(right.ServerPubKey) && string(left.BuyerPubKey) == string(right.BuyerPubKey) && string(left.ArbiterPubKey) == string(right.ArbiterPubKey) && string(left.BuyerRefundSignature) == string(right.BuyerRefundSignature) && string(left.SellerRefundSignature) == string(right.SellerRefundSignature) && string(left.FundingTx) == string(right.FundingTx)
 }
 
 func openingProofCompatible(left, right *OpeningProof) bool {
 	if !openingProofEqual(left, right) {
-		if left == nil || right == nil || left.Version != right.Version || left.PoolOutputIndex != right.PoolOutputIndex || left.PoolOutputSatoshis != right.PoolOutputSatoshis || string(left.RefundTx) != string(right.RefundTx) || string(left.FundingTxID) != string(right.FundingTxID) || string(left.PoolLockingScript) != string(right.PoolLockingScript) || string(left.BuyerRefundSignature) != string(right.BuyerRefundSignature) || string(left.SellerRefundSignature) != string(right.SellerRefundSignature) {
+		if left == nil || right == nil || left.Version != right.Version || left.PoolOutputIndex != right.PoolOutputIndex || left.PoolOutputSatoshis != right.PoolOutputSatoshis || left.MinerFeeRateSatPerKB != right.MinerFeeRateSatPerKB || string(left.RefundTx) != string(right.RefundTx) || string(left.SpendTxID) != string(right.SpendTxID) || string(left.FundingTxID) != string(right.FundingTxID) || string(left.PoolLockingScript) != string(right.PoolLockingScript) || string(left.ServerPubKey) != string(right.ServerPubKey) || string(left.BuyerPubKey) != string(right.BuyerPubKey) || string(left.ArbiterPubKey) != string(right.ArbiterPubKey) || string(left.BuyerRefundSignature) != string(right.BuyerRefundSignature) || string(left.SellerRefundSignature) != string(right.SellerRefundSignature) {
 			return false
 		}
 		// A proof may be upgraded exactly once from the presign form to the

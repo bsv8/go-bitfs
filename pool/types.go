@@ -8,9 +8,9 @@ import (
 
 // ProtocolFamily is a package boundary identifier. MajorVersion is scoped to
 // this family and must not be compared with settlement.MajorVersion.
-const ProtocolFamily = "bitfs.pool.v1"
+const ProtocolFamily = "bitfs.pool.v2"
 
-const MajorVersion uint64 = 1
+const MajorVersion uint64 = 2
 
 // Hash32 is a fixed-size transaction or evidence reference.
 type Hash32 [sha256.Size]byte
@@ -27,10 +27,15 @@ type Reference struct {
 type OpeningProof struct {
 	Version               uint64
 	RefundTx              []byte
+	SpendTxID             []byte
 	FundingTxID           []byte
 	PoolOutputIndex       uint32
 	PoolOutputSatoshis    uint64
 	PoolLockingScript     []byte
+	ServerPubKey          []byte
+	BuyerPubKey           []byte
+	ArbiterPubKey         []byte
+	MinerFeeRateSatPerKB  uint64
 	BuyerRefundSignature  []byte
 	SellerRefundSignature []byte
 	FundingTx             []byte
@@ -43,6 +48,10 @@ type RefundPresignRequest struct {
 	PoolOutputIndex      uint32
 	PoolOutputSatoshis   uint64
 	PoolLockingScript    []byte
+	ServerPubKey         []byte
+	BuyerPubKey          []byte
+	ArbiterPubKey        []byte
+	MinerFeeRateSatPerKB uint64
 	BuyerRefundSignature []byte
 }
 
@@ -59,12 +68,12 @@ type FundingTxDelivery struct {
 // OpeningInput contains only generic pool construction data. It has no quote,
 // content or price fields, keeping 002 independent from BitFS business data.
 type OpeningInput struct {
-	FundingTx         []byte
-	PoolOutputIndex   uint32
-	ExpiryLockTime    uint32
-	RefundMinerFeeSat uint64
-	SellerPubKey      []byte
-	ArbiterPubKey     []byte
+	FundingTx            []byte
+	PoolOutputIndex      uint32
+	ExpiryLockTime       uint32
+	MinerFeeRateSatPerKB uint64
+	SellerPubKey         []byte
+	ArbiterPubKey        []byte
 }
 
 // PendingRequest is seller-side delivery protection plus the price commitment
@@ -89,7 +98,7 @@ const (
 )
 
 // PaymentUpdate is the 005 transport container. Amounts and sequence are
-// derived from PartialSpendTx by TransactionEngine, never from this wrapper.
+// derived from PartialSpendTx by MultisigPoolPort, never from this wrapper.
 type PaymentUpdate struct {
 	Version                 uint64
 	ContentRequestTermsHash []byte
@@ -130,14 +139,14 @@ type PaymentUpdateInput struct {
 	Previous             *PaymentState
 	PaymentSequenceAfter uint32
 	SellerAmountAfterSat uint64
-	MinerFeeSat          uint64
+	MinerFeeRateSatPerKB uint64
 }
 
 type CloseInput struct {
 	Opening              *OpeningProof
 	Latest               *PaymentState
 	SellerAmountAfterSat uint64
-	MinerFeeSat          uint64
+	MinerFeeRateSatPerKB uint64
 }
 
 type UpdateAcceptance struct {
@@ -216,9 +225,9 @@ type SignatureVerifier interface {
 	Verify(pubkey, payload, signature []byte) error
 }
 
-// TransactionEngine owns all transaction parsing, signature, input/output and
+// MultisigPoolPort owns all transaction parsing, signature, input/output and
 // amount rules. Workflow layers must not reconstruct these rules themselves.
-type TransactionEngine interface {
+type MultisigPoolPort interface {
 	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
 	TransactionID(rawTx []byte) (Hash32, error)
 	VerifyRefundExpired(*OpeningProof, time.Time) error
@@ -232,11 +241,16 @@ type TransactionEngine interface {
 	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
 	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
 	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
+	SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
 	SignBuyerPayment(context.Context, *UnsignedPayment, Signer) (*PaymentState, error)
 	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
+	VerifySellerPayment(*PaymentState, *OpeningProof) error
+	VerifySellerPaymentSignature(*PaymentState, []byte, *OpeningProof) error
+	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
 	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
 	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
 	AddArbiterSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
+	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
 	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, error)
 }
 

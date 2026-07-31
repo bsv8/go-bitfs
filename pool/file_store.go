@@ -25,6 +25,8 @@ type FileStore struct {
 	memory *MemoryStore
 }
 
+const fileStoreSchemaVersion uint8 = 2
+
 type fileStoreSnapshot struct {
 	Version  uint8                 `json:"version"`
 	Openings []fileOpeningSnapshot `json:"openings"`
@@ -209,7 +211,7 @@ func (store *FileStore) reloadFromDiskLocked() error {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return fmt.Errorf("decode pool store: %w", err)
 	}
-	if snapshot.Version != 1 {
+	if snapshot.Version != fileStoreSchemaVersion {
 		return fmt.Errorf("unsupported pool store snapshot version %d", snapshot.Version)
 	}
 	if err := fresh.restore(snapshot); err != nil {
@@ -259,7 +261,7 @@ func (store *FileStore) flushLocked() error {
 func (store *MemoryStore) snapshot() fileStoreSnapshot {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	snapshot := fileStoreSnapshot{Version: 1}
+	snapshot := fileStoreSnapshot{Version: fileStoreSchemaVersion}
 	for spendTxID, proof := range store.openingsBySpend {
 		snapshot.Openings = append(snapshot.Openings, fileOpeningSnapshot{SpendTxID: spendTxID, Proof: cloneOpeningProof(proof)})
 	}

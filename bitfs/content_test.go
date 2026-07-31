@@ -67,6 +67,39 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
+	terms := &ContentRequestTerms{
+		QuoteTermsHash:        bytes.Repeat([]byte{0x01}, sha256.Size),
+		SpendTxID:             bytes.Repeat([]byte{0x02}, sha256.Size),
+		BasePaymentSequence:   3,
+		PaymentSequenceAfter:  4,
+		SellerAmountAfterSat:  125,
+		MinerFeeRateSatPerKB:  100,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
+		SelectedArbiterPubkey: []byte{0x02, 0x33},
+		ContentType:           ContentBlock,
+		ContentHash:           bytes.Repeat([]byte{0x04}, sha256.Size),
+		DeliveryDeadlineUnix:  200,
+	}
+	request, err := NewSignedContentRequest(terms, quoteTestSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySignedContentRequestStandalone(request, quoteTestVerifier); err != nil {
+		t.Fatalf("standalone authorization rejected: %v", err)
+	}
+
+	terms.SellerAmountAfterSat++
+	request.TermsCBOR, err = EncodeContentRequestTerms(terms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySignedContentRequestStandalone(request, quoteTestVerifier); err == nil {
+		t.Fatal("standalone authorization accepted changed economic terms")
+	}
+}
+
 func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
 	quote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "file.bin", quoteTestSigner)
 	if err != nil {

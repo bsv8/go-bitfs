@@ -19,7 +19,7 @@ type Config struct {
     Clock        Clock               // 校验报价和交付时限。
     Quotes       QuoteStore          // 已验证报价；按请求中的 QuoteTermsHash 找回条款。
     Pools        PoolStore           // 开池证明与已接受付款状态。
-    Transactions TransactionEngine   // 2-of-3 交易构造和验签。
+    Transactions MultisigPoolPort    // 仅转换参数并调用 MultisigPool canonical API。
     Node         NonFinalPoolNode    // 仅在到期退款或协商关闭提交时使用。
     ContentSink  ContentSink         // 可选；验证 004 后保存内容。
     SeedSource   SeedSource          // 请求 block 时提供已验证 seed；请求 seed 时可为空。
@@ -104,7 +104,7 @@ type Config struct {
     Pools        PoolStore          // 开池证明与已接受付款状态。
     Pending      PendingRequestStore // 单请求门闩，必须支持原子 TryAcquire。
     Content      ContentSource      // 按内容哈希读取原始内容。
-    Transactions TransactionEngine  // 交易验签和卖方签名。
+    Transactions MultisigPoolPort   // 交易验签和 server 签名。
     Node         NonFinalPoolNode   // 提交并确认远期更新。
 }
 
@@ -155,11 +155,12 @@ func (s *seller.Service) SignImmediateClose(
     close *pool.PaymentState,
 ) (*pool.SignedPayment, error)
 
-// BuildArbitrationRequest 打包完整 002 证明和买方签出的精确 005 update。
+// BuildArbitrationRequestFromAuthorization 依据最终 003 授权和当前状态构造空解锁候选，并签 server。
 func (s *seller.Service) BuildArbitrationRequest(
     ctx context.Context,
     proof *pool.OpeningProof,
-    update *pool.PaymentUpdate,
+    authorization *bitfs.SignedContentRequest,
+    latest *pool.PaymentState,
 ) (*arbiter.PaymentSignatureRequest, error)
 
 // SubmitArbitratedPayment 合并仲裁者签名，并通过非最终节点提交同一累计状态。
@@ -178,7 +179,7 @@ func (s *seller.Service) SubmitArbitratedPayment(
 // package arbiter
 type Config struct {
     Signer       Signer             // 仲裁者 2-of-3 交易签名能力。
-    Transactions TransactionEngine  // 校验开池证明及精确付款交易。
+    Pool         arbiter.PoolVerifier // 只调用 MultisigPool 验证和 B 签名。
 }
 
 func New(config Config) (*Service, error)
@@ -189,7 +190,7 @@ type Client interface {
     SignPayment(ctx context.Context, request *arbiter.PaymentSignatureRequest) (*arbiter.PaymentSignatureResponse, error)
 }
 
-// SignPayment 验证 007 证据包中的开池证明和 005 原始付款交易。
+// SignPayment 验证 007 证据包中的开池证明、最终授权和空解锁候选交易。
 // 校验通过后只返回对该精确交易的仲裁者签名；不返回批准状态、金额或数据库 ID。
 func (s *arbiter.Service) SignPayment(
     ctx context.Context,

@@ -37,7 +37,7 @@ type ClientConfig struct {
 	Opening           pool.BuyerPoolOpeningHooks
 	Participants      pool.ParticipantVerifier
 	Node              pool.NonFinalPoolNode
-	Transactions      pool.TransactionEngine
+	Transactions      pool.MultisigPoolPort
 	ContentSink       ContentSink
 	SeedSource        SeedSource
 }
@@ -52,7 +52,7 @@ type Client struct {
 	opening           pool.BuyerPoolOpeningHooks
 	participants      pool.ParticipantVerifier
 	node              pool.NonFinalPoolNode
-	transactions      pool.TransactionEngine
+	transactions      pool.MultisigPoolPort
 	contentSink       ContentSink
 	seedSource        SeedSource
 }
@@ -266,6 +266,7 @@ type ContentRequestInput struct {
 	Pool                  pool.Reference
 	SelectedArbiterPubKey []byte
 	Content               bitfs.ContentRef
+	ContentSize           uint64
 	DeliveryDeadline      bitfs.UnixSeconds
 }
 
@@ -329,6 +330,17 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 	if err := bitfs.VerifyContentReference(terms, input.Content.Type, contentHash, seed, input.Content.Type == bitfs.ContentBlock); err != nil {
 		return nil, err
 	}
+	contentSize := input.ContentSize
+	if input.Content.Type == bitfs.ContentSeed {
+		contentSize = 1
+	}
+	price, err := bitfs.ContentPriceSat(terms, input.Content.Type, contentSize)
+	if err != nil {
+		return nil, err
+	}
+	if previous.SellerAmountSat > ^uint64(0)-price {
+		return nil, bitfs.ErrInsufficientBalance
+	}
 	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
 	if err != nil {
 		return nil, err
@@ -337,6 +349,11 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             input.Pool.SpendTxID[:],
 		BasePaymentSequence:   uint64(input.Pool.BasePaymentSequence),
+		PaymentSequenceAfter:  uint64(previous.PaymentSequence + 1),
+		SellerAmountAfterSat:  previous.SellerAmountSat + price,
+		MinerFeeRateSatPerKB:  opening.MinerFeeRateSatPerKB,
+		BuyerPubkey:           append([]byte(nil), terms.BuyerPubkey...),
+		SellerPubkey:          append([]byte(nil), quote.SellerPubkey...),
 		SelectedArbiterPubkey: selectedArbiter,
 		ContentType:           input.Content.Type,
 		ContentHash:           contentHash,
@@ -410,12 +427,8 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 	if err := client.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	price, err := bitfs.ContentPriceSat(quoteTerms, requestTerms.ContentType, uint64(len(payload)))
-	if err != nil {
-		return nil, err
-	}
-	if ^uint64(0)-previous.SellerAmountSat < price {
-		return nil, bitfs.ErrInsufficientBalance
+	if requestTerms.PaymentSequenceAfter != uint64(previous.PaymentSequence+1) || requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
+		return nil, bitfs.ErrStalePaymentSequence
 	}
 	if previous.PaymentSequence >= 0xfffffffe {
 		return nil, fmt.Errorf("%w: payment sequence exhausted", bitfs.ErrStalePaymentSequence)
@@ -424,7 +437,7 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 		Opening:              opening,
 		Previous:             previous,
 		PaymentSequenceAfter: previous.PaymentSequence + 1,
-		SellerAmountAfterSat: previous.SellerAmountSat + price,
+		SellerAmountAfterSat: requestTerms.SellerAmountAfterSat,
 	}
 	if err := client.transactions.CheckPaymentCapacity(ctx, input); err != nil {
 		return nil, err

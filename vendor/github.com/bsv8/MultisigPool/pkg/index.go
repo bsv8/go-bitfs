@@ -38,7 +38,6 @@ var (
 
 	// Triple endpoint functions
 	TripleFeePoolSpentScript        = triple.TripleFeePoolSpentScript
-	MergeTripleFeePoolSigForSpendTx = triple.MergeTripleFeePoolSigForSpendTx
 	MergeTriplePoolServerA          = triple.MergeTriplePoolServerA
 	MergeTriplePoolServerB          = triple.MergeTriplePoolServerB
 	BuildTriplePoolLock             = triple.BuildTriplePoolLock
@@ -56,7 +55,6 @@ var (
 	VerifyTriplePoolBSignature      = triple.VerifyTriplePoolBSignature
 	VerifyTriplePoolState           = triple.VerifyTriplePoolState
 	TriplePoolFeeSat                = triple.TriplePoolFeeSat
-	VerifySignature                 = triple.VerifySignature
 	// Triple endpoint verify helpers
 	ServerVerifyClientASig               = triple.ServerVerifyClientASig
 	ServerVerifyClientBSig               = triple.ServerVerifyClientBSig

@@ -47,11 +47,11 @@ func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
 	}
-	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignRequest, request.RefundTx, request.FundingTxID, request.PoolOutputIndex, request.PoolOutputSatoshis, request.PoolLockingScript, request.BuyerRefundSignature})
+	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignRequest, request.RefundTx, request.FundingTxID, request.PoolOutputIndex, request.PoolOutputSatoshis, request.PoolLockingScript, request.ServerPubKey, request.BuyerPubKey, request.ArbiterPubKey, request.MinerFeeRateSatPerKB, request.BuyerRefundSignature})
 }
 
 func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
-	values, err := decodePoolArray(data, 8)
+	values, err := decodePoolArray(data, 12)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode refund presign request: %v", ErrInvalidEvidence, err)
 	}
@@ -79,7 +79,19 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	if err := poolDec.Unmarshal(values[6], &request.PoolLockingScript); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[7], &request.BuyerRefundSignature); err != nil {
+	if err := poolDec.Unmarshal(values[7], &request.ServerPubKey); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[8], &request.BuyerPubKey); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[9], &request.ArbiterPubKey); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[10], &request.MinerFeeRateSatPerKB); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[11], &request.BuyerRefundSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateRefundPresignRequest(request); err != nil {
@@ -173,7 +185,7 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request == nil || (request.Version != 0 && request.Version != MajorVersion) {
 		return fmt.Errorf("%w: invalid refund presign request", ErrInvalidEvidence)
 	}
-	if len(request.RefundTx) == 0 || len(request.FundingTxID) != sha256.Size || request.PoolOutputSatoshis == 0 || len(request.PoolLockingScript) == 0 || len(request.BuyerRefundSignature) == 0 {
+	if len(request.RefundTx) == 0 || len(request.FundingTxID) != sha256.Size || request.PoolOutputSatoshis == 0 || len(request.PoolLockingScript) == 0 || len(request.ServerPubKey) == 0 || len(request.BuyerPubKey) == 0 || len(request.ArbiterPubKey) == 0 || len(request.BuyerRefundSignature) == 0 {
 		return fmt.Errorf("%w: incomplete refund presign request", ErrInvalidEvidence)
 	}
 	return nil
@@ -245,10 +257,15 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	return poolEnc.Marshal([]any{
 		MajorVersion,
 		proof.RefundTx,
+		proof.SpendTxID,
 		proof.FundingTxID,
 		proof.PoolOutputIndex,
 		proof.PoolOutputSatoshis,
 		proof.PoolLockingScript,
+		proof.ServerPubKey,
+		proof.BuyerPubKey,
+		proof.ArbiterPubKey,
+		proof.MinerFeeRateSatPerKB,
 		proof.BuyerRefundSignature,
 		proof.SellerRefundSignature,
 		proof.FundingTx,
@@ -256,7 +273,7 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 }
 
 func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
-	values, err := decodePoolArray(data, 9)
+	values, err := decodePoolArray(data, 14)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode opening proof: %v", ErrInvalidEvidence, err)
 	}
@@ -267,25 +284,40 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	if err := poolDec.Unmarshal(values[1], &proof.RefundTx); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[2], &proof.FundingTxID); err != nil {
+	if err := poolDec.Unmarshal(values[2], &proof.SpendTxID); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[3], &proof.PoolOutputIndex); err != nil {
+	if err := poolDec.Unmarshal(values[3], &proof.FundingTxID); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[4], &proof.PoolOutputSatoshis); err != nil {
+	if err := poolDec.Unmarshal(values[4], &proof.PoolOutputIndex); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[5], &proof.PoolLockingScript); err != nil {
+	if err := poolDec.Unmarshal(values[5], &proof.PoolOutputSatoshis); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[6], &proof.BuyerRefundSignature); err != nil {
+	if err := poolDec.Unmarshal(values[6], &proof.PoolLockingScript); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[7], &proof.SellerRefundSignature); err != nil {
+	if err := poolDec.Unmarshal(values[7], &proof.ServerPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[8], &proof.FundingTx); err != nil {
+	if err := poolDec.Unmarshal(values[8], &proof.BuyerPubKey); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[9], &proof.ArbiterPubKey); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[10], &proof.MinerFeeRateSatPerKB); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[11], &proof.BuyerRefundSignature); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[12], &proof.SellerRefundSignature); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[13], &proof.FundingTx); err != nil {
 		return nil, err
 	}
 	if err := ValidateOpeningProof(proof); err != nil {
@@ -308,7 +340,7 @@ func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof.Version != 0 && proof.Version != MajorVersion {
 		return fmt.Errorf("%w: unsupported opening proof version %d", ErrInvalidEvidence, proof.Version)
 	}
-	if len(proof.RefundTx) == 0 || len(proof.FundingTxID) != sha256.Size || proof.PoolOutputSatoshis == 0 || len(proof.PoolLockingScript) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
+	if len(proof.RefundTx) == 0 || len(proof.SpendTxID) != sha256.Size || len(proof.FundingTxID) != sha256.Size || proof.PoolOutputSatoshis == 0 || len(proof.PoolLockingScript) == 0 || len(proof.ServerPubKey) == 0 || len(proof.BuyerPubKey) == 0 || len(proof.ArbiterPubKey) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: opening proof contains incomplete evidence", ErrInvalidEvidence)
 	}
 	return nil
@@ -340,6 +372,9 @@ func cloneRefundPresignRequest(request *RefundPresignRequest) *RefundPresignRequ
 	cloned.RefundTx = append([]byte(nil), request.RefundTx...)
 	cloned.FundingTxID = append([]byte(nil), request.FundingTxID...)
 	cloned.PoolLockingScript = append([]byte(nil), request.PoolLockingScript...)
+	cloned.ServerPubKey = append([]byte(nil), request.ServerPubKey...)
+	cloned.BuyerPubKey = append([]byte(nil), request.BuyerPubKey...)
+	cloned.ArbiterPubKey = append([]byte(nil), request.ArbiterPubKey...)
 	cloned.BuyerRefundSignature = append([]byte(nil), request.BuyerRefundSignature...)
 	return &cloned
 }
@@ -364,8 +399,12 @@ func cloneOpeningProof(proof *OpeningProof) *OpeningProof {
 	}
 	cloned := *proof
 	cloned.RefundTx = append([]byte(nil), proof.RefundTx...)
+	cloned.SpendTxID = append([]byte(nil), proof.SpendTxID...)
 	cloned.FundingTxID = append([]byte(nil), proof.FundingTxID...)
 	cloned.PoolLockingScript = append([]byte(nil), proof.PoolLockingScript...)
+	cloned.ServerPubKey = append([]byte(nil), proof.ServerPubKey...)
+	cloned.BuyerPubKey = append([]byte(nil), proof.BuyerPubKey...)
+	cloned.ArbiterPubKey = append([]byte(nil), proof.ArbiterPubKey...)
 	cloned.BuyerRefundSignature = append([]byte(nil), proof.BuyerRefundSignature...)
 	cloned.SellerRefundSignature = append([]byte(nil), proof.SellerRefundSignature...)
 	cloned.FundingTx = append([]byte(nil), proof.FundingTx...)

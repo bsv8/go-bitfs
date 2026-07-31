@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const contentProtocolVersion uint64 = 1
+const contentProtocolVersion uint64 = 2
 
 // Hash32 is a fixed-size SHA-256 reference used by the new protocol.
 type Hash32 [sha256.Size]byte
@@ -35,6 +35,11 @@ type ContentRequestTerms struct {
 	QuoteTermsHash        []byte
 	SpendTxID             []byte
 	BasePaymentSequence   uint64
+	PaymentSequenceAfter  uint64
+	SellerAmountAfterSat  uint64
+	MinerFeeRateSatPerKB  uint64
+	BuyerPubkey           []byte
+	SellerPubkey          []byte
 	SelectedArbiterPubkey []byte
 	ContentType           ContentType
 	ContentHash           []byte
@@ -75,6 +80,11 @@ func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 		bstr(terms.QuoteTermsHash),
 		bstr(terms.SpendTxID),
 		terms.BasePaymentSequence,
+		terms.PaymentSequenceAfter,
+		terms.SellerAmountAfterSat,
+		terms.MinerFeeRateSatPerKB,
+		bstr(terms.BuyerPubkey),
+		bstr(terms.SellerPubkey),
 		bstr(terms.SelectedArbiterPubkey),
 		terms.ContentType,
 		bstr(terms.ContentHash),
@@ -83,7 +93,7 @@ func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 }
 
 func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
-	values, err := decodeArray(data, 8)
+	values, err := decodeArray(data, 13)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode content request terms: %v", ErrInvalidEvidence, err)
 	}
@@ -101,16 +111,31 @@ func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	if err := decode(values[3], &terms.BasePaymentSequence); err != nil {
 		return nil, fmt.Errorf("%w: base_payment_sequence: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[4], &terms.SelectedArbiterPubkey); err != nil {
+	if err := decode(values[4], &terms.PaymentSequenceAfter); err != nil {
+		return nil, fmt.Errorf("%w: payment_sequence_after: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[5], &terms.SellerAmountAfterSat); err != nil {
+		return nil, fmt.Errorf("%w: seller_amount_after_sat: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[6], &terms.MinerFeeRateSatPerKB); err != nil {
+		return nil, fmt.Errorf("%w: miner_fee_rate_sat_per_kb: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[7], &terms.BuyerPubkey); err != nil {
+		return nil, fmt.Errorf("%w: buyer_pubkey: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[8], &terms.SellerPubkey); err != nil {
+		return nil, fmt.Errorf("%w: seller_pubkey: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[9], &terms.SelectedArbiterPubkey); err != nil {
 		return nil, fmt.Errorf("%w: selected_arbiter_pubkey: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[5], &terms.ContentType); err != nil {
+	if err := decode(values[10], &terms.ContentType); err != nil {
 		return nil, fmt.Errorf("%w: content_type: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[6], &terms.ContentHash); err != nil {
+	if err := decode(values[11], &terms.ContentHash); err != nil {
 		return nil, fmt.Errorf("%w: content_hash: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[7], &terms.DeliveryDeadlineUnix); err != nil {
+	if err := decode(values[12], &terms.DeliveryDeadlineUnix); err != nil {
 		return nil, fmt.Errorf("%w: delivery_deadline_unix: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateContentRequestTerms(terms); err != nil {
@@ -319,6 +344,12 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if len(terms.SpendTxID) != sha256.Size {
 		return errors.New("spend_txid must be 32 bytes")
 	}
+	if terms.PaymentSequenceAfter != 0 && terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
+		return errors.New("payment_sequence_after must equal base_payment_sequence plus one")
+	}
+	if (terms.PaymentSequenceAfter != 0 || terms.SellerAmountAfterSat != 0 || terms.MinerFeeRateSatPerKB != 0 || len(terms.BuyerPubkey) != 0 || len(terms.SellerPubkey) != 0) && (len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0) {
+		return errors.New("buyer_pubkey and seller_pubkey are required")
+	}
 	if len(terms.SelectedArbiterPubkey) == 0 {
 		return errors.New("selected_arbiter_pubkey is required")
 	}
@@ -452,6 +483,26 @@ func VerifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFi
 	return verifySignedContentRequestAt(request, quote, now, quoteVerifier, buyerVerifier, nil, false)
 }
 
+// VerifySignedContentRequestStandalone verifies the self-contained buyer
+// authorization used by arbitration. It deliberately does not load or
+// validate a quote, delivery, payload, or payment history.
+func VerifySignedContentRequestStandalone(request *SignedContentRequest, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
+	if request == nil || buyerVerifier == nil {
+		return nil, errors.New("signed content request and buyer verifier are required")
+	}
+	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
+		return nil, fmt.Errorf("%w: final payment authorization economic fields are incomplete", ErrInvalidEvidence)
+	}
+	if err := buyerVerifier(terms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
+		return nil, fmt.Errorf("%w: buyer authorization signature invalid: %v", ErrInvalidEvidence, err)
+	}
+	return terms, nil
+}
+
 // VerifySignedContentRequestWithSeedAt is the workflow-level form of
 // VerifySignedContentRequestAt. It additionally proves that a block hash is
 // present in the quote's seed.
@@ -561,6 +612,8 @@ func cloneContentRequestTerms(terms *ContentRequestTerms) *ContentRequestTerms {
 	cloned := *terms
 	cloned.QuoteTermsHash = append([]byte(nil), terms.QuoteTermsHash...)
 	cloned.SpendTxID = append([]byte(nil), terms.SpendTxID...)
+	cloned.BuyerPubkey = append([]byte(nil), terms.BuyerPubkey...)
+	cloned.SellerPubkey = append([]byte(nil), terms.SellerPubkey...)
 	cloned.SelectedArbiterPubkey = append([]byte(nil), terms.SelectedArbiterPubkey...)
 	cloned.ContentHash = append([]byte(nil), terms.ContentHash...)
 	return &cloned

@@ -18,7 +18,7 @@ BitFS v1 的 Go 协议真值库，覆盖文件交换、自动仲裁与 2-of-3 �
 
 001 的正式 CDDL 位于 [`spec/file-quote.cddl`](spec/file-quote.cddl)，002 的正式 CDDL 位于 [`spec/v1/pool.cddl`](spec/v1/pool.cddl)，003/004 位于 [`spec/v1/content.cddl`](spec/v1/content.cddl)，005 位于 [`spec/v1/payment.cddl`](spec/v1/payment.cddl)，007 位于 [`spec/v1/arbitration.cddl`](spec/v1/arbitration.cddl)。005 同时定义 BSV 非最终交易池覆盖拓扑，原始 BSV 交易字节仍按 Bitcoin 交易序列化规则编码。新协议的数字版本在 `pool.ProtocolFamily` / `wire.ProtocolFamily` 命名空间内解释；`settlement.ProtocolFamily` 是独立的 legacy 兼容族，即使两者数字版本都为 1，也不得混用。
 
-面向应用开发者的公开 Go API 设计见 [`SDK API 框架设计`](docs/sdk/SDK-API框架设计.md)，对应代码已拆成 `buyer.Client`、`seller.Service`、`pool`、`arbiter` 和 `wire` 包。`pool.BSVEngine` 负责真实 BSV 交易解析、签名摘要、2-of-3 脚本、累计序号和金额约束；数据库、钱包和非最终交易池仍通过接口注入。
+面向应用开发者的公开 Go API 设计见 [`SDK API 框架设计`](docs/sdk/SDK-API框架设计.md)，对应代码已拆成 `buyer.Client`、`seller.Service`、`pool`、`arbiter` 和 `wire` 包。费用池交易语义由 MultisigPool 提供，数据库、钱包和非最终交易池仍通过接口注入。
 
 执行测试：
 
@@ -36,6 +36,6 @@ go test -tags legacy ./...
 
 - `bitfs/`：报价、003/004 内容凭证、seed、哈希和证据校验；
 - `pool/`：独立的 002/005/006 费用池状态机、交易引擎、持久化端口和内存参考实现；
-- `buyer/`、`seller/`：新协议角色工作流；`buyer/runtime.go`、`seller/runtime.go` 仅保留旧 `HashGetTicket` 兼容路径，并要求显式 `-tags legacy`；
+- `buyer/`、`seller/`：新协议角色工作流；旧 V1 会话运行时已从当前构建删除；
 - `arbiter/`、`wire/`：007 仲裁证据签名服务和新协议报文分派；
 - `arbiterclient/`、`demo/arbiter/`、`settlement/`：旧协议兼容或演示代码，默认构建不会编译，使用 `-tags legacy` 启用；不能作为新协议状态真值，新协议代码不得依赖它们。

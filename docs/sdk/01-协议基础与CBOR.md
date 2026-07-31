@@ -132,7 +132,7 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbiter.PaymentSignatureResp
 
 006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。
 
-`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由 `VerifyQuote`、`VerifyContentDelivery`、`TransactionEngine.Verify…` 等校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
+`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由 `VerifyQuote`、`VerifyContentDelivery`、`MultisigPoolPort.Verify…` 等校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
 ## 纯协议 API
 

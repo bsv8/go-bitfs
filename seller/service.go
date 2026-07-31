@@ -32,7 +32,7 @@ type ServiceConfig struct {
 	OpeningHooks      pool.SellerPoolOpeningHooks
 	Pending           pool.PendingRequestStore
 	Content           ContentSource
-	Transactions      pool.TransactionEngine
+	Transactions      pool.MultisigPoolPort
 	Participants      pool.ParticipantVerifier
 	Node              pool.NonFinalPoolNode
 }
@@ -47,7 +47,7 @@ type Service struct {
 	openingHooks      pool.SellerPoolOpeningHooks
 	pending           pool.PendingRequestStore
 	content           ContentSource
-	transactions      pool.TransactionEngine
+	transactions      pool.MultisigPoolPort
 	participants      pool.ParticipantVerifier
 	node              pool.NonFinalPoolNode
 }
@@ -218,7 +218,7 @@ func (service *Service) DeliverRequestedContent(ctx context.Context, request *bi
 		// The buyer chooses the actual miner fee in 005. Zero here is the
 		// conservative pre-delivery capacity check; the signed transaction is
 		// checked again with its actual outputs when accepted.
-		MinerFeeSat: 0,
+		MinerFeeRateSatPerKB: opening.MinerFeeRateSatPerKB,
 	}); err != nil {
 		return nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}
@@ -419,161 +419,6 @@ func (service *Service) SignImmediateClose(ctx context.Context, state *pool.Paym
 	return signed, nil
 }
 
-// BuildArbitrationRequest packages the exact opening proof and buyer-signed
-// payment bytes required by 007.  It does not look up missing evidence from
-// the arbiter or recalculate any content price.
-func (service *Service) BuildArbitrationRequest(ctx context.Context, proof *pool.OpeningProof, update *pool.PaymentUpdate) (*arbiter.PaymentSignatureRequest, error) {
-	if service == nil {
-		return nil, errors.New("seller service is required")
-	}
-	proof = pool.CloneOpeningProof(proof)
-	update = pool.ClonePaymentUpdate(update)
-	if err := pool.ValidateOpeningProof(proof); err != nil {
-		return nil, err
-	}
-	if err := pool.ValidatePaymentUpdate(update); err != nil {
-		return nil, err
-	}
-	if err := service.transactions.VerifyOpening(proof); err != nil {
-		return nil, fmt.Errorf("verify opening proof: %w", err)
-	}
-	fundingTxID, err := service.transactions.FundingTxID(update.PartialSpendTx)
-	if err != nil {
-		return nil, fmt.Errorf("read payment funding outpoint: %w", err)
-	}
-	if !bytes.Equal(fundingTxID[:], proof.FundingTxID) {
-		return nil, fmt.Errorf("%w: payment does not spend opening funding transaction", pool.ErrInvalidEvidence)
-	}
-	state, err := service.transactions.ParsePaymentState(ctx, update.PartialSpendTx, proof)
-	if err != nil {
-		return nil, fmt.Errorf("parse payment state: %w", err)
-	}
-	spendTxID, err := service.transactions.TransactionID(proof.RefundTx)
-	if err != nil {
-		return nil, err
-	}
-	if state == nil || state.SpendTxID != spendTxID {
-		return nil, fmt.Errorf("%w: arbitration payment does not match SpendTxID", pool.ErrInvalidEvidence)
-	}
-	if err := service.transactions.VerifyBuyerPayment(state, proof); err != nil {
-		return nil, fmt.Errorf("verify buyer payment: %w", err)
-	}
-	openingCBOR, err := pool.EncodeOpeningProof(proof)
-	if err != nil {
-		return nil, err
-	}
-	updateCBOR, err := pool.EncodePaymentUpdate(update)
-	if err != nil {
-		return nil, err
-	}
-	return &arbiter.PaymentSignatureRequest{Version: arbiter.MajorVersion, PoolOpeningProofCBOR: openingCBOR, LatestPaymentStateCBOR: updateCBOR}, nil
-}
-
-// SubmitArbitratedPayment verifies the arbiter response against the exact
-// evidence bytes, combines the arbiter signature, and asks the node to accept
-// that non-final cumulative payment. The node response remains authoritative
-// for persistence.
-func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *arbiter.PaymentSignatureRequest, response *arbiter.PaymentSignatureResponse) (*pool.PaymentState, error) {
-	if service == nil {
-		return nil, errors.New("seller service is required")
-	}
-	request = cloneArbitrationRequestSeller(request)
-	response = cloneArbitrationResponseSeller(response)
-	if request == nil || response == nil {
-		return nil, fmt.Errorf("%w: arbitration request and response are required", pool.ErrInvalidEvidence)
-	}
-	if _, err := arbiter.MarshalRequest(request); err != nil {
-		return nil, err
-	}
-	if _, err := arbiter.MarshalResponse(response); err != nil {
-		return nil, err
-	}
-	expectedHash := sha256.Sum256(request.LatestPaymentStateCBOR)
-	if !bytes.Equal(expectedHash[:], response.LatestPaymentStateHash) {
-		return nil, fmt.Errorf("%w: arbitration response does not bind latest payment evidence", pool.ErrInvalidEvidence)
-	}
-	proof, err := pool.DecodeOpeningProof(request.PoolOpeningProofCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := service.transactions.VerifyOpening(proof); err != nil {
-		return nil, fmt.Errorf("verify arbitration opening proof: %w", err)
-	}
-	update, err := pool.DecodePaymentUpdate(request.LatestPaymentStateCBOR)
-	if err != nil {
-		return nil, err
-	}
-	state, err := service.transactions.ParsePaymentState(ctx, update.PartialSpendTx, proof)
-	if err != nil {
-		return nil, err
-	}
-	spendTxID, err := service.transactions.TransactionID(proof.RefundTx)
-	if err != nil {
-		return nil, err
-	}
-	if state == nil || state.SpendTxID != spendTxID {
-		return nil, fmt.Errorf("%w: arbitration payment does not match SpendTxID", pool.ErrInvalidEvidence)
-	}
-	if err := service.transactions.VerifyBuyerPayment(state, proof); err != nil {
-		return nil, err
-	}
-	requestHash := poolHash32Seller(update.ContentRequestTermsHash)
-	previous, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
-	if err != nil {
-		return nil, err
-	}
-	if previous == nil {
-		return nil, pool.ErrStalePaymentSequence
-	}
-	previous = pool.ClonePaymentState(previous)
-	if err := service.transactions.VerifyAcceptedPayment(previous, proof); err != nil {
-		return nil, fmt.Errorf("verify previous accepted payment: %w", err)
-	}
-	if previous.PaymentSequence == state.PaymentSequence && previous.SellerAmountSat == state.SellerAmountSat && previous.ClientAmountSat == state.ClientAmountSat && previous.ContentRequestTermsHash == requestHash {
-		return clonePaymentStateSeller(previous), nil
-	}
-	if state.PaymentSequence <= previous.PaymentSequence {
-		return nil, pool.ErrStalePaymentSequence
-	}
-	if state.SellerAmountSat < previous.SellerAmountSat {
-		return nil, fmt.Errorf("%w: arbitrated seller amount cannot decrease", pool.ErrInvalidEvidence)
-	}
-	signed, err := service.transactions.AddArbiterSignature(ctx, state, response.ArbiterTransactionSignature)
-	if err != nil {
-		return nil, fmt.Errorf("combine arbiter signature: %w", err)
-	}
-	if signed == nil || len(signed.RawTx) == 0 {
-		return nil, fmt.Errorf("%w: arbiter returned empty transaction", pool.ErrInvalidEvidence)
-	}
-	txID, err := service.transactions.TransactionID(signed.RawTx)
-	if err != nil {
-		return nil, err
-	}
-	acceptance, err := service.node.SubmitUpdate(ctx, signed.RawTx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: submit arbitrated payment: %v", pool.ErrNonFinalRejected, err)
-	}
-	if acceptance == nil || acceptance.TxID != txID || acceptance.SpendTxID != state.SpendTxID || acceptance.PaymentSequence != state.PaymentSequence {
-		return nil, fmt.Errorf("%w: non-final node returned inconsistent arbitration acceptance", pool.ErrInvalidEvidence)
-	}
-	accepted := signed.State
-	accepted.RawTx = append([]byte(nil), signed.RawTx...)
-	accepted.ContentRequestTermsHash = requestHash
-	if err := service.pools.SaveAcceptedPayment(ctx, &accepted); err != nil {
-		return nil, fmt.Errorf("save arbitrated payment: %w", err)
-	}
-	pending, err := service.pending.Load(ctx, accepted.SpendTxID)
-	if err != nil {
-		return nil, fmt.Errorf("load pending arbitration request: %w", err)
-	}
-	if pending != nil && pending.ContentRequestHash == accepted.ContentRequestTermsHash {
-		if err := service.pending.Release(ctx, accepted.SpendTxID, pending.ContentRequestHash); err != nil {
-			return nil, fmt.Errorf("release pending arbitration request: %w", err)
-		}
-	}
-	return clonePaymentStateSeller(&accepted), nil
-}
-
 func sellerHash32(raw []byte) bitfs.Hash32 {
 	var result bitfs.Hash32
 	copy(result[:], raw)
@@ -597,26 +442,148 @@ func cloneFileQuoteTermsSeller(terms *bitfs.FileQuoteTerms) bitfs.FileQuoteTerms
 	return cloned
 }
 
-func cloneArbitrationRequestSeller(request *arbiter.PaymentSignatureRequest) *arbiter.PaymentSignatureRequest {
-	if request == nil {
-		return nil
-	}
-	return &arbiter.PaymentSignatureRequest{
-		Version:                request.Version,
-		PoolOpeningProofCBOR:   append([]byte(nil), request.PoolOpeningProofCBOR...),
-		LatestPaymentStateCBOR: append([]byte(nil), request.LatestPaymentStateCBOR...),
-	}
+// BuildArbitrationRequest is intentionally disabled: arbitration must be built
+// from the signed 003 authorization, never from a buyer payment wrapper.
+func (service *Service) BuildArbitrationRequest(context.Context, *pool.OpeningProof, *pool.PaymentUpdate) (*arbiter.PaymentSignatureRequest, error) {
+	return nil, fmt.Errorf("%w: use BuildArbitrationRequestFromAuthorization", pool.ErrInvalidEvidence)
 }
 
-func cloneArbitrationResponseSeller(response *arbiter.PaymentSignatureResponse) *arbiter.PaymentSignatureResponse {
-	if response == nil {
-		return nil
+func (service *Service) BuildArbitrationRequestFromAuthorization(ctx context.Context, proof *pool.OpeningProof, authorization *bitfs.SignedContentRequest, latest *pool.PaymentState) (*arbiter.PaymentSignatureRequest, error) {
+	if service == nil {
+		return nil, errors.New("seller service is required")
 	}
-	return &arbiter.PaymentSignatureResponse{
-		Version:                     response.Version,
-		LatestPaymentStateHash:      append([]byte(nil), response.LatestPaymentStateHash...),
-		ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...),
+	if proof == nil || authorization == nil || latest == nil {
+		return nil, fmt.Errorf("%w: arbitration evidence is incomplete", pool.ErrInvalidEvidence)
 	}
+	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, service.signatureVerifier)
+	if err != nil {
+		return nil, fmt.Errorf("verify payment authorization: %w", err)
+	}
+	if err := validateSellerAuthorizationPool(terms, proof); err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(terms.SpendTxID, proof.SpendTxID) || uint32(terms.BasePaymentSequence) != latest.PaymentSequence || terms.PaymentSequenceAfter != uint64(latest.PaymentSequence+1) {
+		return nil, fmt.Errorf("%w: authorization does not match latest pool state", pool.ErrInvalidEvidence)
+	}
+	if err := service.transactions.VerifyAcceptedPayment(latest, proof); err != nil {
+		return nil, err
+	}
+	unsigned, err := service.transactions.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: proof, Previous: latest, PaymentSequenceAfter: uint32(terms.PaymentSequenceAfter), SellerAmountAfterSat: terms.SellerAmountAfterSat})
+	if err != nil {
+		return nil, err
+	}
+	sellerSig, err := service.transactions.SignSellerArbitrationCandidate(ctx, unsigned, service.signer)
+	if err != nil {
+		return nil, err
+	}
+	openingCBOR, err := pool.EncodeOpeningProof(proof)
+	if err != nil {
+		return nil, err
+	}
+	authCBOR, err := bitfs.EncodeSignedContentRequest(authorization)
+	if err != nil {
+		return nil, err
+	}
+	return &arbiter.PaymentSignatureRequest{Version: arbiter.MajorVersion, PoolOpeningProofCBOR: openingCBOR, PaymentAuthorizationCBOR: authCBOR, UnsignedStateTxRaw: append([]byte(nil), unsigned.RawTx...), SellerTransactionSignature: sellerSig}, nil
+}
+
+func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *arbiter.PaymentSignatureRequest, response *arbiter.PaymentSignatureResponse) (*pool.PaymentState, error) {
+	if service == nil {
+		return nil, errors.New("seller service is required")
+	}
+	if request == nil || response == nil {
+		return nil, fmt.Errorf("%w: arbitration evidence is incomplete", pool.ErrInvalidEvidence)
+	}
+	if _, err := arbiter.MarshalRequest(request); err != nil {
+		return nil, err
+	}
+	if _, err := arbiter.MarshalResponse(response); err != nil {
+		return nil, err
+	}
+	authHash := sha256.Sum256(request.PaymentAuthorizationCBOR)
+	txHash := sha256.Sum256(request.UnsignedStateTxRaw)
+	if !bytes.Equal(authHash[:], response.PaymentAuthorizationHash) || !bytes.Equal(txHash[:], response.UnsignedStateTxHash) {
+		return nil, fmt.Errorf("%w: arbiter response does not bind request evidence", pool.ErrInvalidEvidence)
+	}
+	proof, err := pool.DecodeOpeningProof(request.PoolOpeningProofCBOR)
+	if err != nil {
+		return nil, err
+	}
+	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		return nil, err
+	}
+	_, err = bitfs.VerifySignedContentRequestStandalone(authorization, service.signatureVerifier)
+	if err != nil {
+		return nil, err
+	}
+	terms, err := bitfs.DecodeContentRequestTerms(authorization.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSellerAuthorizationPool(terms, proof); err != nil {
+		return nil, err
+	}
+	state, err := service.transactions.ParsePaymentState(ctx, request.UnsignedStateTxRaw, proof)
+	if err != nil {
+		return nil, err
+	}
+	state, err = service.transactions.AttachSellerArbitrationSignature(ctx, state, request.SellerTransactionSignature)
+	if err != nil {
+		return nil, err
+	}
+	if err := service.transactions.VerifySellerPayment(state, proof); err != nil {
+		return nil, err
+	}
+	if err := service.transactions.VerifySellerPaymentSignature(state, request.SellerTransactionSignature, proof); err != nil {
+		return nil, err
+	}
+	signed, err := service.transactions.AddArbitrationSignature(ctx, state, response.ArbiterTransactionSignature)
+	if err != nil {
+		return nil, err
+	}
+	if signed == nil || len(signed.RawTx) == 0 {
+		return nil, fmt.Errorf("%w: arbiter returned empty transaction", pool.ErrInvalidEvidence)
+	}
+	accepted, err := service.node.SubmitUpdate(ctx, signed.RawTx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: submit arbitrated payment: %v", pool.ErrNonFinalRejected, err)
+	}
+	txID, err := service.transactions.TransactionID(signed.RawTx)
+	if err != nil {
+		return nil, err
+	}
+	if accepted == nil || accepted.TxID != txID || accepted.SpendTxID != state.SpendTxID || accepted.PaymentSequence != state.PaymentSequence {
+		return nil, fmt.Errorf("%w: inconsistent arbitration acceptance", pool.ErrInvalidEvidence)
+	}
+	requestHash, err := bitfs.ContentRequestTermsHash(authorization.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	signed.State.ContentRequestTermsHash = poolHash32Seller(requestHash[:])
+	if err := service.pools.SaveAcceptedPayment(ctx, &signed.State); err != nil {
+		return nil, err
+	}
+	return clonePaymentStateSeller(&signed.State), nil
+}
+
+func validateSellerAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.OpeningProof) error {
+	if terms == nil || proof == nil {
+		return fmt.Errorf("%w: authorization pool evidence is incomplete", pool.ErrInvalidEvidence)
+	}
+	if !bytes.Equal(terms.SpendTxID, proof.SpendTxID) ||
+		!bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) ||
+		!bytes.Equal(terms.SellerPubkey, proof.ServerPubKey) ||
+		!bytes.Equal(terms.SelectedArbiterPubkey, proof.ArbiterPubKey) {
+		return fmt.Errorf("%w: authorization pool roles do not match opening proof", pool.ErrInvalidEvidence)
+	}
+	if terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB {
+		return fmt.Errorf("%w: authorization fee rate does not match opening proof", pool.ErrInvalidEvidence)
+	}
+	if terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)) {
+		return fmt.Errorf("%w: authorization payment sequence is invalid", pool.ErrInvalidEvidence)
+	}
+	return nil
 }
 
 func cloneSignedFileQuoteForSeller(quote *bitfs.SignedFileQuote) *bitfs.SignedFileQuote {

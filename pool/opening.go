@@ -3,6 +3,7 @@ package pool
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 )
 
@@ -25,10 +26,15 @@ func SellerPresignRefund(ctx context.Context, request *RefundPresignRequest, hoo
 	proof := &OpeningProof{
 		Version:               MajorVersion,
 		RefundTx:              append([]byte(nil), request.RefundTx...),
+		SpendTxID:             nil,
 		FundingTxID:           append([]byte(nil), request.FundingTxID...),
 		PoolOutputIndex:       request.PoolOutputIndex,
 		PoolOutputSatoshis:    request.PoolOutputSatoshis,
 		PoolLockingScript:     append([]byte(nil), request.PoolLockingScript...),
+		ServerPubKey:          append([]byte(nil), request.ServerPubKey...),
+		BuyerPubKey:           append([]byte(nil), request.BuyerPubKey...),
+		ArbiterPubKey:         append([]byte(nil), request.ArbiterPubKey...),
+		MinerFeeRateSatPerKB:  request.MinerFeeRateSatPerKB,
 		BuyerRefundSignature:  append([]byte(nil), request.BuyerRefundSignature...),
 		SellerRefundSignature: append([]byte(nil), signature...),
 	}
@@ -63,13 +69,22 @@ func BuyerAcceptRefundPresign(ctx context.Context, request *RefundPresignRequest
 	if !bytes.Equal(fundingTxID[:], request.FundingTxID) {
 		return nil, fmt.Errorf("%w: funding transaction ID does not match request", ErrInvalidEvidence)
 	}
+	spendTxID, err := hooks.TransactionID(ctx, append([]byte(nil), request.RefundTx...))
+	if err != nil {
+		return nil, fmt.Errorf("calculate spend transaction ID: %w", err)
+	}
 	proof := &OpeningProof{
 		Version:               MajorVersion,
 		RefundTx:              append([]byte(nil), request.RefundTx...),
+		SpendTxID:             spendTxID[:],
 		FundingTxID:           append([]byte(nil), request.FundingTxID...),
 		PoolOutputIndex:       request.PoolOutputIndex,
 		PoolOutputSatoshis:    request.PoolOutputSatoshis,
 		PoolLockingScript:     append([]byte(nil), request.PoolLockingScript...),
+		ServerPubKey:          append([]byte(nil), request.ServerPubKey...),
+		BuyerPubKey:           append([]byte(nil), request.BuyerPubKey...),
+		ArbiterPubKey:         append([]byte(nil), request.ArbiterPubKey...),
+		MinerFeeRateSatPerKB:  request.MinerFeeRateSatPerKB,
 		BuyerRefundSignature:  append([]byte(nil), request.BuyerRefundSignature...),
 		SellerRefundSignature: append([]byte(nil), response.SellerRefundSignature...),
 		FundingTx:             append([]byte(nil), fundingTx...),
@@ -128,11 +143,28 @@ func SellerAcceptFundingTx(ctx context.Context, delivery *FundingTxDelivery, hoo
 // the separate signatures for actual broadcast, which may produce another
 // transaction ID because unlocking data is part of the txid.
 func SpendTxID(ctx context.Context, proof *OpeningProof, calculator TransactionIDCalculator) (Hash32, error) {
+	if proof == nil {
+		return Hash32{}, fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)
+	}
+	if len(proof.SpendTxID) == sha256.Size {
+		var result Hash32
+		copy(result[:], proof.SpendTxID)
+		if err := ValidateOpeningProof(proof); err != nil {
+			return Hash32{}, err
+		}
+		return result, nil
+	}
 	if calculator == nil {
 		return Hash32{}, fmt.Errorf("%w: transaction ID calculator is required", ErrInvalidEvidence)
 	}
-	if err := ValidateOpeningProof(proof); err != nil {
+	result, err := calculator.TransactionID(ctx, append([]byte(nil), proof.RefundTx...))
+	if err != nil {
 		return Hash32{}, err
 	}
-	return calculator.TransactionID(ctx, append([]byte(nil), proof.RefundTx...))
+	copyProof := cloneOpeningProof(proof)
+	copyProof.SpendTxID = append([]byte(nil), result[:]...)
+	if err := ValidateOpeningProof(copyProof); err != nil {
+		return Hash32{}, err
+	}
+	return result, nil
 }

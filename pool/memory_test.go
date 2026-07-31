@@ -20,11 +20,15 @@ func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := &OpeningProof{
-		Version:               MajorVersion,
-		RefundTx:              []byte("refund"),
-		FundingTxID:           make([]byte, 32),
-		PoolOutputSatoshis:    100,
-		PoolLockingScript:     []byte("script"),
+		Version:  MajorVersion,
+		RefundTx: []byte("refund"),
+		// The seller's pre-sign proof has no externally computed spend ID yet;
+		// the store must derive the stable anchor from RefundTx before saving.
+		SpendTxID:          nil,
+		FundingTxID:        make([]byte, 32),
+		PoolOutputSatoshis: 100,
+		PoolLockingScript:  []byte("script"),
+		ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 		BuyerRefundSignature:  []byte("buyer"),
 		SellerRefundSignature: []byte("seller"),
 	}
@@ -72,11 +76,13 @@ func TestFileStoreRehydratesPoolPaymentAndPendingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := &OpeningProof{
-		Version:               MajorVersion,
-		RefundTx:              []byte("refund"),
-		FundingTxID:           make([]byte, 32),
-		PoolOutputSatoshis:    100,
-		PoolLockingScript:     []byte("script"),
+		Version:            MajorVersion,
+		RefundTx:           []byte("refund"),
+		SpendTxID:          bytes32(3),
+		FundingTxID:        make([]byte, 32),
+		PoolOutputSatoshis: 100,
+		PoolLockingScript:  []byte("script"),
+		ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 		BuyerRefundSignature:  []byte("buyer"),
 		SellerRefundSignature: []byte("seller"),
 		FundingTx:             []byte("funding"),
@@ -143,11 +149,13 @@ func TestFileStoreInstancesReloadBeforeMutating(t *testing.T) {
 	}
 	proof := func(marker byte) *OpeningProof {
 		return &OpeningProof{
-			Version:               MajorVersion,
-			RefundTx:              []byte{marker},
-			FundingTxID:           bytes32(marker),
-			PoolOutputSatoshis:    100,
-			PoolLockingScript:     []byte("script"),
+			Version:            MajorVersion,
+			RefundTx:           []byte{marker},
+			SpendTxID:          bytes32(marker + 10),
+			FundingTxID:        bytes32(marker),
+			PoolOutputSatoshis: 100,
+			PoolLockingScript:  []byte("script"),
+			ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 			BuyerRefundSignature:  []byte("buyer"),
 			SellerRefundSignature: []byte("seller"),
 			FundingTx:             []byte{marker, 0xff},

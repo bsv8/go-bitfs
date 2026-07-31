@@ -392,7 +392,7 @@ func (service *Service) SignImmediateClose(ctx context.Context, state *pool.Paym
 	if !bytes.Equal(fundingTxID[:], opening.FundingTxID) {
 		return nil, fmt.Errorf("%w: close does not spend opening funding output", pool.ErrInvalidEvidence)
 	}
-	if err := service.transactions.VerifyFinalPayment(state, opening); err != nil {
+	if err := service.transactions.VerifyBuyerPayment(state, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer close signature: %w", err)
 	}
 	latest, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
@@ -404,7 +404,9 @@ func (service *Service) SignImmediateClose(ctx context.Context, state *pool.Paym
 	}
 	latest = pool.ClonePaymentState(latest)
 	if err := service.transactions.VerifyAcceptedPayment(latest, opening); err != nil {
-		return nil, fmt.Errorf("verify latest accepted payment: %w", err)
+		if arbitrationErr := service.transactions.VerifyArbitratedPayment(latest, opening); arbitrationErr != nil {
+			return nil, fmt.Errorf("verify latest accepted payment: %w", err)
+		}
 	}
 	if state.SellerAmountSat < latest.SellerAmountSat {
 		return nil, fmt.Errorf("%w: immediate close cannot reduce seller amount", pool.ErrInvalidEvidence)

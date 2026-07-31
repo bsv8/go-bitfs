@@ -223,7 +223,7 @@ func (client *Client) BuildImmediateClose(ctx context.Context, input pool.CloseI
 	if state == nil || state.PaymentSequence != ^uint32(0) {
 		return nil, fmt.Errorf("%w: immediate close is not final", pool.ErrInvalidEvidence)
 	}
-	if err := client.transactions.VerifyFinalPayment(state, localInput.Opening); err != nil {
+	if err := client.transactions.VerifyBuyerPayment(state, localInput.Opening); err != nil {
 		return nil, fmt.Errorf("verify immediate close: %w", err)
 	}
 	return state, nil

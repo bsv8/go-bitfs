@@ -292,6 +292,20 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if arbitrated.PaymentSequence != latest.PaymentSequence+1 || node.updates != 2 {
 		t.Fatalf("arbitrated payment = %+v, updates=%d", arbitrated, node.updates)
 	}
+	closeState, err := client.BuildImmediateClose(ctx, pool.CloseInput{Opening: opening, Latest: arbitrated, SellerAmountAfterSat: arbitrated.SellerAmountSat})
+	if err != nil {
+		t.Fatalf("build immediate close: %v", err)
+	}
+	closed, err := service.SignImmediateClose(ctx, closeState)
+	if err != nil {
+		t.Fatalf("seller sign immediate close: %v", err)
+	}
+	if _, err := client.SubmitImmediateClose(ctx, closed); err != nil {
+		t.Fatalf("submit immediate close: %v", err)
+	}
+	if closed.State.PaymentSequence != ^uint32(0) {
+		t.Fatalf("close sequence = %d, want final", closed.State.PaymentSequence)
+	}
 }
 
 func integrationPrivateKey(t *testing.T, value byte) *ec.PrivateKey {

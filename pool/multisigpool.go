@@ -70,19 +70,52 @@ func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 	if len(proof.PoolLockingScript) == 0 || !bytes.Equal(lock, proof.PoolLockingScript) {
 		return fmt.Errorf("opening proof pool roles do not match adapter")
 	}
-	if err := ValidateOpeningProof(proof); err != nil { return err }
-	if len(proof.FundingTx) == 0 { return fmt.Errorf("complete funding transaction is required") }
+	if err := ValidateOpeningProof(proof); err != nil {
+		return err
+	}
+	if len(proof.FundingTx) == 0 {
+		return fmt.Errorf("complete funding transaction is required")
+	}
 	funding, err := tx.NewTransactionFromBytes(proof.FundingTx)
-	if err != nil { return err }
-	if !bytes.Equal(funding.TxID().CloneBytes(), proof.FundingTxID) || int(proof.PoolOutputIndex) >= len(funding.Outputs) || funding.Outputs[proof.PoolOutputIndex] == nil { return fmt.Errorf("funding transaction does not match opening proof") }
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(funding.TxID().CloneBytes(), proof.FundingTxID) || int(proof.PoolOutputIndex) >= len(funding.Outputs) || funding.Outputs[proof.PoolOutputIndex] == nil {
+		return fmt.Errorf("funding transaction does not match opening proof")
+	}
 	output := funding.Outputs[proof.PoolOutputIndex]
-	if output.Satoshis != proof.PoolOutputSatoshis || !bytes.Equal(output.LockingScript.Bytes(), proof.PoolLockingScript) { return fmt.Errorf("funding pool output does not match opening proof") }
+	if output.Satoshis != proof.PoolOutputSatoshis || !bytes.Equal(output.LockingScript.Bytes(), proof.PoolLockingScript) {
+		return fmt.Errorf("funding pool output does not match opening proof")
+	}
 	refund, err := tx.NewTransactionFromBytes(proof.RefundTx)
-	if err != nil { return err }
-	if refund.Inputs[0].SourceTxOutput() == nil { refund.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))}) }
-	if err := mp.VerifyTriplePoolState(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, 0); err != nil { return err }
-	if ok, err := mp.VerifyTriplePoolASignature(refund, adapter.Roles.A, adapter.Roles.Server, adapter.Roles.B, &proof.BuyerRefundSignature); err != nil || !ok { if err != nil { return err }; return fmt.Errorf("A refund signature is invalid") }
-	if ok, err := mp.VerifyTriplePoolServerSignature(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, &proof.SellerRefundSignature); err != nil || !ok { if err != nil { return err }; return fmt.Errorf("server refund signature is invalid") }
+	if err != nil {
+		return err
+	}
+	if len(refund.Inputs) != 1 || refund.Inputs[0] == nil || refund.Inputs[0].SourceTXID == nil || !bytes.Equal(refund.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || refund.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
+		return fmt.Errorf("refund transaction does not spend the opening pool outpoint")
+	}
+	if refund.Inputs[0].SourceTxOutput() == nil {
+		refund.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})
+	}
+	refundUnlocking := refund.Inputs[0].UnlockingScript
+	refund.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
+	stateErr := mp.VerifyTriplePoolStateWithFee(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, 0, mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB))
+	refund.Inputs[0].UnlockingScript = refundUnlocking
+	if stateErr != nil {
+		return stateErr
+	}
+	if ok, err := mp.VerifyTriplePoolASignature(refund, adapter.Roles.A, adapter.Roles.Server, adapter.Roles.B, &proof.BuyerRefundSignature); err != nil || !ok {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("A refund signature is invalid")
+	}
+	if ok, err := mp.VerifyTriplePoolServerSignature(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, &proof.SellerRefundSignature); err != nil || !ok {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("server refund signature is invalid")
+	}
 	return nil
 }
 
@@ -93,30 +126,47 @@ func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context
 	if terms == nil || len(raw) == 0 || len(sellerSig) == 0 {
 		return nil, fmt.Errorf("arbitration candidate inputs are incomplete")
 	}
-	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter > uint64(^uint32(0)) {
+	if terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB {
+		return nil, fmt.Errorf("arbitration candidate fee rate does not match opening proof")
+	}
+	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter > uint64(^uint32(0)) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
 		return nil, fmt.Errorf("invalid target payment sequence")
 	}
 	candidate, err := tx.NewTransactionFromBytes(raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode arbitration candidate: %w", err)
 	}
-	if len(candidate.Inputs) != 1 || candidate.Inputs[0] == nil || len(candidate.Outputs) != 2 { return nil, fmt.Errorf("arbitration candidate shape is invalid") }
+	if len(candidate.Inputs) != 1 || candidate.Inputs[0] == nil || len(candidate.Outputs) != 2 {
+		return nil, fmt.Errorf("arbitration candidate shape is invalid")
+	}
+	if candidate.Inputs[0].SourceTXID == nil || !bytes.Equal(candidate.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || candidate.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
+		return nil, fmt.Errorf("arbitration candidate does not spend the opening pool outpoint")
+	}
 	if candidate.Inputs[0].SourceTxOutput() == nil {
 		candidate.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})
 	}
 	if candidate.Inputs[0].SequenceNumber != uint32(terms.PaymentSequenceAfter) || candidate.Outputs[0].Satoshis != terms.SellerAmountAfterSat {
 		return nil, fmt.Errorf("arbitration candidate does not match authorization")
 	}
-	if err := mp.VerifyTriplePoolState(candidate, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, terms.SellerAmountAfterSat); err != nil { return nil, err }
+	if err := mp.VerifyTriplePoolStateWithFee(candidate, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, terms.SellerAmountAfterSat, mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB)); err != nil {
+		return nil, err
+	}
 	valid, err := mp.VerifyTriplePoolServerSignature(candidate, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, &sellerSig)
-	if err != nil { return nil, fmt.Errorf("seller signature: %w", err) }
-	if !valid { return nil, fmt.Errorf("seller signature is invalid") }
+	if err != nil {
+		return nil, fmt.Errorf("seller signature: %w", err)
+	}
+	if !valid {
+		return nil, fmt.Errorf("seller signature is invalid")
+	}
 	return &PaymentState{SpendTxID: hash32FromBytes(proof.SpendTxID), RawTx: append([]byte(nil), raw...), PaymentSequence: uint32(terms.PaymentSequenceAfter), SellerAmountSat: terms.SellerAmountAfterSat, ClientAmountSat: candidate.Outputs[1].Satoshis, PoolOutputSatoshis: proof.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), proof.PoolLockingScript...)}, nil
 }
 
 func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context, raw []byte, proof *OpeningProof, _ Signer) ([]byte, error) {
 	if adapter == nil || adapter.BKey == nil {
 		return nil, fmt.Errorf("B key provider is required")
+	}
+	if err := adapter.VerifyOpening(proof); err != nil {
+		return nil, err
 	}
 	b, err := adapter.BKey.PrivateKey(ctx)
 	if err != nil {
@@ -128,6 +178,12 @@ func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context
 	candidate, err := tx.NewTransactionFromBytes(raw)
 	if err != nil {
 		return nil, err
+	}
+	if len(candidate.Inputs) != 1 || candidate.Inputs[0] == nil {
+		return nil, fmt.Errorf("arbitration candidate must have exactly one input")
+	}
+	if candidate.Inputs[0].SourceTXID == nil || !bytes.Equal(candidate.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || candidate.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
+		return nil, fmt.Errorf("arbitration candidate does not spend the opening pool outpoint")
 	}
 	if candidate.Inputs[0].SourceTxOutput() == nil {
 		candidate.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})

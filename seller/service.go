@@ -114,7 +114,11 @@ func (service *Service) AcceptPoolFunding(ctx context.Context, delivery *pool.Fu
 	if err != nil {
 		return nil, err
 	}
-	initial, err := service.transactions.ParsePaymentState(ctx, proof.RefundTx, proof)
+	initialRaw, err := service.transactions.BuildRefundSubmission(proof)
+	if err != nil {
+		return nil, fmt.Errorf("assemble initial refund state: %w", err)
+	}
+	initial, err := service.transactions.ParsePaymentState(ctx, initialRaw, proof)
 	if err != nil {
 		return nil, fmt.Errorf("parse initial pool state: %w", err)
 	}
@@ -206,6 +210,9 @@ func (service *Service) DeliverRequestedContent(ctx context.Context, request *bi
 	}
 	if ^uint64(0)-previous.SellerAmountSat < price {
 		return nil, pool.ErrInsufficientBalance
+	}
+	if requestTerms.PaymentSequenceAfter != uint64(previous.PaymentSequence+1) || requestTerms.SellerAmountAfterSat != previous.SellerAmountSat+price {
+		return nil, fmt.Errorf("%w: authorization amount or sequence does not match verified content price", pool.ErrInvalidEvidence)
 	}
 	if previous.PaymentSequence >= 0xfffffffe {
 		return nil, pool.ErrStalePaymentSequence
@@ -527,6 +534,9 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	state, err := service.transactions.ParsePaymentState(ctx, request.UnsignedStateTxRaw, proof)
 	if err != nil {
 		return nil, err
+	}
+	if state.PaymentSequence != uint32(terms.PaymentSequenceAfter) || state.SellerAmountSat != terms.SellerAmountAfterSat {
+		return nil, fmt.Errorf("%w: arbitration candidate does not match payment authorization", pool.ErrInvalidEvidence)
 	}
 	state, err = service.transactions.AttachSellerArbitrationSignature(ctx, state, request.SellerTransactionSignature)
 	if err != nil {

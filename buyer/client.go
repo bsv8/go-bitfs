@@ -113,7 +113,11 @@ func (client *Client) AcceptRefundPresign(ctx context.Context, request *pool.Ref
 	if err := client.transactions.VerifyOpening(proof); err != nil {
 		return nil, fmt.Errorf("verify complete pool opening proof: %w", err)
 	}
-	initial, err := client.transactions.ParsePaymentState(ctx, proof.RefundTx, proof)
+	initialRaw, err := client.transactions.BuildRefundSubmission(proof)
+	if err != nil {
+		return nil, fmt.Errorf("assemble initial refund state: %w", err)
+	}
+	initial, err := client.transactions.ParsePaymentState(ctx, initialRaw, proof)
 	if err != nil {
 		return nil, fmt.Errorf("parse initial pool state: %w", err)
 	}

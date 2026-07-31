@@ -1,6 +1,7 @@
 package triple_endpoint
 
 import (
+	"bytes"
 	"fmt"
 
 	multisig "github.com/bsv8/MultisigPool/pkg/libs"
@@ -64,6 +65,9 @@ func MergeTriplePoolServerB(txHex string, serverSig, bSig *[]byte) (*tx.Transact
 func mergeTripleRoleSigs(txHex string, first, second *[]byte) (*tx.Transaction, error) {
 	if first == nil || second == nil || len(*first) == 0 || len(*second) == 0 {
 		return nil, fmt.Errorf("two non-empty signatures are required")
+	}
+	if bytes.Equal(*first, *second) {
+		return nil, fmt.Errorf("duplicate signatures are not permitted")
 	}
 	return MergeTripleFeePoolSigForSpendTx(txHex, first, second)
 }

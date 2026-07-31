@@ -6,8 +6,8 @@ github.com/bsv8/MultisigPool v0.0.0-20260731153119-4f7711043aa8 h1:Eookk7YoEcgna
 github.com/bsv8/MultisigPool v0.0.0-20260731153119-4f7711043aa8/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
 github.com/bsv8/MultisigPool v0.0.0-20260731153715-6bafe61d39fd h1:9Jk5Kg1s95Qnk4JNHahE/2wxKvHHTSuw0F/8mpT/T5k=
 github.com/bsv8/MultisigPool v0.0.0-20260731153715-6bafe61d39fd/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
-github.com/bsv8/MultisigPool v0.0.0-20260731154925-c4936de689c1 h1:xiaj9DqX5gE+AzqwiKEVL5hQTmYVL8dwTFMQVqkX0J4=
-github.com/bsv8/MultisigPool v0.0.0-20260731154925-c4936de689c1/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
+github.com/bsv8/MultisigPool v0.0.0-20260731160211-c49bc57e587f h1:AThJ4z/cdFLRpF1kNLdvGHH0FHw8ei1stCnAtThYbWE=
+github.com/bsv8/MultisigPool v0.0.0-20260731160211-c49bc57e587f/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/fxamacker/cbor/v2 v2.9.2 h1:X4Ksno9+x3cz0TZv69ec1hxP/+tymuR8PXQJyDwfh78=

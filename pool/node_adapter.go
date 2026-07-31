@@ -63,7 +63,9 @@ func (node *VerifiedNonFinalPoolNode) SubmitUpdate(ctx context.Context, rawTx []
 		return nil, fmt.Errorf("parse non-final payment: %w", err)
 	}
 	if err := node.engine.VerifyAcceptedPayment(state, proof); err != nil {
-		return nil, fmt.Errorf("verify non-final payment: %w", err)
+		if arbitrationErr := node.engine.VerifyArbitratedPayment(state, proof); arbitrationErr != nil {
+			return nil, fmt.Errorf("verify non-final payment: %w", err)
+		}
 	}
 	accepted, err := node.backend.SubmitUpdate(ctx, raw)
 	if err != nil {

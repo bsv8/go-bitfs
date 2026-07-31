@@ -237,6 +237,7 @@ type MultisigPoolPort interface {
 	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
 	ParseFinalPaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
 	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
+	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
 	VerifyFinalPayment(*PaymentState, *OpeningProof) error
 	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
 	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error

@@ -1,0 +1,33 @@
+# github.com/bsv-blockchain/go-sdk v1.2.18
+## explicit; go 1.24.3
+github.com/bsv-blockchain/go-sdk/chainhash
+github.com/bsv-blockchain/go-sdk/compat/base58
+github.com/bsv-blockchain/go-sdk/primitives/aesgcm
+github.com/bsv-blockchain/go-sdk/primitives/ec
+github.com/bsv-blockchain/go-sdk/primitives/ecdsa
+github.com/bsv-blockchain/go-sdk/primitives/hash
+github.com/bsv-blockchain/go-sdk/primitives/keyshares
+github.com/bsv-blockchain/go-sdk/script
+github.com/bsv-blockchain/go-sdk/transaction
+github.com/bsv-blockchain/go-sdk/transaction/chaintracker
+github.com/bsv-blockchain/go-sdk/transaction/sighash
+github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh
+github.com/bsv-blockchain/go-sdk/util
+# github.com/bsv8/MultisigPool v0.0.0-20260731154053-5255a7f67f3a
+## explicit; go 1.24.3
+github.com/bsv8/MultisigPool/pkg
+github.com/bsv8/MultisigPool/pkg/dual_endpoint
+github.com/bsv8/MultisigPool/pkg/libs
+github.com/bsv8/MultisigPool/pkg/triple_endpoint
+# github.com/fxamacker/cbor/v2 v2.9.2
+## explicit; go 1.20
+github.com/fxamacker/cbor/v2
+# github.com/pkg/errors v0.9.1
+## explicit
+github.com/pkg/errors
+# github.com/x448/float16 v0.8.4
+## explicit; go 1.11
+github.com/x448/float16
+# golang.org/x/crypto v0.48.0
+## explicit; go 1.24.0
+golang.org/x/crypto/ripemd160

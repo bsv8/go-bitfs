@@ -560,9 +560,6 @@ func (engine *MultisigPoolEngine) SignArbiterPayment(ctx context.Context, state 
 	}
 	return append([]byte(nil), (*sig)...), nil
 }
-func (engine *MultisigPoolEngine) AddArbiterSignature(_ context.Context, _ *PaymentState, _ []byte) (*SignedPayment, error) {
-	return nil, invalid("A+B arbitration path is not supported in protocol major 2")
-}
 func (engine *MultisigPoolEngine) AddArbitrationSignature(_ context.Context, state *PaymentState, arbiterSig []byte) (*SignedPayment, error) {
 	if engine == nil || state == nil || len(arbiterSig) == 0 {
 		return nil, invalid("arbitration state and B signature are required")

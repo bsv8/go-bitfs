@@ -250,7 +250,6 @@ type MultisigPoolPort interface {
 	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
 	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
 	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
-	AddArbiterSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
 	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
 	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, error)
 }

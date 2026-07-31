@@ -60,6 +60,9 @@ func BuildTriplePoolState(input TriplePoolStateInput) (*tx.Transaction, error) {
 	if len(state.Inputs) != 1 || len(state.Outputs) != 2 {
 		return nil, fmt.Errorf("triple pool state must have one input and two outputs")
 	}
+	if input.Sequence <= state.Inputs[0].SequenceNumber {
+		return nil, fmt.Errorf("triple pool payment sequence must increase")
+	}
 	lock, err := BuildTriplePoolLock(input.Server, input.A, input.B)
 	if err != nil {
 		return nil, err

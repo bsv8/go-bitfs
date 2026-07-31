@@ -23,6 +23,11 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   7,
+		PaymentSequenceAfter:  8,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x02},
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
@@ -110,6 +115,12 @@ func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0xff},
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
@@ -131,6 +142,12 @@ func TestContentDeliveryRejectsChangedPayload(t *testing.T) {
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x02},
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
@@ -180,6 +197,11 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x02},
 		ContentType:           ContentBlock,
 		ContentHash:           blockHash[:],
@@ -203,6 +225,11 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x02},
 		ContentType:           ContentBlock,
 		ContentHash:           otherHash[:],
@@ -235,6 +262,11 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 		QuoteTermsHash:        quoteHash[:],
 		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x02},
 		ContentType:           ContentSeed,
 		ContentHash:           seedHash[:],
@@ -257,6 +289,11 @@ func TestContentCBORVector(t *testing.T) {
 		QuoteTermsHash:        bytes.Repeat([]byte{0x01}, sha256.Size),
 		SpendTxID:             bytes.Repeat([]byte{0x02}, sha256.Size),
 		BasePaymentSequence:   3,
+		PaymentSequenceAfter:  4,
+		SellerAmountAfterSat:  125,
+		MinerFeeRateSatPerKB:  100,
+		BuyerPubkey:           []byte{0x02, 0x11},
+		SellerPubkey:          []byte{0x03, 0x22},
 		SelectedArbiterPubkey: []byte{0x04},
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{0x05}, sha256.Size),
@@ -271,6 +308,20 @@ func TestContentCBORVector(t *testing.T) {
 	}
 	if _, err := DecodeContentRequestTerms(raw); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestContentRequestRejectsLegacyWeakTerms(t *testing.T) {
+	terms := &ContentRequestTerms{
+		QuoteTermsHash:        bytes.Repeat([]byte{1}, sha256.Size),
+		SpendTxID:             bytes.Repeat([]byte{2}, sha256.Size),
+		SelectedArbiterPubkey: []byte{3},
+		ContentType:           ContentBlock,
+		ContentHash:           bytes.Repeat([]byte{4}, sha256.Size),
+		DeliveryDeadlineUnix:  100,
+	}
+	if _, err := EncodeContentRequestTerms(terms); err == nil {
+		t.Fatal("legacy weak content request terms were accepted")
 	}
 }
 

@@ -346,10 +346,10 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if len(terms.SpendTxID) != sha256.Size {
 		return errors.New("spend_txid must be 32 bytes")
 	}
-	if terms.PaymentSequenceAfter != 0 && terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
+	if terms.PaymentSequenceAfter == 0 || terms.BasePaymentSequence == ^uint64(0) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
 		return errors.New("payment_sequence_after must equal base_payment_sequence plus one")
 	}
-	if (terms.PaymentSequenceAfter != 0 || terms.SellerAmountAfterSat != 0 || terms.MinerFeeRateSatPerKB != 0 || len(terms.BuyerPubkey) != 0 || len(terms.SellerPubkey) != 0) && (len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0) {
+	if len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
 		return errors.New("buyer_pubkey and seller_pubkey are required")
 	}
 	if len(terms.SelectedArbiterPubkey) == 0 {

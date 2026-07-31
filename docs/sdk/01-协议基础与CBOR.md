@@ -20,7 +20,7 @@
 
 ## 包边界
 
-新 API 采用“纯协议核心 + 角色工作流 + 外部端口”的三层结构。现有旧 `HashGetTicket`、`proposal_id`、会话池 API 应标记为兼容层，不得成为新入口。
+新 API 采用“纯协议核心 + 角色工作流 + 外部端口”的三层结构。旧 `HashGetTicket`、`proposal_id`、会话池 API 仅作为历史文档保留，不属于当前实现或新入口。
 
 ```text
 bitfs/       001、003、004 的凭证、CBOR、签名和内容校验

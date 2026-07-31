@@ -1,5 +1,7 @@
 // Package arbiter provides an in-memory arbitration workflow example. It is
 // intentionally transport-neutral; adapters submit and publish CBOR messages.
+//go:build legacy
+
 package arbiter
 
 import (

@@ -1,0 +1,249 @@
+// Package wire is the transport-facing dispatcher for the new protocol.
+// Kind is carried by the transport; it is intentionally not wrapped into the
+// signed CBOR documents defined by 001-007.
+package wire
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/bsv8/go-bitfs/arbiter"
+	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/pool"
+)
+
+const ProtocolFamily = "bitfs.protocol.v1"
+
+type Kind uint16
+
+const (
+	Quote                     Kind = 1
+	PoolRefundPresignRequest  Kind = 2
+	PoolRefundPresignResponse Kind = 3
+	PoolFundingTxDelivery     Kind = 4
+	ContentRequest            Kind = 5
+	ContentDelivery           Kind = 6
+	CumulativePayment         Kind = 7
+	ArbitrationRequest        Kind = 8
+	ArbitrationResponse       Kind = 9
+)
+
+// Packet is the exact CBOR data item to pass to a transport adapter.
+type Packet struct {
+	Kind Kind
+	CBOR []byte
+}
+
+func Marshal(kind Kind, message any) (Packet, error) {
+	var (
+		raw []byte
+		err error
+	)
+	switch kind {
+	case Quote:
+		value, ok := message.(*bitfs.SignedFileQuote)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *bitfs.SignedFileQuote", kind)
+		}
+		raw, err = bitfs.EncodeSignedFileQuote(value)
+	case ContentRequest:
+		value, ok := message.(*bitfs.SignedContentRequest)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *bitfs.SignedContentRequest", kind)
+		}
+		raw, err = bitfs.EncodeSignedContentRequest(value)
+	case ContentDelivery:
+		value, ok := message.(*bitfs.SignedContentDelivery)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *bitfs.SignedContentDelivery", kind)
+		}
+		raw, err = bitfs.EncodeSignedContentDelivery(value)
+	case PoolRefundPresignRequest:
+		value, ok := message.(*pool.RefundPresignRequest)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *pool.RefundPresignRequest", kind)
+		}
+		raw, err = pool.EncodeRefundPresignRequest(value)
+	case PoolRefundPresignResponse:
+		value, ok := message.(*pool.RefundPresignResponse)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *pool.RefundPresignResponse", kind)
+		}
+		raw, err = pool.EncodeRefundPresignResponse(value)
+	case PoolFundingTxDelivery:
+		value, ok := message.(*pool.FundingTxDelivery)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *pool.FundingTxDelivery", kind)
+		}
+		raw, err = pool.EncodeFundingTxDelivery(value)
+	case CumulativePayment:
+		value, ok := message.(*pool.PaymentUpdate)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *pool.PaymentUpdate", kind)
+		}
+		raw, err = pool.EncodePaymentUpdate(value)
+	case ArbitrationRequest:
+		value, ok := message.(*arbiter.PaymentSignatureRequest)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbiter.PaymentSignatureRequest", kind)
+		}
+		raw, err = arbiter.MarshalRequest(value)
+	case ArbitrationResponse:
+		value, ok := message.(*arbiter.PaymentSignatureResponse)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbiter.PaymentSignatureResponse", kind)
+		}
+		raw, err = arbiter.MarshalResponse(value)
+	default:
+		return Packet{}, fmt.Errorf("unsupported new wire kind %d", kind)
+	}
+	if err != nil {
+		return Packet{}, fmt.Errorf("marshal wire kind %d: %w", kind, err)
+	}
+	return Packet{Kind: kind, CBOR: append([]byte(nil), raw...)}, nil
+}
+
+func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
+	if len(rawCBOR) == 0 {
+		return nil, errors.New("wire CBOR is required")
+	}
+	switch kind {
+	case Quote:
+		return bitfs.DecodeSignedFileQuote(rawCBOR)
+	case ContentRequest:
+		return bitfs.DecodeSignedContentRequest(rawCBOR)
+	case ContentDelivery:
+		return bitfs.DecodeSignedContentDelivery(rawCBOR)
+	case PoolRefundPresignRequest:
+		return pool.DecodeRefundPresignRequest(rawCBOR)
+	case PoolRefundPresignResponse:
+		return pool.DecodeRefundPresignResponse(rawCBOR)
+	case PoolFundingTxDelivery:
+		return pool.DecodeFundingTxDelivery(rawCBOR)
+	case CumulativePayment:
+		return pool.DecodePaymentUpdate(rawCBOR)
+	case ArbitrationRequest:
+		return arbiter.UnmarshalRequest(rawCBOR)
+	case ArbitrationResponse:
+		return arbiter.UnmarshalResponse(rawCBOR)
+	default:
+		return nil, fmt.Errorf("unsupported new wire kind %d", kind)
+	}
+}
+
+func MarshalQuote(message *bitfs.SignedFileQuote) ([]byte, error) {
+	packet, err := Marshal(Quote, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error) {
+	message, err := Unmarshal(Quote, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*bitfs.SignedFileQuote), nil
+}
+
+func MarshalContentRequest(message *bitfs.SignedContentRequest) ([]byte, error) {
+	packet, err := Marshal(ContentRequest, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalContentRequest(rawCBOR []byte) (*bitfs.SignedContentRequest, error) {
+	message, err := Unmarshal(ContentRequest, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*bitfs.SignedContentRequest), nil
+}
+
+func MarshalContentDelivery(message *bitfs.SignedContentDelivery) ([]byte, error) {
+	packet, err := Marshal(ContentDelivery, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalContentDelivery(rawCBOR []byte) (*bitfs.SignedContentDelivery, error) {
+	message, err := Unmarshal(ContentDelivery, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*bitfs.SignedContentDelivery), nil
+}
+
+func MarshalPoolRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error) {
+	packet, err := Marshal(PoolRefundPresignRequest, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error) {
+	message, err := Unmarshal(PoolRefundPresignRequest, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*pool.RefundPresignRequest), nil
+}
+
+func MarshalPoolRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error) {
+	packet, err := Marshal(PoolRefundPresignResponse, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error) {
+	message, err := Unmarshal(PoolRefundPresignResponse, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*pool.RefundPresignResponse), nil
+}
+
+func MarshalPoolFundingTxDelivery(message *pool.FundingTxDelivery) ([]byte, error) {
+	packet, err := Marshal(PoolFundingTxDelivery, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, error) {
+	message, err := Unmarshal(PoolFundingTxDelivery, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*pool.FundingTxDelivery), nil
+}
+
+func MarshalPaymentUpdate(message *pool.PaymentUpdate) ([]byte, error) {
+	packet, err := Marshal(CumulativePayment, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error) {
+	message, err := Unmarshal(CumulativePayment, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*pool.PaymentUpdate), nil
+}
+
+func MarshalArbitrationRequest(message *arbiter.PaymentSignatureRequest) ([]byte, error) {
+	packet, err := Marshal(ArbitrationRequest, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbiter.PaymentSignatureRequest, error) {
+	message, err := Unmarshal(ArbitrationRequest, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*arbiter.PaymentSignatureRequest), nil
+}
+
+func MarshalArbitrationResponse(message *arbiter.PaymentSignatureResponse) ([]byte, error) {
+	packet, err := Marshal(ArbitrationResponse, message)
+	return packet.CBOR, err
+}
+
+func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbiter.PaymentSignatureResponse, error) {
+	message, err := Unmarshal(ArbitrationResponse, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*arbiter.PaymentSignatureResponse), nil
+}

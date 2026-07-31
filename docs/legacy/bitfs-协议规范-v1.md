@@ -1,8 +1,8 @@
 # BitFS 协议规范 v1
 
-> **历史兼容文档，不作为新施工依据。** 本文描述的 `FileQuote`、`HashGetTicket`、`session_id`、`content_index`、`expected_size`、票据价格和签名域，均属于旧 V1 会话模型。新设计按业务顺序以 [001-报价凭证规范](001-报价凭证规范.md) 至 [006-费用池无条件关闭规范](006-费用池无条件关闭规范.md) 为准；新实现不得混用两套字段或把本文件的会话 ID 当作真值。
+> **历史兼容文档，不作为新施工依据。** 本文描述的 `FileQuote`、`HashGetTicket`、`session_id`、`content_index`、`expected_size`、票据价格和签名域，均属于旧 V1 会话模型。新设计按业务顺序以 [001-报价凭证规范](../protocol/001-报价凭证规范.md) 至 [006-费用池无条件关闭规范](../protocol/006-费用池无条件关闭规范.md) 为准；新实现不得混用两套字段或把本文件的会话 ID 当作真值。
 
-本文件说明 BitFS 的业务规则。wire schema 以 [`../spec/v1/bitfs.cddl`](../spec/v1/bitfs.cddl) 为准，编码、稳定 ID 和签名规则以 [`../spec/v1/protocol.md`](../spec/v1/protocol.md) 为准。买方、卖方、仲裁方及其运行时不得自行复制或改变这些规则。
+本文件说明 BitFS 的业务规则。wire schema 以 [`../../spec/v1/bitfs.cddl`](../../spec/v1/bitfs.cddl) 为准，编码、稳定 ID 和签名规则以 [`../../spec/v1/protocol.md`](../../spec/v1/protocol.md) 为准。买方、卖方、仲裁方及其运行时不得自行复制或改变这些规则。
 
 ## 文件模型
 
@@ -16,7 +16,7 @@
 
 发现不属于 BitFS 核心协议。DHT、pubsub、tracker 或手工连接可自行使用 `seed_hash` 发现对端，但其地址、端口、广播和反滥用规则不进入 BitFS wire schema。
 
-> 本节的 `FileQuote` 是为 V1 兼容保留的旧无签名报文。新的 1 对 1、自证明报价必须使用 [`001-报价凭证规范.md`](001-报价凭证规范.md) 中的 `SignedFileQuote`。
+> 本节的 `FileQuote` 是为 V1 兼容保留的旧无签名报文。新的 1 对 1、自证明报价必须使用 [`001-报价凭证规范.md`](../protocol/001-报价凭证规范.md) 中的 `SignedFileQuote`。
 
 卖方以一个 `seed_hash` 对应的完整文件报价，使用 `FileQuote` CBOR 报文。报价必须含 seed、普通 block、最后 block 的价格，文件大小、建议文件名与过期时间。若文件大小整除 block 大小，`endblock_price_sat` 必须等于 `block_price_sat`。
 

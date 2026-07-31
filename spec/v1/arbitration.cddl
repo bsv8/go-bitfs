@@ -1,0 +1,16 @@
+; BitFS v1 seller arbitration signature credentials (007).
+; The two nested bstr values are exact deterministic CBOR child documents.
+
+arbitration-request = [
+  1,
+  bstr,               ; pool-opening-proof-cbor
+  bstr                ; latest-payment-update-cbor
+]
+
+arbitration-response = [
+  1,
+  id,                 ; sha256(latest-payment-update-cbor)
+  bstr                ; arbiter-transaction-signature
+]
+
+id = bstr .size 32

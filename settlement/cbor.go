@@ -1,3 +1,7 @@
+//go:build legacy
+
+// Package settlement is the legacy proposal/session settlement protocol.
+// Deprecated: use pool and wire for the protocol 001-007 state model.
 package settlement
 
 import (
@@ -34,18 +38,18 @@ func EncodeMessage(message any) ([]byte, error) {
 func DecodeMessage(data []byte) (any, error) {
 	var header []cbor.RawMessage
 	if err := dec.Unmarshal(data, &header); err != nil {
-		return nil, fmt.Errorf("decode pool packet: %w", err)
+		return nil, fmt.Errorf("decode legacy settlement packet: %w", err)
 	}
 	if len(header) < 2 {
-		return nil, errors.New("pool packet must contain version and kind")
+		return nil, errors.New("legacy settlement packet must contain version and kind")
 	}
 	var version uint64
 	var kind Kind
 	if err := dec.Unmarshal(header[0], &version); err != nil || version != MajorVersion {
-		return nil, errors.New("unsupported pool major version")
+		return nil, errors.New("unsupported legacy settlement major version")
 	}
 	if err := dec.Unmarshal(header[1], &kind); err != nil {
-		return nil, errors.New("pool message kind is invalid")
+		return nil, errors.New("legacy settlement message kind is invalid")
 	}
 	message, err := messageForKind(kind)
 	if err != nil {
@@ -62,7 +66,7 @@ func DecodeMessage(data []byte) (any, error) {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, errors.New("pool packet is not deterministically encoded")
+		return nil, errors.New("legacy settlement packet is not deterministically encoded")
 	}
 	return message, nil
 }
@@ -123,31 +127,64 @@ func validate(message any) error {
 	case *PaymentPrepared:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentPrepared
+		if err := requireID("ticket_id", value.TicketID); err != nil {
+			return err
+		}
+		if err := requireID("proposal_id", value.ProposalID); err != nil {
+			return err
+		}
 	case *PaymentCommit:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentCommit
 		if err := validateTicket(value.Ticket); err != nil {
 			return err
 		}
+		if err := requireID("proposal_id", value.ProposalID); err != nil {
+			return err
+		}
 	case *PaymentCommitted:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentCommitted
+		if err := requireID("ticket_id", value.TicketID); err != nil {
+			return err
+		}
 	case *PaymentAbort:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentAbort
 		if err := validateTicket(value.Ticket); err != nil {
 			return err
 		}
+		if err := requireID("proposal_id", value.ProposalID); err != nil {
+			return err
+		}
+		if value.ReasonCode == "" {
+			return errors.New("abort reason_code is required")
+		}
 	case *PaymentAborted:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentAborted
+		if err := requireID("ticket_id", value.TicketID); err != nil {
+			return err
+		}
+		if value.ReasonCode == "" {
+			return errors.New("aborted reason_code is required")
+		}
 	case *PaymentRejected:
 		version, kind = value.Version, value.MessageKind
 		expected = KindPaymentRejected
+		if err := requireID("ticket_id", value.TicketID); err != nil {
+			return err
+		}
+		if value.ReasonCode == "" {
+			return errors.New("rejected reason_code is required")
+		}
 	case *ArbitrationRequest:
 		version, kind = value.Version, value.MessageKind
 		expected = KindArbitrationRequest
 		if err := requireID("spend_txid", value.SpendTxID); err != nil {
+			return err
+		}
+		if err := ValidateArbitrationRequest(value); err != nil {
 			return err
 		}
 	case *CloseSignatureRequest:

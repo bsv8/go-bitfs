@@ -1,5 +1,8 @@
-// Package arbiterclient is a transport-neutral client helper. Queue and other
-// adapters may implement Service by sending/receiving CBOR business messages.
+// Package arbiterclient is a legacy transport-neutral client helper for the
+// HashGetTicket arbitration model.
+// Deprecated: use arbiter.Service with wire.ArbitrationRequest/Response.
+//go:build legacy
+
 package arbiterclient
 
 import (

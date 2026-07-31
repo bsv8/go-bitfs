@@ -52,6 +52,56 @@ func TestDecodeMessageRejectsNonDeterministicEncoding(t *testing.T) {
 	}
 }
 
+func TestHashDeliveryPayloadLimitAppliesAtBothCBOREntries(t *testing.T) {
+	hash := bytes.Repeat([]byte{0x11}, 32)
+	overLimit := bytes.Repeat([]byte{0x22}, int(BlockSize)+1)
+	message := &HashDelivery{SessionID: "s", Sequence: 1, ContentHash: hash, Payload: overLimit}
+	if _, err := EncodeMessage(message); err == nil {
+		t.Fatal("EncodeMessage accepted an oversized HashDelivery payload")
+	}
+	raw, err := encodeArray(protocolMajorVersion, messageKindHashDelivery, "s", uint64(1), hash, overLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMessage(raw); err == nil {
+		t.Fatal("DecodeMessage accepted an oversized HashDelivery payload")
+	}
+}
+
+func TestHashGetTicketCBOREntryEnforcesSeedSizeLimit(t *testing.T) {
+	hash := bytes.Repeat([]byte{0x11}, 32)
+	ticket := &HashGetTicket{
+		SessionID:      "s",
+		Sequence:       1,
+		RootSeedHash:   hash,
+		ContentHash:    hash,
+		ContentIndex:   SeedContentIndex,
+		ExpectedSize:   BlockSize + 1,
+		PriceSat:       1,
+		BuyerPubkey:    []byte{2},
+		SellerPubkey:   []byte{3},
+		ExpiresAtUnix:  100,
+		BuyerSignature: []byte{4},
+	}
+	if _, err := EncodeMessage(ticket); err == nil {
+		t.Fatal("EncodeMessage accepted an oversized seed ticket")
+	}
+	if _, err := ticket.MarshalCBOR(); err == nil {
+		t.Fatal("HashGetTicket.MarshalCBOR accepted an oversized seed ticket")
+	}
+	raw, err := encodeArray(protocolMajorVersion, messageKindHashGetTicket, ticket.SessionID, ticket.Sequence, ticket.RootSeedHash, ticket.ContentHash, ticket.ContentIndex, ticket.ExpectedSize, ticket.PriceSat, ticket.BuyerPubkey, ticket.SellerPubkey, ticket.ExpiresAtUnix, ticket.BuyerSignature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMessage(raw); err == nil {
+		t.Fatal("DecodeMessage accepted an oversized seed ticket")
+	}
+	var decoded HashGetTicket
+	if err := decoded.UnmarshalCBOR(raw); err == nil {
+		t.Fatal("HashGetTicket.UnmarshalCBOR accepted an oversized seed ticket")
+	}
+}
+
 func TestEveryV1MessageHasCanonicalCBORRoundTrip(t *testing.T) {
 	hash := bytes.Repeat([]byte{0x11}, 32)
 	ticket := &HashGetTicket{SessionID: "s", Sequence: 1, RootSeedHash: hash, ContentHash: hash, ContentIndex: SeedContentIndex, ExpectedSize: 32, PriceSat: 1, BuyerPubkey: []byte{2}, SellerPubkey: []byte{3}, ExpiresAtUnix: 100, BuyerSignature: []byte{4}}

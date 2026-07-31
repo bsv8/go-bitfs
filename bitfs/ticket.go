@@ -39,6 +39,9 @@ func ValidateHashGetTicket(ticket *HashGetTicket) error {
 		return errors.New("ticket expires_at_unix is required")
 	}
 	if ticket.ContentIndex == SeedContentIndex {
+		if ticket.ExpectedSize > BlockSize {
+			return fmt.Errorf("invalid seed ticket expected_size %d", ticket.ExpectedSize)
+		}
 		if ticket.ExpectedSize%sha256.Size != 0 {
 			return fmt.Errorf("seed ticket expected_size must be a multiple of %d", sha256.Size)
 		}

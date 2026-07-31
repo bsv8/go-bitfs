@@ -1,3 +1,5 @@
+//go:build legacy
+
 // Package integration_test 验证公开 buyer、seller 与仲裁 demo 的最小闭环。
 package integration_test
 

@@ -62,6 +62,18 @@ func TestRecommendedFilenameIsNotSigned(t *testing.T) {
 	}
 }
 
+func TestSanitizeRecommendedFilename(t *testing.T) {
+	if got := SanitizeRecommendedFilename("../../secret.txt"); got != "secret.txt" {
+		t.Fatalf("sanitized filename = %q", got)
+	}
+	if got := SanitizeRecommendedFilename("..\\secret.txt"); got != "secret.txt" {
+		t.Fatalf("sanitized Windows filename = %q", got)
+	}
+	if got := SanitizeRecommendedFilename("../"); got != "download" {
+		t.Fatalf("invalid filename fallback = %q", got)
+	}
+}
+
 func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
 	quote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "f", quoteTestSigner)
 	if err != nil {

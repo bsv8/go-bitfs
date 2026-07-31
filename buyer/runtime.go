@@ -1,8 +1,11 @@
 // Package buyer implements the buyer-side BitFS workflow. Network adapters
 // feed it asynchronous CBOR messages; it does not implement a transport service.
+//go:build legacy
+
 package buyer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +28,9 @@ type PoolClient interface {
 
 type Config struct{ Now func() time.Time }
 
+// Runtime is the legacy HashGetTicket session workflow. New integrations
+// should use Client, which binds quotes, pool references and signed content
+// credentials to the protocol 001-007 state model.
 type Runtime struct {
 	seller SellerClient
 	pool   PoolClient
@@ -34,6 +40,8 @@ type Runtime struct {
 	quotes []*core.FileQuote
 }
 
+// New constructs the legacy HashGetTicket runtime.
+// Deprecated: use NewClient with protocol 001-007 ports.
 func New(config Config, seller SellerClient, pool PoolClient) (*Runtime, error) {
 	if seller == nil {
 		return nil, errors.New("seller client is required")
@@ -56,7 +64,7 @@ func (runtime *Runtime) ReceiveQuote(quote *core.FileQuote) error {
 		return err
 	}
 	runtime.mu.Lock()
-	runtime.quotes = append(runtime.quotes, quote)
+	runtime.quotes = append(runtime.quotes, core.CloneFileQuote(quote))
 	runtime.mu.Unlock()
 	return nil
 }
@@ -67,7 +75,11 @@ func (runtime *Runtime) Quotes() []*core.FileQuote {
 	}
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
-	return append([]*core.FileQuote(nil), runtime.quotes...)
+	quotes := make([]*core.FileQuote, len(runtime.quotes))
+	for index, quote := range runtime.quotes {
+		quotes[index] = core.CloneFileQuote(quote)
+	}
+	return quotes
 }
 
 // Purchase is a local orchestration helper. It is not a wire-level BitFS RPC.
@@ -81,6 +93,7 @@ func (runtime *Runtime) Purchase(ctx context.Context, spendTxID []byte, ticket *
 	if err := core.ValidateHashGetTicketAt(ticket, runtime.now()); err != nil {
 		return nil, err
 	}
+	ticket = core.CloneHashGetTicket(ticket)
 	delivery, err := runtime.seller.Deliver(ctx, ticket)
 	if err != nil {
 		return nil, fmt.Errorf("seller delivery: %w", err)
@@ -97,6 +110,12 @@ func (runtime *Runtime) Purchase(ctx context.Context, spendTxID []byte, ticket *
 	if err != nil {
 		return nil, fmt.Errorf("prepare ticket payment: %w", err)
 	}
+	if prepared == nil {
+		return nil, errors.New("prepare ticket payment was rejected")
+	}
+	if !bytes.Equal(prepared.TicketID, ticketID[:]) {
+		return nil, errors.New("prepare ticket payment returned an unexpected ticket")
+	}
 	if len(prepared.ProposalID) == 0 {
 		return nil, errors.New("prepare ticket payment was rejected")
 	}
@@ -104,7 +123,7 @@ func (runtime *Runtime) Purchase(ctx context.Context, spendTxID []byte, ticket *
 	if err != nil {
 		return nil, fmt.Errorf("commit ticket payment: %w", err)
 	}
-	if committed == nil {
+	if committed == nil || !bytes.Equal(committed.TicketID, ticketID[:]) {
 		return nil, errors.New("commit ticket payment was rejected")
 	}
 	return delivery, nil

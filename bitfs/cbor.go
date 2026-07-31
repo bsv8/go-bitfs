@@ -49,6 +49,9 @@ func EncodeMessage(message any) ([]byte, error) {
 	if !isMessage(message) {
 		return nil, fmt.Errorf("unsupported BitFS message %T", message)
 	}
+	if err := validateLegacyMessage(message); err != nil {
+		return nil, err
+	}
 	return canonicalEnc.Marshal(message)
 }
 
@@ -75,6 +78,14 @@ func DecodeMessage(data []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if kind == messageKindHashDelivery {
+		if len(header) != 6 {
+			return nil, errors.New("HashDelivery packet must contain exactly six fields")
+		}
+		if err := validateEncodedPayloadSize(header[5]); err != nil {
+			return nil, err
+		}
+	}
 	if err := strictDec.Unmarshal(data, message); err != nil {
 		return nil, fmt.Errorf("decode BitFS CBOR message: %w", err)
 	}
@@ -86,6 +97,80 @@ func DecodeMessage(data []byte) (any, error) {
 		return nil, errors.New("BitFS CBOR packet is not deterministically encoded")
 	}
 	return message, nil
+}
+
+func validateLegacyMessage(message any) error {
+	switch value := message.(type) {
+	case *HashGetTicket:
+		if err := ValidateHashGetTicket(value); err != nil {
+			return fmt.Errorf("invalid HashGetTicket: %w", err)
+		}
+		return nil
+	case *HashDelivery:
+		return validateHashDeliveryPayload(value.Payload)
+	default:
+		return nil
+	}
+}
+
+func validateHashDeliveryPayload(payload []byte) error {
+	if uint64(len(payload)) > BlockSize {
+		return fmt.Errorf("HashDelivery payload exceeds block size limit of %d bytes", BlockSize)
+	}
+	return nil
+}
+
+// validateEncodedPayloadSize checks a definite CBOR byte string before the
+// decoder allocates its contents. The strict decoder rejects indefinite byte
+// strings later, but this early check keeps an oversized legacy packet from
+// becoming an oversized allocation first.
+func validateEncodedPayloadSize(raw []byte) error {
+	if len(raw) == 0 {
+		return errors.New("HashDelivery payload is missing")
+	}
+	initial := raw[0]
+	if initial>>5 != 2 {
+		return errors.New("HashDelivery payload must be a CBOR byte string")
+	}
+	additional := initial & 0x1f
+	var length uint64
+	var headerLength int
+	switch {
+	case additional < 24:
+		length, headerLength = uint64(additional), 1
+	case additional == 24:
+		if len(raw) < 2 {
+			return errors.New("HashDelivery payload length is truncated")
+		}
+		length, headerLength = uint64(raw[1]), 2
+	case additional == 25:
+		if len(raw) < 3 {
+			return errors.New("HashDelivery payload length is truncated")
+		}
+		length, headerLength = uint64(raw[1])<<8|uint64(raw[2]), 3
+	case additional == 26:
+		if len(raw) < 5 {
+			return errors.New("HashDelivery payload length is truncated")
+		}
+		length, headerLength = uint64(raw[1])<<24|uint64(raw[2])<<16|uint64(raw[3])<<8|uint64(raw[4]), 5
+	case additional == 27:
+		if len(raw) < 9 {
+			return errors.New("HashDelivery payload length is truncated")
+		}
+		for index := 1; index < 9; index++ {
+			length = length<<8 | uint64(raw[index])
+		}
+		headerLength = 9
+	default:
+		return errors.New("HashDelivery payload uses an unsupported CBOR length")
+	}
+	if length > BlockSize {
+		return fmt.Errorf("HashDelivery payload exceeds block size limit of %d bytes", BlockSize)
+	}
+	if uint64(len(raw)-headerLength) < length {
+		return errors.New("HashDelivery payload is truncated")
+	}
+	return nil
 }
 
 // PacketID returns the stable content address of a canonical BitFS packet.
@@ -219,6 +304,9 @@ func (message *FileQuote) UnmarshalCBOR(data []byte) error {
 }
 
 func (message HashGetTicket) MarshalCBOR() ([]byte, error) {
+	if err := ValidateHashGetTicket(&message); err != nil {
+		return nil, err
+	}
 	return encodeArray(protocolMajorVersion, messageKindHashGetTicket, message.SessionID, message.Sequence, bstr(message.RootSeedHash), bstr(message.ContentHash), message.ContentIndex, message.ExpectedSize, message.PriceSat, bstr(message.BuyerPubkey), bstr(message.SellerPubkey), message.ExpiresAtUnix, bstr(message.BuyerSignature))
 }
 
@@ -260,10 +348,16 @@ func (message *HashGetTicket) UnmarshalCBOR(data []byte) error {
 	if err := decode(values[11], &message.ExpiresAtUnix); err != nil {
 		return err
 	}
-	return decode(values[12], &message.BuyerSignature)
+	if err := decode(values[12], &message.BuyerSignature); err != nil {
+		return err
+	}
+	return ValidateHashGetTicket(message)
 }
 
 func (message HashDelivery) MarshalCBOR() ([]byte, error) {
+	if err := validateHashDeliveryPayload(message.Payload); err != nil {
+		return nil, err
+	}
 	return encodeArray(protocolMajorVersion, messageKindHashDelivery, message.SessionID, message.Sequence, bstr(message.ContentHash), bstr(message.Payload))
 }
 
@@ -282,6 +376,9 @@ func (message *HashDelivery) UnmarshalCBOR(data []byte) error {
 		return err
 	}
 	if err := decode(values[4], &message.ContentHash); err != nil {
+		return err
+	}
+	if err := validateEncodedPayloadSize(values[5]); err != nil {
 		return err
 	}
 	return decode(values[5], &message.Payload)

@@ -1,4 +1,7 @@
-; Settlement deterministic CBOR wire schema, major version 1.
+; LEGACY settlement deterministic CBOR wire schema, major version 1.
+; This file is retained only for compatibility. New 001-007 messages use
+; package pool and the transport dispatcher in package wire; numeric version 1
+; is family-scoped and does not make these messages interchangeable.
 pool-message = payment-prepare / payment-prepared / payment-commit / payment-committed / payment-abort / payment-aborted / payment-rejected / arbitration-request / close-signature-request / close-signature / pool-arbitrated / pool-refund-presign-request / pool-refund-presign-response / pool-funding-tx-delivery
 id = bstr .size 32
 ticket-ref = [id, uint, id, uint, id]

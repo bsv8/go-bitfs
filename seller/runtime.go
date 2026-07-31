@@ -1,4 +1,6 @@
 // Package seller implements seller-side BitFS validation and delivery without binding it to a wire transport.
+//go:build legacy
+
 package seller
 
 import (
@@ -22,6 +24,9 @@ type Config struct {
 	Verifier core.TicketSignatureVerifier
 }
 
+// Runtime is the legacy HashGetTicket session workflow. New integrations
+// should use Service, which uses quote/content credentials and pool-backed
+// payment state instead of proposal/session identifiers.
 type Runtime struct {
 	buyer    QuoteReceiver
 	provider PayloadProvider
@@ -29,6 +34,8 @@ type Runtime struct {
 	verifier core.TicketSignatureVerifier
 }
 
+// New constructs the legacy HashGetTicket runtime.
+// Deprecated: use NewService with protocol 001-007 ports.
 func New(config Config, buyer QuoteReceiver, provider PayloadProvider) (*Runtime, error) {
 	if buyer == nil {
 		return nil, errors.New("buyer quote receiver is required")

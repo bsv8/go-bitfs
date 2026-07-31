@@ -1,7 +1,23 @@
-// Package settlement defines the transport-neutral settlement protocol.
+//go:build legacy
+
+// Package settlement contains only the legacy proposal/session settlement
+// protocol and its compatibility opening messages. It is intentionally not
+// imported by buyer, seller, arbiter, pool or wire.
+//
+// Deprecated: use pool and wire for the protocol 001-007 state model.
 package settlement
 
-const MajorVersion uint64 = 1
+// ProtocolFamily disambiguates this legacy version from pool.MajorVersion.
+// Both families historically used the numeric version 1, but their message
+// kinds, signatures and state machines are not interchangeable.
+const ProtocolFamily = "bitfs.legacy-settlement.v1"
+
+const LegacyMajorVersion uint64 = 1
+
+// MajorVersion is retained for source compatibility with legacy callers.
+// Deprecated: use LegacyMajorVersion and keep this package off new protocol
+// paths.
+const MajorVersion = LegacyMajorVersion
 
 type Kind uint64
 
@@ -169,13 +185,17 @@ type PoolFundingTxDelivery struct {
 }
 
 func NewPaymentPrepare(ticket TicketRef) *PaymentPrepare {
-	return &PaymentPrepare{Version: MajorVersion, MessageKind: KindPaymentPrepare, Ticket: ticket}
+	return &PaymentPrepare{Version: MajorVersion, MessageKind: KindPaymentPrepare, Ticket: cloneTicketRef(ticket)}
 }
 func NewPaymentCommit(ticket TicketRef, proposalID []byte) *PaymentCommit {
-	return &PaymentCommit{Version: MajorVersion, MessageKind: KindPaymentCommit, Ticket: ticket, ProposalID: proposalID}
+	return &PaymentCommit{Version: MajorVersion, MessageKind: KindPaymentCommit, Ticket: cloneTicketRef(ticket), ProposalID: append([]byte(nil), proposalID...)}
 }
 func NewArbitrationRequest(spendTxID []byte, approved bool, reasonCode string, signature []byte, payout uint64) *ArbitrationRequest {
-	return &ArbitrationRequest{Version: MajorVersion, MessageKind: KindArbitrationRequest, SpendTxID: spendTxID, Approved: approved, ReasonCode: reasonCode, ArbiterSignature: signature, FinalPayoutSat: payout}
+	return &ArbitrationRequest{Version: MajorVersion, MessageKind: KindArbitrationRequest, SpendTxID: append([]byte(nil), spendTxID...), Approved: approved, ReasonCode: reasonCode, ArbiterSignature: append([]byte(nil), signature...), FinalPayoutSat: payout}
+}
+
+func cloneTicketRef(ticket TicketRef) TicketRef {
+	return TicketRef{SpendTxID: append([]byte(nil), ticket.SpendTxID...), Sequence: ticket.Sequence, ContentHash: append([]byte(nil), ticket.ContentHash...), PriceSat: ticket.PriceSat, TicketID: append([]byte(nil), ticket.TicketID...)}
 }
 
 func NewPoolRefundPresignRequest(refundTx, fundingTxID []byte, poolOutputIndex uint32, poolOutputSatoshis uint64, poolLockingScript, buyerRefundSignature []byte) *PoolRefundPresignRequest {

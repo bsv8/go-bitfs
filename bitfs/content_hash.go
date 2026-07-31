@@ -20,5 +20,8 @@ func ContentHash(contentIndex int64, expectedSize uint64, payload []byte) ([sha2
 	if contentIndex == SeedContentIndex && expectedSize%sha256.Size != 0 {
 		return [sha256.Size]byte{}, fmt.Errorf("seed expected_size must be a multiple of %d, got %d", sha256.Size, expectedSize)
 	}
+	if contentIndex == SeedContentIndex && expectedSize > BlockSize {
+		return [sha256.Size]byte{}, fmt.Errorf("seed expected_size %d exceeds payload limit %d", expectedSize, BlockSize)
+	}
 	return sha256.Sum256(payload), nil
 }

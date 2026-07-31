@@ -5,7 +5,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
+	"path"
+	"strings"
 	"time"
+	"unicode"
 )
 
 const quoteTermsVersion uint64 = 1
@@ -153,7 +157,7 @@ func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedF
 		TermsCBOR:           append([]byte(nil), termsCBOR...),
 		SellerPubkey:        append([]byte(nil), sellerPubkey...),
 		TermsSignature:      append([]byte(nil), signature...),
-		RecommendedFilename: recommendedFilename,
+		RecommendedFilename: SanitizeRecommendedFilename(recommendedFilename),
 	}, nil
 }
 
@@ -166,26 +170,26 @@ func VerifySignedFileQuote(quote *SignedFileQuote, verifier QuoteTermsSignatureV
 // VerifySignedFileQuoteAt is VerifySignedFileQuote with an injected clock.
 func VerifySignedFileQuoteAt(quote *SignedFileQuote, now time.Time, verifier QuoteTermsSignatureVerifier) (*FileQuoteTerms, error) {
 	if quote == nil {
-		return nil, errors.New("signed file quote is required")
+		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)
 	}
 	if len(quote.SellerPubkey) == 0 {
-		return nil, errors.New("seller pubkey is required")
+		return nil, fmt.Errorf("%w: seller pubkey is required", ErrInvalidEvidence)
 	}
 	if len(quote.TermsSignature) == 0 {
-		return nil, errors.New("quote terms signature is required")
+		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
 	}
 	if verifier == nil {
-		return nil, errors.New("quote terms signature verifier is required")
+		return nil, fmt.Errorf("%w: quote terms signature verifier is required", ErrInvalidEvidence)
 	}
 	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: decode file quote terms: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateFileQuoteTermsAt(terms, now); err != nil {
 		return nil, err
 	}
 	if err := verifier(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
-		return nil, fmt.Errorf("quote terms signature invalid: %w", err)
+		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return terms, nil
 }
@@ -279,9 +283,69 @@ func ValidateFileQuoteTermsAt(terms *FileQuoteTerms, now time.Time) error {
 		return err
 	}
 	if !now.Before(time.Unix(terms.QuoteExpiresAtUnix, 0)) {
-		return errors.New("file quote is expired")
+		return fmt.Errorf("%w: file quote is expired", ErrQuoteExpired)
 	}
 	return nil
+}
+
+// SanitizeRecommendedFilename converts unsigned display metadata into a safe
+// single filename. It must be applied before displaying or using the value as
+// a local path; the original field remains outside the quote's economic truth.
+func SanitizeRecommendedFilename(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = path.Base(name)
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "download"
+	}
+	return name
+}
+
+// ContentPriceSat derives the buyer-signed amount from the verified quote and
+// the delivered content size. Full blocks use the quoted price. A tail block
+// is charged proportionally, rounded up, with the specified 10% seller
+// calculation allowance. The computation uses big integers so malformed
+// uint64 prices cannot overflow into a lower amount.
+func ContentPriceSat(terms *FileQuoteTerms, contentType ContentType, contentSize uint64) (uint64, error) {
+	if err := ValidateFileQuoteTerms(terms); err != nil {
+		return 0, err
+	}
+	switch contentType {
+	case ContentSeed:
+		return terms.SeedPriceSat, nil
+	case ContentBlock:
+		if contentSize == 0 || contentSize > BlockSize {
+			return 0, fmt.Errorf("invalid block content size %d", contentSize)
+		}
+		if contentSize == BlockSize {
+			return terms.FullBlockPriceSat, nil
+		}
+		if terms.FullBlockPriceSat == 0 {
+			return 0, nil
+		}
+		numerator := new(big.Int).SetUint64(terms.FullBlockPriceSat)
+		numerator.Mul(numerator, new(big.Int).SetUint64(contentSize))
+		numerator.Mul(numerator, big.NewInt(90))
+		denominator := new(big.Int).SetUint64(BlockSize)
+		denominator.Mul(denominator, big.NewInt(100))
+		price := new(big.Int).Add(numerator, new(big.Int).Sub(denominator, big.NewInt(1)))
+		price.Quo(price, denominator)
+		if price.Sign() == 0 {
+			price.SetUint64(1)
+		}
+		if !price.IsUint64() {
+			return 0, errors.New("content price overflows uint64")
+		}
+		return price.Uint64(), nil
+	default:
+		return 0, fmt.Errorf("unsupported content type %d", contentType)
+	}
 }
 
 func fileQuoteBlockCount(fileSize uint64) uint64 {

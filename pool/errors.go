@@ -12,4 +12,5 @@ var (
 	ErrNonFinalRejected     = errors.New("non-final pool rejected update")
 	ErrFinalRejected        = errors.New("pool node rejected final transaction")
 	ErrNotExpired           = errors.New("pool refund expiry has not been reached")
+	ErrPoolStateUncertain   = errors.New("pool state requires external reconciliation")
 )

@@ -25,13 +25,14 @@ type FileStore struct {
 	memory *MemoryStore
 }
 
-const fileStoreSchemaVersion uint8 = 2
+const fileStoreSchemaVersion uint8 = 3
 
 type fileStoreSnapshot struct {
-	Version  uint8                 `json:"version"`
-	Openings []fileOpeningSnapshot `json:"openings"`
-	Accepted []filePaymentSnapshot `json:"accepted"`
-	Pending  []filePendingSnapshot `json:"pending"`
+	Version   uint8                   `json:"version"`
+	Openings  []fileOpeningSnapshot   `json:"openings"`
+	Accepted  []filePaymentSnapshot   `json:"accepted"`
+	Pending   []filePendingSnapshot   `json:"pending"`
+	Uncertain []fileUncertainSnapshot `json:"uncertain"`
 }
 
 type fileOpeningSnapshot struct {
@@ -47,6 +48,11 @@ type filePaymentSnapshot struct {
 type filePendingSnapshot struct {
 	SpendTxID Hash32         `json:"spend_txid"`
 	Request   PendingRequest `json:"request"`
+}
+
+type fileUncertainSnapshot struct {
+	SpendTxID Hash32 `json:"spend_txid"`
+	TxID      Hash32 `json:"txid"`
 }
 
 // NewFileStore opens path and rehydrates all pool, payment and delivery-latch
@@ -86,6 +92,28 @@ func (store *FileStore) SaveAcceptedPayment(ctx context.Context, state *PaymentS
 
 func (store *FileStore) LoadAcceptedPayment(ctx context.Context, spendTxID Hash32) (*PaymentState, error) {
 	return store.loadPayment(func() (*PaymentState, error) { return store.memory.LoadAcceptedPayment(ctx, spendTxID) })
+}
+
+func (store *FileStore) EnsurePoolHealthy(ctx context.Context, spendTxID Hash32) error {
+	if store == nil || store.memory == nil {
+		return fmt.Errorf("%w: file store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return withProcessFileLock(store.path, false, func() error {
+		if err := store.reloadFromDiskLocked(); err != nil {
+			return err
+		}
+		return store.memory.EnsurePoolHealthy(ctx, spendTxID)
+	})
+}
+
+func (store *FileStore) MarkExternalStateUncertain(ctx context.Context, spendTxID, txID Hash32) error {
+	return store.mutate(func() error { return store.memory.MarkExternalStateUncertain(ctx, spendTxID, txID) })
+}
+
+func (store *FileStore) ReconcileExternalState(ctx context.Context, spendTxID Hash32, state *PaymentState) error {
+	return store.mutate(func() error { return store.memory.ReconcileExternalState(ctx, spendTxID, ClonePaymentState(state)) })
 }
 
 func (store *FileStore) TryAcquire(ctx context.Context, request PendingRequest) (PendingAcquireResult, error) {
@@ -271,6 +299,9 @@ func (store *MemoryStore) snapshot() fileStoreSnapshot {
 	for spendTxID, request := range store.pending {
 		snapshot.Pending = append(snapshot.Pending, filePendingSnapshot{SpendTxID: spendTxID, Request: request})
 	}
+	for spendTxID, txID := range store.uncertain {
+		snapshot.Uncertain = append(snapshot.Uncertain, fileUncertainSnapshot{SpendTxID: spendTxID, TxID: txID})
+	}
 	return snapshot
 }
 
@@ -281,6 +312,7 @@ func (store *MemoryStore) replaceSnapshot(snapshot fileStoreSnapshot) {
 	store.openingsByFunding = make(map[Hash32]*OpeningProof, len(snapshot.Openings))
 	store.accepted = make(map[Hash32]*PaymentState, len(snapshot.Accepted))
 	store.pending = make(map[Hash32]PendingRequest, len(snapshot.Pending))
+	store.uncertain = make(map[Hash32]Hash32, len(snapshot.Uncertain))
 	for _, entry := range snapshot.Openings {
 		store.openingsBySpend[entry.SpendTxID] = cloneOpeningProof(entry.Proof)
 		if entry.Proof != nil && len(entry.Proof.FundingTxID) == 32 {
@@ -292,6 +324,9 @@ func (store *MemoryStore) replaceSnapshot(snapshot fileStoreSnapshot) {
 	}
 	for _, entry := range snapshot.Pending {
 		store.pending[entry.SpendTxID] = entry.Request
+	}
+	for _, entry := range snapshot.Uncertain {
+		store.uncertain[entry.SpendTxID] = entry.TxID
 	}
 }
 
@@ -329,6 +364,14 @@ func (store *MemoryStore) restore(snapshot fileStoreSnapshot) error {
 		}
 		if result != PendingAcquired {
 			return fmt.Errorf("%w: duplicate pending request in snapshot", ErrInvalidEvidence)
+		}
+	}
+	for _, entry := range snapshot.Uncertain {
+		if entry.SpendTxID == (Hash32{}) || entry.TxID == (Hash32{}) {
+			return fmt.Errorf("%w: invalid uncertain pool state in snapshot", ErrInvalidEvidence)
+		}
+		if err := store.MarkExternalStateUncertain(context.Background(), entry.SpendTxID, entry.TxID); err != nil {
+			return err
 		}
 	}
 	return nil

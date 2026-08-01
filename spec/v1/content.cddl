@@ -1,25 +1,30 @@
-; BitFS v1 content credentials (003 and 004).
+; BitFS v2 content credentials (003 and 004).
 ; Every outer and child document is deterministic CBOR.
 
 content-type = 0 / 1
 content-request-terms = [
-  1,
+  2,
   id,                 ; quote_terms_hash
   id,                 ; spend_txid
   uint,               ; base_payment_sequence
+  uint,               ; payment_sequence_after
+  uint,               ; seller_amount_after_sat
+  uint,               ; miner_fee_rate_sat_per_kb
+  pubkey,             ; buyer_pubkey (pool slot A)
+  pubkey,             ; seller_pubkey (pool slot server)
   pubkey,             ; selected_arbiter_pubkey
   content-type,
   id,                 ; content_hash
   int                 ; delivery_deadline_unix
 ]
-signed-content-request = [1, bstr, bstr]
+signed-content-request = [2, bstr, bstr]
 
 content-delivery-terms = [
-  1,
+  2,
   id,                 ; content_request_terms_hash
   bstr                ; content_bytes
 ]
-signed-content-delivery = [1, bstr, bstr]
+signed-content-delivery = [2, bstr, bstr]
 
 id = bstr .size 32
 pubkey = bstr

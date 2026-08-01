@@ -260,7 +260,12 @@ func (client *Client) SubmitImmediateClose(ctx context.Context, close *pool.Sign
 		return pool.Hash32{}, fmt.Errorf("%w: final node returned inconsistent transaction ID", pool.ErrInvalidEvidence)
 	}
 	if err := client.pools.SaveAcceptedPayment(ctx, &localClose.State); err != nil {
-		return pool.Hash32{}, fmt.Errorf("save immediate close: %w", err)
+		markErr := client.pools.MarkExternalStateUncertain(ctx, localClose.State.SpendTxID, txID)
+		uncertain := fmt.Errorf("%w: local persistence failed after final node acceptance", pool.ErrPoolStateUncertain)
+		if markErr != nil {
+			return pool.Hash32{}, errors.Join(uncertain, err, markErr)
+		}
+		return pool.Hash32{}, errors.Join(uncertain, err)
 	}
 	return txID, nil
 }
@@ -277,6 +282,9 @@ type ContentRequestInput struct {
 func (client *Client) RequestContent(ctx context.Context, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
 	if client == nil {
 		return nil, errors.New("buyer client is required")
+	}
+	if err := client.pools.EnsurePoolHealthy(ctx, input.Pool.SpendTxID); err != nil {
+		return nil, err
 	}
 	selectedArbiter := append([]byte(nil), input.SelectedArbiterPubKey...)
 	contentHash := append([]byte(nil), input.Content.Hash...)
@@ -409,6 +417,9 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 		return nil, err
 	}
 	spendTxID := poolHash32(requestTerms.SpendTxID)
+	if err := client.pools.EnsurePoolHealthy(ctx, spendTxID); err != nil {
+		return nil, err
+	}
 	opening, err := client.pools.LoadOpeningProof(ctx, spendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load pool opening proof: %w", err)

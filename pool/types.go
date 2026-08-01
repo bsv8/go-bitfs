@@ -7,7 +7,7 @@ import (
 )
 
 // ProtocolFamily is a package boundary identifier. MajorVersion is scoped to
-// this family and must not be compared with settlement.MajorVersion.
+// this family is independent from any historical settlement package.
 const ProtocolFamily = "bitfs.pool.v2"
 
 const MajorVersion uint64 = 2
@@ -206,6 +206,9 @@ type PoolStore interface {
 	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
 	SaveAcceptedPayment(context.Context, *PaymentState) error
 	LoadAcceptedPayment(context.Context, Hash32) (*PaymentState, error)
+	EnsurePoolHealthy(context.Context, Hash32) error
+	MarkExternalStateUncertain(context.Context, Hash32, Hash32) error
+	ReconcileExternalState(context.Context, Hash32, *PaymentState) error
 }
 
 // PendingRequestStore must implement TryAcquire atomically with respect to

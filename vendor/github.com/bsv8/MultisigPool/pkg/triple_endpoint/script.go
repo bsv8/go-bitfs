@@ -53,13 +53,89 @@ func MergeTripleFeePoolSigForSpendTx(
 }
 
 // MergeTriplePoolServerA fixes the CHECKMULTISIG order to server then A.
+//
+// Deprecated: use MergeTriplePoolServerAWithRoles. Without the role keys and
+// source amount this compatibility helper can only enforce signature shape,
+// not which pool slot produced each signature.
 func MergeTriplePoolServerA(txHex string, serverSig, aSig *[]byte) (*tx.Transaction, error) {
 	return mergeTripleRoleSigs(txHex, serverSig, aSig)
 }
 
 // MergeTriplePoolServerB fixes the CHECKMULTISIG order to server then B.
+//
+// Deprecated: use MergeTriplePoolServerBWithRoles. Without the role keys and
+// source amount this compatibility helper can only enforce signature shape,
+// not which pool slot produced each signature.
 func MergeTriplePoolServerB(txHex string, serverSig, bSig *[]byte) (*tx.Transaction, error) {
 	return mergeTripleRoleSigs(txHex, serverSig, bSig)
+}
+
+// MergeTriplePoolServerAWithRoles verifies both signatures against the same
+// unsigned transaction before assembling the canonical server+A unlocking
+// script. The source output is restored from the explicit pool description so
+// a raw transaction cannot silently validate against a different pool.
+func MergeTriplePoolServerAWithRoles(txHex string, serverSig, aSig *[]byte, server, a, b *ec.PublicKey, poolAmount uint64) (*tx.Transaction, error) {
+	state, err := roleMergeState(txHex, server, a, b, poolAmount)
+	if err != nil {
+		return nil, err
+	}
+	if ok, err := VerifyTriplePoolServerSignature(state, server, a, b, serverSig); err != nil || !ok {
+		if err != nil {
+			return nil, fmt.Errorf("server signature does not match server slot: %w", err)
+		}
+		return nil, fmt.Errorf("server signature does not match server slot")
+	}
+	if ok, err := VerifyTriplePoolASignature(state, a, server, b, aSig); err != nil || !ok {
+		if err != nil {
+			return nil, fmt.Errorf("A signature does not match A slot: %w", err)
+		}
+		return nil, fmt.Errorf("A signature does not match A slot")
+	}
+	return mergeTripleRoleSigs(state.Hex(), serverSig, aSig)
+}
+
+// MergeTriplePoolServerBWithRoles is the role-checked server+B counterpart
+// used by arbitration submissions.
+func MergeTriplePoolServerBWithRoles(txHex string, serverSig, bSig *[]byte, server, a, b *ec.PublicKey, poolAmount uint64) (*tx.Transaction, error) {
+	state, err := roleMergeState(txHex, server, a, b, poolAmount)
+	if err != nil {
+		return nil, err
+	}
+	if ok, err := VerifyTriplePoolServerSignature(state, server, a, b, serverSig); err != nil || !ok {
+		if err != nil {
+			return nil, fmt.Errorf("server signature does not match server slot: %w", err)
+		}
+		return nil, fmt.Errorf("server signature does not match server slot")
+	}
+	if ok, err := VerifyTriplePoolBSignature(state, b, server, a, bSig); err != nil || !ok {
+		if err != nil {
+			return nil, fmt.Errorf("B signature does not match B slot: %w", err)
+		}
+		return nil, fmt.Errorf("B signature does not match B slot")
+	}
+	return mergeTripleRoleSigs(state.Hex(), serverSig, bSig)
+}
+
+func roleMergeState(txHex string, server, a, b *ec.PublicKey, poolAmount uint64) (*tx.Transaction, error) {
+	if poolAmount == 0 {
+		return nil, fmt.Errorf("pool amount is required for role-checked merge")
+	}
+	state, err := tx.NewTransactionFromHex(txHex)
+	if err != nil {
+		return nil, err
+	}
+	if len(state.Inputs) != 1 || len(state.Outputs) != 2 || state.Inputs[0] == nil {
+		return nil, fmt.Errorf("triple pool state must have one input and two outputs")
+	}
+	lock, err := BuildTriplePoolLock(server, a, b)
+	if err != nil {
+		return nil, err
+	}
+	state.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: poolAmount, LockingScript: lock})
+	if err := VerifyTriplePoolState(state, server, a, b, poolAmount, state.Outputs[0].Satoshis); err != nil {
+		return nil, fmt.Errorf("unsigned triple pool state is invalid: %w", err)
+	}
+	return state, nil
 }
 
 func mergeTripleRoleSigs(txHex string, first, second *[]byte) (*tx.Transaction, error) {

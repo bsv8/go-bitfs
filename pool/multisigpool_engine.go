@@ -285,7 +285,7 @@ func (engine *MultisigPoolEngine) BuildRefundSubmission(proof *OpeningProof) ([]
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mp.MergeTriplePoolServerA(refund.Hex(), &proof.SellerRefundSignature, &proof.BuyerRefundSignature)
+	merged, err := mp.MergeTriplePoolServerAWithRoles(refund.Hex(), &proof.SellerRefundSignature, &proof.BuyerRefundSignature, engine.seller, engine.buyer, engine.arbiter, proof.PoolOutputSatoshis)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +521,8 @@ func (engine *MultisigPoolEngine) AddSellerSignature(ctx context.Context, state 
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mp.MergeTriplePoolServerA(tx.Hex(), serverSig, &sigs[0])
+	tx.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
+	merged, err := mp.MergeTriplePoolServerAWithRoles(tx.Hex(), serverSig, &sigs[0], engine.seller, engine.buyer, engine.arbiter, state.PoolOutputSatoshis)
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +580,8 @@ func (engine *MultisigPoolEngine) AddArbitrationSignature(_ context.Context, sta
 	if ok, err := mp.VerifyTriplePoolBSignature(stateTx(state), engine.arbiter, engine.seller, engine.buyer, &arbiterSig); err != nil || !ok {
 		return nil, invalid("B arbitration signature is invalid")
 	}
-	merged, err := mp.MergeTriplePoolServerB(tx.Hex(), &serverSig, &arbiterSig)
+	tx.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
+	merged, err := mp.MergeTriplePoolServerBWithRoles(tx.Hex(), &serverSig, &arbiterSig, engine.seller, engine.buyer, engine.arbiter, state.PoolOutputSatoshis)
 	if err != nil {
 		return nil, err
 	}

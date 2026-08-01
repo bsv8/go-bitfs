@@ -37,6 +37,7 @@ func BuildPoolLock(roles PoolRoles) ([]byte, error) {
 	return append([]byte(nil), lock.Bytes()...), nil
 }
 
+// Deprecated: use MergePoolServerAWithRoles.
 func MergePoolServerA(rawTx string, serverSig, aSig *[]byte) ([]byte, error) {
 	if serverSig == nil || aSig == nil || len(*serverSig) == 0 || len(*aSig) == 0 {
 		return nil, fmt.Errorf("server and A signatures are required")
@@ -48,6 +49,21 @@ func MergePoolServerA(rawTx string, serverSig, aSig *[]byte) ([]byte, error) {
 	return tx.Bytes(), nil
 }
 
+// MergePoolServerAWithRoles is the role-explicit adapter entry point. New
+// callers must provide the pool roles and source amount so MultisigPool can
+// reject signatures from the wrong slot before assembly.
+func MergePoolServerAWithRoles(rawTx string, roles PoolRoles, poolAmount uint64, serverSig, aSig *[]byte) ([]byte, error) {
+	if serverSig == nil || aSig == nil || len(*serverSig) == 0 || len(*aSig) == 0 {
+		return nil, fmt.Errorf("server and A signatures are required")
+	}
+	merged, err := mp.MergeTriplePoolServerAWithRoles(rawTx, serverSig, aSig, roles.Server, roles.A, roles.B, poolAmount)
+	if err != nil {
+		return nil, err
+	}
+	return merged.Bytes(), nil
+}
+
+// Deprecated: use MergePoolServerBWithRoles.
 func MergePoolServerB(rawTx string, serverSig, bSig *[]byte) ([]byte, error) {
 	if serverSig == nil || bSig == nil || len(*serverSig) == 0 || len(*bSig) == 0 {
 		return nil, fmt.Errorf("server and B signatures are required")
@@ -57,6 +73,19 @@ func MergePoolServerB(rawTx string, serverSig, bSig *[]byte) ([]byte, error) {
 		return nil, err
 	}
 	return tx.Bytes(), nil
+}
+
+// MergePoolServerBWithRoles is the role-explicit server+B arbitration entry
+// point.
+func MergePoolServerBWithRoles(rawTx string, roles PoolRoles, poolAmount uint64, serverSig, bSig *[]byte) ([]byte, error) {
+	if serverSig == nil || bSig == nil || len(*serverSig) == 0 || len(*bSig) == 0 {
+		return nil, fmt.Errorf("server and B signatures are required")
+	}
+	merged, err := mp.MergeTriplePoolServerBWithRoles(rawTx, serverSig, bSig, roles.Server, roles.A, roles.B, poolAmount)
+	if err != nil {
+		return nil, err
+	}
+	return merged.Bytes(), nil
 }
 
 func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {

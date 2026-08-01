@@ -40,6 +40,8 @@ var (
 	TripleFeePoolSpentScript        = triple.TripleFeePoolSpentScript
 	MergeTriplePoolServerA          = triple.MergeTriplePoolServerA
 	MergeTriplePoolServerB          = triple.MergeTriplePoolServerB
+	MergeTriplePoolServerAWithRoles = triple.MergeTriplePoolServerAWithRoles
+	MergeTriplePoolServerBWithRoles = triple.MergeTriplePoolServerBWithRoles
 	BuildTriplePoolLock             = triple.BuildTriplePoolLock
 	BuildTriplePoolState            = triple.BuildTriplePoolState
 	BuildTriplePoolInitialState     = triple.BuildTriplePoolInitialState

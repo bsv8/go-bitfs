@@ -1,9 +1,9 @@
-; BitFS v1 cumulative payment transport (005).
+; BitFS v2 cumulative payment transport (005).
 ; The transaction bytes contain the buyer's partial signature and are not
 ; re-encoded by the CBOR layer.
 
 payment-update = [
-  1,
+  2,
   id,                 ; content_request_terms_hash
   bstr                ; partial_spend_tx
 ]

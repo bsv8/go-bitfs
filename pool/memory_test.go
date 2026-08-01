@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,6 +13,41 @@ type testIDCalculator struct{}
 
 func (testIDCalculator) TransactionID(_ context.Context, rawTx []byte) (Hash32, error) {
 	return Hash32(sha256.Sum256(rawTx)), nil
+}
+
+func TestPoolStateUncertaintyStopsFurtherUseAndSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pool-state.json")
+	first, err := NewFileStore(path, testIDCalculator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spend := Hash32{1}
+	txID := Hash32{2}
+	if err := first.MarkExternalStateUncertain(ctx, spend, txID); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.EnsurePoolHealthy(ctx, spend); !errors.Is(err, ErrPoolStateUncertain) {
+		t.Fatalf("EnsurePoolHealthy() = %v, want ErrPoolStateUncertain", err)
+	}
+	second, err := NewFileStore(path, testIDCalculator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.EnsurePoolHealthy(ctx, spend); !errors.Is(err, ErrPoolStateUncertain) {
+		t.Fatalf("reloaded EnsurePoolHealthy() = %v, want ErrPoolStateUncertain", err)
+	}
+	state := &PaymentState{SpendTxID: spend, RawTx: []byte("reconciled"), PaymentSequence: 4}
+	reconciledID := Hash32(sha256.Sum256(state.RawTx))
+	if err := second.MarkExternalStateUncertain(ctx, spend, reconciledID); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.ReconcileExternalState(ctx, spend, state); err != nil {
+		t.Fatalf("ReconcileExternalState() = %v", err)
+	}
+	if err := second.EnsurePoolHealthy(ctx, spend); err != nil {
+		t.Fatalf("EnsurePoolHealthy() after reconciliation = %v", err)
+	}
 }
 
 func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {

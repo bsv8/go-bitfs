@@ -1,34 +1,43 @@
-; New BitFS pool family deterministic CBOR schema, major version 1.
-; This file is separate from the legacy settlement.cddl schema.
+; BitFS pool family deterministic CBOR schema, major version 2.
+; The directory name is retained for repository compatibility; version 1 is
+; not accepted by the current decoders.
 
 id = bstr .size 32
 
 pool-refund-presign-request = [
-  1, 12,
+  2, 12,
   bstr,               ; refund_tx
   id,                 ; funding_txid
   uint,               ; pool_output_index
   uint,               ; pool_output_satoshis
   bstr,               ; pool_locking_script
+  pubkey,             ; server_pubkey
+  pubkey,             ; buyer_pubkey
+  pubkey,             ; arbiter_pubkey
+  uint,               ; miner_fee_rate_sat_per_kb
   bstr                ; buyer_refund_signature
 ]
-pool-refund-presign-response = [1, 13, bstr]
-pool-funding-tx-delivery = [1, 14, bstr]
+pool-refund-presign-response = [2, 13, bstr]
+pool-funding-tx-delivery = [2, 14, bstr]
 
 pool-opening-proof = [
-  1,
+  2,
   bstr,               ; refund_tx
   id,                 ; funding_txid
   uint,               ; pool_output_index
   uint,               ; pool_output_satoshis
   bstr,               ; pool_locking_script
+  pubkey,             ; server_pubkey
+  pubkey,             ; buyer_pubkey
+  pubkey,             ; arbiter_pubkey
+  uint,               ; miner_fee_rate_sat_per_kb
   bstr,               ; buyer_refund_signature
   bstr,               ; seller_refund_signature
   bstr                ; funding_tx
 ]
 
 payment-update = [
-  1,
+  2,
   id,                 ; content_request_terms_hash
   bstr                ; partial_spend_tx
 ]

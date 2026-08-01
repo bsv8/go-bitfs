@@ -1,7 +1,7 @@
 github.com/bsv-blockchain/go-sdk v1.2.18 h1:JFl8TNM7lf80CslrXjlungDOyuvL9COzond9BOR81Us=
 github.com/bsv-blockchain/go-sdk v1.2.18/go.mod h1:QWYwia7QSPB8+sLWyVldsIg0wPPzvEmXL5wGAT0dgaA=
-github.com/bsv8/MultisigPool v0.0.0-20260731161501-290967ef2737 h1:XuAnvllNKhKEroGD5YcgqiqKnFm+ZohgpXI0OQ+EoPU=
-github.com/bsv8/MultisigPool v0.0.0-20260731161501-290967ef2737/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
+github.com/bsv8/MultisigPool v0.0.0-20260801021547-299209805f4736 h1:W7R0nyOoAyVHHkAmFyg1nUIbAuBJez3kNTLQOeI6zcc=
+github.com/bsv8/MultisigPool v0.0.0-20260801021547-299209805f4736/go.mod h1:mHDn06QlcwAQDfrJRQgIlDzP1AVohR0h2vUgFrEHL/E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/fxamacker/cbor/v2 v2.9.2 h1:X4Ksno9+x3cz0TZv69ec1hxP/+tymuR8PXQJyDwfh78=

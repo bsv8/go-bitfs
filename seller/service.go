@@ -284,6 +284,9 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if err != nil {
 		return nil, fmt.Errorf("calculate spend transaction ID: %w", err)
 	}
+	if err := service.pools.EnsurePoolHealthy(ctx, spendTxID); err != nil {
+		return nil, err
+	}
 	state, err := service.transactions.ParsePaymentState(ctx, append([]byte(nil), update.PartialSpendTx...), opening)
 	if err != nil {
 		return nil, fmt.Errorf("parse payment state: %w", err)
@@ -359,7 +362,12 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	accepted.RawTx = append([]byte(nil), signed.RawTx...)
 	accepted.ContentRequestTermsHash = requestHash
 	if err := service.pools.SaveAcceptedPayment(ctx, &accepted); err != nil {
-		return nil, fmt.Errorf("save accepted payment: %w", err)
+		markErr := service.pools.MarkExternalStateUncertain(ctx, accepted.SpendTxID, txID)
+		uncertain := fmt.Errorf("%w: local persistence failed after non-final node acceptance", pool.ErrPoolStateUncertain)
+		if markErr != nil {
+			return nil, errors.Join(uncertain, err, markErr)
+		}
+		return nil, errors.Join(uncertain, err)
 	}
 	if err := service.pending.Release(ctx, state.SpendTxID, pending.ContentRequestHash); err != nil {
 		return nil, fmt.Errorf("release pending request: %w", err)
@@ -514,6 +522,9 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	if err != nil {
 		return nil, err
 	}
+	if err := service.pools.EnsurePoolHealthy(ctx, poolHash32Seller(proof.SpendTxID)); err != nil {
+		return nil, err
+	}
 	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, err
@@ -546,6 +557,13 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	if err := service.transactions.VerifySellerPaymentSignature(state, request.SellerTransactionSignature, proof); err != nil {
 		return nil, err
 	}
+	latest, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
+	if err != nil {
+		return nil, fmt.Errorf("load latest accepted payment: %w", err)
+	}
+	if latest == nil || latest.PaymentSequence >= state.PaymentSequence {
+		return nil, pool.ErrStalePaymentSequence
+	}
 	signed, err := service.transactions.AddArbitrationSignature(ctx, state, response.ArbiterTransactionSignature)
 	if err != nil {
 		return nil, err
@@ -570,7 +588,12 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	}
 	signed.State.ContentRequestTermsHash = poolHash32Seller(requestHash[:])
 	if err := service.pools.SaveAcceptedPayment(ctx, &signed.State); err != nil {
-		return nil, err
+		markErr := service.pools.MarkExternalStateUncertain(ctx, signed.State.SpendTxID, txID)
+		uncertain := fmt.Errorf("%w: local persistence failed after arbitration node acceptance", pool.ErrPoolStateUncertain)
+		if markErr != nil {
+			return nil, errors.Join(uncertain, err, markErr)
+		}
+		return nil, errors.Join(uncertain, err)
 	}
 	return clonePaymentStateSeller(&signed.State), nil
 }

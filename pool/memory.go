@@ -30,6 +30,7 @@ type MemoryStore struct {
 	openingsByFunding map[Hash32]*OpeningProof
 	accepted          map[Hash32]*PaymentState
 	pending           map[Hash32]PendingRequest
+	uncertain         map[Hash32]Hash32
 }
 
 func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
@@ -42,6 +43,7 @@ func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
 		openingsByFunding: make(map[Hash32]*OpeningProof),
 		accepted:          make(map[Hash32]*PaymentState),
 		pending:           make(map[Hash32]PendingRequest),
+		uncertain:         make(map[Hash32]Hash32),
 	}, nil
 }
 
@@ -128,6 +130,53 @@ func (store *MemoryStore) LoadAcceptedPayment(_ context.Context, spendTxID Hash3
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return clonePaymentState(store.accepted[spendTxID]), nil
+}
+
+func (store *MemoryStore) EnsurePoolHealthy(_ context.Context, spendTxID Hash32) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if txID, ok := store.uncertain[spendTxID]; ok {
+		return fmt.Errorf("%w: accepted transaction %x requires external reconciliation", ErrPoolStateUncertain, txID[:])
+	}
+	return nil
+}
+
+func (store *MemoryStore) MarkExternalStateUncertain(_ context.Context, spendTxID, txID Hash32) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.uncertain[spendTxID] = txID
+	return nil
+}
+
+func (store *MemoryStore) ReconcileExternalState(ctx context.Context, spendTxID Hash32, state *PaymentState) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	if state == nil || state.SpendTxID != spendTxID || len(state.RawTx) == 0 {
+		return fmt.Errorf("%w: reconciled payment state is incomplete", ErrInvalidEvidence)
+	}
+	txID, err := store.calculator.TransactionID(ctx, append([]byte(nil), state.RawTx...))
+	if err != nil {
+		return fmt.Errorf("calculate reconciled transaction ID: %w", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	expected, ok := store.uncertain[spendTxID]
+	if !ok || expected != txID {
+		return fmt.Errorf("%w: reconciled transaction does not match the uncertain state", ErrInvalidEvidence)
+	}
+	if old := store.accepted[spendTxID]; old != nil && state.PaymentSequence < old.PaymentSequence {
+		return ErrStalePaymentSequence
+	}
+	store.accepted[spendTxID] = clonePaymentState(state)
+	delete(store.uncertain, spendTxID)
+	return nil
 }
 
 func (store *MemoryStore) TryAcquire(_ context.Context, request PendingRequest) (PendingAcquireResult, error) {

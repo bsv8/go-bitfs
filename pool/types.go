@@ -100,7 +100,7 @@ const (
 // PaymentUpdate is the 005 transport container. ContentRequestTermsHash is
 // the hash of the final 003 payment authorization (the historical field name
 // is retained); amounts and sequence are derived from PartialSpendTx by
-// MultisigPoolPort, never from this wrapper.
+// role-scoped pool port, never from this wrapper.
 type PaymentUpdate struct {
 	Version                 uint64
 	ContentRequestTermsHash []byte
@@ -278,35 +278,6 @@ type SellerPoolPort interface {
 	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
 	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
 	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
-}
-
-// MultisigPoolPort owns all transaction parsing, signature, input/output and
-// amount rules. Deprecated: new workflow APIs use role-scoped ports above.
-type MultisigPoolPort interface {
-	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
-	TransactionID(rawTx []byte) (Hash32, error)
-	VerifyRefundExpired(*OpeningProof, time.Time) error
-	BuildRefundSubmission(*OpeningProof) ([]byte, error)
-	FundingTxID(rawTx []byte) (Hash32, error)
-	VerifyOpening(*OpeningProof) error
-	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-	ParseFinalPaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
-	VerifyFinalPayment(*PaymentState, *OpeningProof) error
-	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
-	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
-	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-	SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-	SignBuyerPayment(context.Context, *UnsignedPayment, Signer) (*PaymentState, error)
-	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
-	VerifySellerPayment(*PaymentState, *OpeningProof) error
-	VerifySellerPaymentSignature(*PaymentState, []byte, *OpeningProof) error
-	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
-	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
-	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
-	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
-	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, error)
 }
 
 // NonFinalPoolNode must return only after the node accepted the update as the

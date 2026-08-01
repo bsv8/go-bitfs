@@ -151,12 +151,13 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	sellerSigner := integrationSigner{sellerKey}
 	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{
 		BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed(),
-		BuyerKey: integrationKeyProvider{buyerKey}, ServerKey: integrationKeyProvider{sellerKey}, ArbiterKey: integrationKeyProvider{arbiterKey},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	calculator := pool.BSVTransactionIDCalculator{Engine: engine}
+	buyerPool := pool.NewBuyerPoolAdapter(engine, integrationKeyProvider{buyerKey})
+	sellerPool := pool.NewSellerPoolAdapter(engine, integrationKeyProvider{sellerKey})
 	store, err := pool.NewMemoryStore(calculator)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +168,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 		t.Fatal(err)
 	}
 	openingPort := pool.BuyerOpeningPort{Store: store, Verifier: engine, Calculator: calculator}
-	sellerOpeningPort := pool.SellerOpeningPort{Store: store, RefundSigner: pool.PoolRefundSigner{Engine: engine}, Calculator: calculator, FundingVerifier: engine, FundingSubmitter: node}
+	sellerOpeningPort := pool.SellerOpeningPort{Store: store, RefundSigner: pool.PoolRefundSigner{Adapter: sellerPool}, Calculator: calculator, FundingVerifier: engine, FundingSubmitter: node}
 	quotes := &integrationQuoteStore{}
 	payload := []byte("abc")
 	payloadHash := sha256.Sum256(payload)
@@ -183,14 +184,14 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	}
 	service, err := seller.NewService(seller.ServiceConfig{
 		Signer: sellerSigner, SignatureVerifier: verifyIntegrationSignature, QuoteVerifier: verifyIntegrationSignature, Clock: clock,
-		Quotes: quotes, Pools: store, OpeningHooks: sellerOpeningPort, Pending: store, Content: content, Transactions: engine, Participants: engine, Node: verifiedNode,
+		Quotes: quotes, Pools: store, OpeningHooks: sellerOpeningPort, Pending: store, Content: content, Transactions: sellerPool, Participants: engine, Node: verifiedNode,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client, err := buyer.NewClient(buyer.ClientConfig{
 		Signer: buyerSigner, QuoteVerifier: verifyIntegrationSignature, SignatureVerifier: verifyIntegrationSignature, Clock: clock,
-		Quotes: quotes, Pools: store, Opening: openingPort, Participants: engine, Node: verifiedNode, Transactions: engine, SeedSource: content,
+		Quotes: quotes, Pools: store, Opening: openingPort, Participants: engine, Node: verifiedNode, Transactions: buyerPool, SeedSource: content,
 	})
 	if err != nil {
 		t.Fatal(err)

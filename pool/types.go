@@ -276,7 +276,6 @@ type SellerPoolPort interface {
 	SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
 	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
 	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
-	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
 	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
 }
 

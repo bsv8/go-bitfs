@@ -13,7 +13,7 @@ github.com/bsv-blockchain/go-sdk/transaction/chaintracker
 github.com/bsv-blockchain/go-sdk/transaction/sighash
 github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh
 github.com/bsv-blockchain/go-sdk/util
-# github.com/bsv8/MultisigPool v0.0.0-20260801021547-299209805f4736
+# github.com/bsv8/MultisigPool v0.0.0-20260801030859-6f3653811c86
 ## explicit; go 1.24.3
 github.com/bsv8/MultisigPool/pkg
 github.com/bsv8/MultisigPool/pkg/dual_endpoint

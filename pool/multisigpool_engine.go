@@ -23,16 +23,42 @@ type MultisigPoolEngineConfig struct {
 	BuyerPubKey   []byte
 	SellerPubKey  []byte
 	ArbiterPubKey []byte
-	BuyerKey      PrivateKeyProvider
-	ServerKey     PrivateKeyProvider
-	ArbiterKey    PrivateKeyProvider
 	BlockHeight   func() uint32
 }
 
 type MultisigPoolEngine struct {
-	buyer, seller, arbiter          *ec.PublicKey
-	buyerKey, serverKey, arbiterKey PrivateKeyProvider
-	blockHeight                     func() uint32
+	buyer, seller, arbiter *ec.PublicKey
+	blockHeight            func() uint32
+}
+
+// Role adapters are the only objects that hold private-key providers. The
+// engine itself is a stateless verifier/template core and can safely be
+// shared with nodes that must never receive a signing capability.
+type BuyerPoolAdapter struct {
+	*MultisigPoolEngine
+	Key PrivateKeyProvider
+}
+
+type SellerPoolAdapter struct {
+	*MultisigPoolEngine
+	Key PrivateKeyProvider
+}
+
+type ArbiterPoolAdapter struct {
+	*MultisigPoolEngine
+	Key PrivateKeyProvider
+}
+
+func NewBuyerPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *BuyerPoolAdapter {
+	return &BuyerPoolAdapter{MultisigPoolEngine: engine, Key: key}
+}
+
+func NewSellerPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *SellerPoolAdapter {
+	return &SellerPoolAdapter{MultisigPoolEngine: engine, Key: key}
+}
+
+func NewArbiterPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *ArbiterPoolAdapter {
+	return &ArbiterPoolAdapter{MultisigPoolEngine: engine, Key: key}
 }
 
 func NewMultisigPoolEngine(config MultisigPoolEngineConfig) (*MultisigPoolEngine, error) {
@@ -51,7 +77,7 @@ func NewMultisigPoolEngine(config MultisigPoolEngineConfig) (*MultisigPoolEngine
 	if buyer.IsEqual(seller) || buyer.IsEqual(arbiter) || seller.IsEqual(arbiter) {
 		return nil, invalid("pool participants must be distinct")
 	}
-	return &MultisigPoolEngine{buyer: buyer, seller: seller, arbiter: arbiter, buyerKey: config.BuyerKey, serverKey: config.ServerKey, arbiterKey: config.ArbiterKey, blockHeight: config.BlockHeight}, nil
+	return &MultisigPoolEngine{buyer: buyer, seller: seller, arbiter: arbiter, blockHeight: config.BlockHeight}, nil
 }
 
 func Build2of3LockingScript(pubkeys [][]byte) ([]byte, error) {
@@ -73,9 +99,10 @@ func Build2of3LockingScript(pubkeys [][]byte) ([]byte, error) {
 	return append([]byte(nil), lock.Bytes()...), nil
 }
 
-func (engine *MultisigPoolEngine) BuildRefundPresignRequest(ctx context.Context, input OpeningInput, signer Signer) (*RefundPresignRequest, error) {
+func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, input OpeningInput, signer Signer) (*RefundPresignRequest, error) {
 	_ = signer
-	if engine == nil || engine.buyerKey == nil {
+	engine := adapter.MultisigPoolEngine
+	if engine == nil || adapter.Key == nil {
 		return nil, invalid("A private-key provider is required")
 	}
 	if input.ExpiryLockTime == 0 {
@@ -99,7 +126,7 @@ func (engine *MultisigPoolEngine) BuildRefundPresignRequest(ctx context.Context,
 	if !bytes.Equal(poolOutput.LockingScript.Bytes(), lock.Bytes()) {
 		return nil, invalid("funding output does not use the configured pool lock")
 	}
-	buyerKey, err := engine.buyerKey.PrivateKey(ctx)
+	buyerKey, err := adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -147,18 +174,17 @@ func (engine *MultisigPoolEngine) VerifySellerRefundSignature(_ context.Context,
 	return nil
 }
 
-type PoolRefundSigner struct {
-	Engine *MultisigPoolEngine
-}
+type PoolRefundSigner struct{ Adapter *SellerPoolAdapter }
 
 func (adapter PoolRefundSigner) SignRefundTx(ctx context.Context, request *RefundPresignRequest) ([]byte, error) {
-	if adapter.Engine == nil || adapter.Engine.serverKey == nil {
+	if adapter.Adapter == nil || adapter.Adapter.MultisigPoolEngine == nil || adapter.Adapter.Key == nil {
 		return nil, invalid("server private-key provider is required")
 	}
+	engine := adapter.Adapter.MultisigPoolEngine
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
 	}
-	if err := adapter.Engine.validateRequestRoles(request.ServerPubKey, request.BuyerPubKey, request.ArbiterPubKey); err != nil {
+	if err := engine.validateRequestRoles(request.ServerPubKey, request.BuyerPubKey, request.ArbiterPubKey); err != nil {
 		return nil, err
 	}
 	state, err := tx.NewTransactionFromBytes(request.RefundTx)
@@ -166,14 +192,14 @@ func (adapter PoolRefundSigner) SignRefundTx(ctx context.Context, request *Refun
 		return nil, err
 	}
 	setPoolSource(state, request.PoolOutputSatoshis, request.PoolLockingScript)
-	key, err := adapter.Engine.serverKey.PrivateKey(ctx)
+	key, err := adapter.Adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if key == nil || !key.PubKey().IsEqual(adapter.Engine.seller) {
+	if key == nil || !key.PubKey().IsEqual(engine.seller) {
 		return nil, invalid("server private key does not match server slot")
 	}
-	sig, err := mp.SignTriplePoolAsServer(state, key, adapter.Engine.buyer, adapter.Engine.arbiter)
+	sig, err := mp.SignTriplePoolAsServer(state, key, engine.buyer, engine.arbiter)
 	if err != nil {
 		return nil, err
 	}
@@ -383,8 +409,9 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 	return &UnsignedPayment{SpendTxID: hash32FromBytes(input.Opening.SpendTxID), RawTx: state.Bytes(), PoolOutputSatoshis: input.Opening.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), input.Opening.PoolLockingScript...)}, nil
 }
 
-func (engine *MultisigPoolEngine) SignSellerArbitrationCandidate(ctx context.Context, unsigned *UnsignedPayment, _ Signer) ([]byte, error) {
-	if unsigned == nil || engine.serverKey == nil {
+func (adapter *SellerPoolAdapter) SignSellerArbitrationCandidate(ctx context.Context, unsigned *UnsignedPayment, _ Signer) ([]byte, error) {
+	engine := adapter.MultisigPoolEngine
+	if unsigned == nil || engine == nil || adapter.Key == nil {
 		return nil, invalid("server private-key provider is required")
 	}
 	state, err := tx.NewTransactionFromBytes(unsigned.RawTx)
@@ -392,7 +419,7 @@ func (engine *MultisigPoolEngine) SignSellerArbitrationCandidate(ctx context.Con
 		return nil, err
 	}
 	setPoolSource(state, unsigned.PoolOutputSatoshis, unsigned.PoolLockingScript)
-	key, err := engine.serverKey.PrivateKey(ctx)
+	key, err := adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -405,8 +432,9 @@ func (engine *MultisigPoolEngine) SignSellerArbitrationCandidate(ctx context.Con
 	}
 	return append([]byte(nil), (*sig)...), nil
 }
-func (engine *MultisigPoolEngine) SignBuyerPayment(ctx context.Context, unsigned *UnsignedPayment, _ Signer) (*PaymentState, error) {
-	if unsigned == nil || engine.buyerKey == nil {
+func (adapter *BuyerPoolAdapter) SignBuyerPayment(ctx context.Context, unsigned *UnsignedPayment, _ Signer) (*PaymentState, error) {
+	engine := adapter.MultisigPoolEngine
+	if unsigned == nil || engine == nil || adapter.Key == nil {
 		return nil, invalid("buyer private-key provider is required")
 	}
 	state, err := tx.NewTransactionFromBytes(unsigned.RawTx)
@@ -414,7 +442,7 @@ func (engine *MultisigPoolEngine) SignBuyerPayment(ctx context.Context, unsigned
 		return nil, err
 	}
 	setPoolSource(state, unsigned.PoolOutputSatoshis, unsigned.PoolLockingScript)
-	key, err := engine.buyerKey.PrivateKey(ctx)
+	key, err := adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -496,8 +524,9 @@ func (engine *MultisigPoolEngine) AttachSellerArbitrationSignature(_ context.Con
 	return stateToPayment(signed, state.SpendTxID, state.PoolOutputSatoshis, state.PoolLockingScript), nil
 }
 
-func (engine *MultisigPoolEngine) AddSellerSignature(ctx context.Context, state *PaymentState, _ Signer) (*SignedPayment, error) {
-	if engine == nil || engine.serverKey == nil {
+func (adapter *SellerPoolAdapter) AddSellerSignature(ctx context.Context, state *PaymentState, _ Signer) (*SignedPayment, error) {
+	engine := adapter.MultisigPoolEngine
+	if engine == nil || adapter.Key == nil {
 		return nil, invalid("server private-key provider is required")
 	}
 	tx, err := tx.NewTransactionFromBytes(state.RawTx)
@@ -513,7 +542,7 @@ func (engine *MultisigPoolEngine) AddSellerSignature(ctx context.Context, state 
 		return nil, invalid("A payment signature is invalid")
 	}
 	tx.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
-	key, err := engine.serverKey.PrivateKey(ctx)
+	key, err := adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -529,8 +558,9 @@ func (engine *MultisigPoolEngine) AddSellerSignature(ctx context.Context, state 
 	result := stateToPayment(merged, state.SpendTxID, state.PoolOutputSatoshis, state.PoolLockingScript)
 	return &SignedPayment{State: *result, RawTx: result.RawTx}, nil
 }
-func (engine *MultisigPoolEngine) SignArbiterPayment(ctx context.Context, state *PaymentState, _ Signer) ([]byte, error) {
-	if engine == nil || state == nil || engine.arbiterKey == nil {
+func (adapter *ArbiterPoolAdapter) SignArbiterPayment(ctx context.Context, state *PaymentState, _ Signer) ([]byte, error) {
+	engine := adapter.MultisigPoolEngine
+	if engine == nil || state == nil || adapter.Key == nil {
 		return nil, invalid("B private-key provider is required")
 	}
 	tx, err := tx.NewTransactionFromBytes(state.RawTx)
@@ -538,7 +568,7 @@ func (engine *MultisigPoolEngine) SignArbiterPayment(ctx context.Context, state 
 		return nil, err
 	}
 	setPoolSource(tx, state.PoolOutputSatoshis, state.PoolLockingScript)
-	key, err := engine.arbiterKey.PrivateKey(ctx)
+	key, err := adapter.Key.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -3,7 +3,6 @@ package triple_endpoint
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
 
 	libs "github.com/bsv8/MultisigPool/pkg/libs"
 	multisig "github.com/bsv8/MultisigPool/pkg/libs"
@@ -28,7 +27,7 @@ func SubBuildTripleFeePoolSpendTX(
 	isMain bool,
 	feeRate uint64,
 ) (*tx.Transaction, uint64, error) {
-	return SubBuildTripleFeePoolSpendTXWithProof(
+	return subBuildTripleFeePoolSpendTX(
 		prevTxId,
 		serverValue,
 		endHeight,
@@ -37,13 +36,10 @@ func SubBuildTripleFeePoolSpendTX(
 		bPublicKey,
 		isMain,
 		feeRate,
-		nil,
 	)
 }
 
-// SubBuildTripleFeePoolSpendTXWithProof 构造三方费用池付款交易，并可追加付款证明 OP_RETURN。
-// 当前三方实现仍然是 2-of-3 资金池，proof 只影响输出集合，不改变门限语义。
-func SubBuildTripleFeePoolSpendTXWithProof(
+func subBuildTripleFeePoolSpendTX(
 	prevTxId string,
 	serverValue uint64, // server 提供金额
 	endHeight uint32, // 区块高度
@@ -52,7 +48,6 @@ func SubBuildTripleFeePoolSpendTXWithProof(
 	bPublicKey *ec.PublicKey,
 	isMain bool,
 	feeRate uint64,
-	paymentProof []byte,
 ) (*tx.Transaction, uint64, error) {
 	aAddress, err := libs.GetAddressFromPublicKey(aPrivateKey.PubKey(), isMain)
 	if err != nil {
@@ -126,10 +121,6 @@ func SubBuildTripleFeePoolSpendTXWithProof(
 		Satoshis:      serverValue,
 		LockingScript: clientChangeScript,
 	})
-
-	if len(paymentProof) != 0 {
-		return nil, 0, fmt.Errorf("payment proofs are not permitted in a V2 state transaction")
-	}
 
 	// 做一个假的签名script，方便计算 size
 	// Fee estimation may use a temporary script, but the returned candidate must
@@ -209,44 +200,14 @@ func BuildTripleFeePoolSpendTX(
 	isMain bool,
 	feeRate uint64,
 ) (*tx.Transaction, *[]byte, uint64, error) {
-	return BuildTripleFeePoolSpendTXWithProof(
-		A_Tx,
-		serverValue,
-		endHeight,
-		serverPublicKey,
-		aPrivateKey,
-		bPublicKey,
-		isMain,
-		feeRate,
-		nil,
-	)
-}
-
-// BuildTripleFeePoolSpendTXWithProof 构建三方费用池付款交易，并支持可选二进制付款证明。
-func BuildTripleFeePoolSpendTXWithProof(
-	A_Tx *tx.Transaction,
-	serverValue uint64, // 服务器提供金额
-	endHeight uint32, // 区块高度
-	serverPublicKey *ec.PublicKey,
-	aPrivateKey *ec.PrivateKey,
-	bPublicKey *ec.PublicKey,
-	isMain bool,
-	feeRate uint64,
-	paymentProof []byte,
-) (*tx.Transaction, *[]byte, uint64, error) {
-
-	txTwo, amount, err := SubBuildTripleFeePoolSpendTXWithProof(A_Tx.TxID().String(), serverValue, endHeight, serverPublicKey, aPrivateKey, bPublicKey, isMain, feeRate, paymentProof)
+	txTwo, amount, err := subBuildTripleFeePoolSpendTX(A_Tx.TxID().String(), serverValue, endHeight, serverPublicKey, aPrivateKey, bPublicKey, isMain, feeRate)
 	if err != nil {
-		log.Printf("BuildOneB error: %v", err)
 		return nil, nil, 0, err
 	}
-
-	// log.Printf("------------------------------- BuildOneB success: %v", txTwo.Hex())
 
 	// 重新签名
 	clientSignByte, err := SpendTXTripleFeePoolASign(txTwo, serverValue, serverPublicKey, aPrivateKey, bPublicKey)
 	if err != nil {
-		log.Printf("BuildOneC error: %v", err)
 		return nil, nil, 0, err
 	}
 

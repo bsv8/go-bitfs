@@ -63,16 +63,18 @@ func TestMultisigPoolEngineCanonicalNormalAndArbitrationFlow(t *testing.T) {
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: script.NewFromBytes(lock.Bytes())})
 	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{
 		BuyerPubKey: a.PubKey().Compressed(), SellerPubKey: server.PubKey().Compressed(), ArbiterPubKey: b.PubKey().Compressed(),
-		BuyerKey: testPrivateKeyProvider{a}, ServerKey: testPrivateKeyProvider{server}, ArbiterKey: testPrivateKeyProvider{b},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	opening, err := engine.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: 500, MinerFeeRateSatPerKB: 1, SellerPubKey: server.PubKey().Compressed(), ArbiterPubKey: b.PubKey().Compressed()}, nil)
+	buyerPool := NewBuyerPoolAdapter(engine, testPrivateKeyProvider{a})
+	sellerPool := NewSellerPoolAdapter(engine, testPrivateKeyProvider{server})
+	arbiterPool := NewArbiterPoolAdapter(engine, testPrivateKeyProvider{b})
+	opening, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: 500, MinerFeeRateSatPerKB: 1, SellerPubKey: server.PubKey().Compressed(), ArbiterPubKey: b.PubKey().Compressed()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerRefundSig, err := (PoolRefundSigner{Engine: engine}).SignRefundTx(ctx, opening)
+	sellerRefundSig, err := (PoolRefundSigner{Adapter: sellerPool}).SignRefundTx(ctx, opening)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,14 +102,14 @@ func TestMultisigPoolEngineCanonicalNormalAndArbitrationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyerState, err := engine.SignBuyerPayment(ctx, unsigned, nil)
+	buyerState, err := buyerPool.SignBuyerPayment(ctx, unsigned, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.VerifyBuyerPayment(buyerState, proof); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := engine.AddSellerSignature(ctx, buyerState, nil)
+	accepted, err := sellerPool.AddSellerSignature(ctx, buyerState, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +121,7 @@ func TestMultisigPoolEngineCanonicalNormalAndArbitrationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverSig, err := engine.SignSellerArbitrationCandidate(ctx, arbUnsigned, nil)
+	serverSig, err := sellerPool.SignSellerArbitrationCandidate(ctx, arbUnsigned, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +136,7 @@ func TestMultisigPoolEngineCanonicalNormalAndArbitrationFlow(t *testing.T) {
 	if err := engine.VerifySellerPayment(serverState, proof); err != nil {
 		t.Fatal(err)
 	}
-	bSig, err := engine.SignArbiterPayment(ctx, serverState, nil)
+	bSig, err := arbiterPool.SignArbiterPayment(ctx, serverState, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

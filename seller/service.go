@@ -32,7 +32,7 @@ type ServiceConfig struct {
 	OpeningHooks      pool.SellerPoolOpeningHooks
 	Pending           pool.PendingRequestStore
 	Content           ContentSource
-	Transactions      pool.MultisigPoolPort
+	Transactions      pool.SellerPoolPort
 	Participants      pool.ParticipantVerifier
 	Node              pool.NonFinalPoolNode
 }
@@ -47,7 +47,7 @@ type Service struct {
 	openingHooks      pool.SellerPoolOpeningHooks
 	pending           pool.PendingRequestStore
 	content           ContentSource
-	transactions      pool.MultisigPoolPort
+	transactions      pool.SellerPoolPort
 	participants      pool.ParticipantVerifier
 	node              pool.NonFinalPoolNode
 }

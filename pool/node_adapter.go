@@ -29,12 +29,12 @@ type OpeningByFundingStore interface {
 // forwarding it, then verifies that the backend response describes the same
 // accepted transaction and sequence.
 type VerifiedNonFinalPoolNode struct {
-	engine   MultisigPoolPort
+	engine   PoolNodeVerifierPort
 	openings OpeningByFundingStore
 	backend  NonFinalPoolBackend
 }
 
-func NewVerifiedNonFinalPoolNode(engine MultisigPoolPort, openings OpeningByFundingStore, backend NonFinalPoolBackend) (*VerifiedNonFinalPoolNode, error) {
+func NewVerifiedNonFinalPoolNode(engine PoolNodeVerifierPort, openings OpeningByFundingStore, backend NonFinalPoolBackend) (*VerifiedNonFinalPoolNode, error) {
 	if engine == nil || openings == nil || backend == nil {
 		return nil, fmt.Errorf("%w: node adapter requires transaction engine, opening store and backend", ErrInvalidEvidence)
 	}

@@ -228,8 +228,60 @@ type SignatureVerifier interface {
 	Verify(pubkey, payload, signature []byte) error
 }
 
+// PoolNodeVerifierPort is the read-only transaction capability needed by the
+// verified node adapter.
+type PoolNodeVerifierPort interface {
+	FundingTxID([]byte) (Hash32, error)
+	TransactionID([]byte) (Hash32, error)
+	BuildRefundSubmission(*OpeningProof) ([]byte, error)
+	VerifyRefundExpired(*OpeningProof, time.Time) error
+	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	ParseFinalPaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
+	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
+	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
+}
+
+// BuyerPoolPort is the role-scoped transaction capability used by buyer.Client.
+type BuyerPoolPort interface {
+	TransactionID([]byte) (Hash32, error)
+	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
+	BuildRefundSubmission(*OpeningProof) ([]byte, error)
+	VerifyRefundExpired(*OpeningProof, time.Time) error
+	VerifyOpening(*OpeningProof) error
+	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
+	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
+	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
+	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
+	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
+	SignBuyerPayment(context.Context, *UnsignedPayment, Signer) (*PaymentState, error)
+	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, error)
+}
+
+// SellerPoolPort is the role-scoped transaction capability used by seller.Service.
+type SellerPoolPort interface {
+	TransactionID([]byte) (Hash32, error)
+	FundingTxID([]byte) (Hash32, error)
+	BuildRefundSubmission(*OpeningProof) ([]byte, error)
+	VerifyOpening(*OpeningProof) error
+	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
+	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
+	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
+	VerifySellerPayment(*PaymentState, *OpeningProof) error
+	VerifySellerPaymentSignature(*PaymentState, []byte, *OpeningProof) error
+	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
+	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
+	SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
+	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
+	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
+	SignArbiterPayment(context.Context, *PaymentState, Signer) ([]byte, error)
+	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
+}
+
 // MultisigPoolPort owns all transaction parsing, signature, input/output and
-// amount rules. Workflow layers must not reconstruct these rules themselves.
+// amount rules. Deprecated: new workflow APIs use role-scoped ports above.
 type MultisigPoolPort interface {
 	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
 	TransactionID(rawTx []byte) (Hash32, error)

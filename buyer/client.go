@@ -37,7 +37,7 @@ type ClientConfig struct {
 	Opening           pool.BuyerPoolOpeningHooks
 	Participants      pool.ParticipantVerifier
 	Node              pool.NonFinalPoolNode
-	Transactions      pool.MultisigPoolPort
+	Transactions      pool.BuyerPoolPort
 	ContentSink       ContentSink
 	SeedSource        SeedSource
 }
@@ -52,7 +52,7 @@ type Client struct {
 	opening           pool.BuyerPoolOpeningHooks
 	participants      pool.ParticipantVerifier
 	node              pool.NonFinalPoolNode
-	transactions      pool.MultisigPoolPort
+	transactions      pool.BuyerPoolPort
 	contentSink       ContentSink
 	seedSource        SeedSource
 }

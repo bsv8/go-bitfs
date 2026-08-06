@@ -3,7 +3,9 @@ package pool
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
@@ -152,4 +154,78 @@ func mustPoolTestKey(t *testing.T, hexByte string) *ec.PrivateKey {
 		t.Fatal(err)
 	}
 	return key
+}
+
+func TestVerifyRefundExpiredUsesOnlyTheConfiguredLockTimeClock(t *testing.T) {
+	blockHeight := uint32(900_000)
+	engine, heightProof := mustRefundExpiryFixture(t, 1_000_000, func() uint32 { return blockHeight })
+	if err := engine.VerifyRefundExpired(heightProof, time.Unix(2_000_000_000, 0)); !errors.Is(err, ErrNotExpired) {
+		t.Fatalf("height refund before block maturity = %v, want ErrNotExpired", err)
+	}
+	heightProof = mustRefundExpiryProof(t, 900_000, func() uint32 { return blockHeight })
+	if err := engine.VerifyRefundExpired(heightProof, time.Unix(2_000_000_000, 0)); err != nil {
+		t.Fatalf("height refund at block maturity = %v, want success", err)
+	}
+
+	engine, timeProof := mustRefundExpiryFixture(t, 2_000_000_000, func() uint32 { return blockHeight })
+	if err := engine.VerifyRefundExpired(timeProof, time.Unix(1_999_999_999, 0)); !errors.Is(err, ErrNotExpired) {
+		t.Fatalf("time refund before timestamp maturity = %v, want ErrNotExpired", err)
+	}
+	if err := engine.VerifyRefundExpired(timeProof, time.Unix(2_000_000_000, 0)); err != nil {
+		t.Fatalf("time refund at timestamp maturity = %v, want success", err)
+	}
+
+	noHeightEngine, noHeightProof := mustRefundExpiryFixture(t, 1_000_000, nil)
+	if err := noHeightEngine.VerifyRefundExpired(noHeightProof, time.Unix(2_000_000_000, 0)); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("height refund without block provider = %v, want ErrInvalidEvidence", err)
+	}
+}
+
+func mustRefundExpiryFixture(t *testing.T, lockTime uint32, blockHeight func() uint32) (*MultisigPoolEngine, *OpeningProof) {
+	t.Helper()
+	return mustRefundExpiryFixtureWithKeys(t, lockTime, blockHeight)
+}
+
+func mustRefundExpiryProof(t *testing.T, lockTime uint32, blockHeight func() uint32) *OpeningProof {
+	t.Helper()
+	_, proof := mustRefundExpiryFixtureWithKeys(t, lockTime, blockHeight)
+	return proof
+}
+
+func mustRefundExpiryFixtureWithKeys(t *testing.T, lockTime uint32, blockHeight func() uint32) (*MultisigPoolEngine, *OpeningProof) {
+	t.Helper()
+	ctx := context.Background()
+	buyer := mustPoolTestKey(t, "11")
+	seller := mustPoolTestKey(t, "22")
+	arbiter := mustPoolTestKey(t, "33")
+	roles := mp.ArbitratedPoolRoles{Buyer: buyer.PubKey(), Seller: seller.PubKey(), Arbiter: arbiter.PubKey()}
+	lock, err := mp.BuildArbitratedPoolLock(roles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding := tx.NewTransaction()
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed(), BlockHeight: blockHeight})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyerPool := NewBuyerPoolAdapter(engine, testPrivateKeyProvider{buyer})
+	sellerPool := NewSellerPoolAdapter(engine, testPrivateKeyProvider{seller})
+	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: lockTime, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellerRefund, err := (PoolRefundSigner{Adapter: sellerPool}).SignRefundTx(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spend, err := engine.TransactionID(request.RefundTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := &OpeningProof{Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion, RefundTx: request.RefundTx, SpendTxID: spend[:], FundingTxID: funding.TxID().CloneBytes(), PoolOutputIndex: 0, PoolOutputSatoshis: 100000, PoolLockingScript: request.PoolLockingScript, BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey, MinerFeeRateSatPerKB: 1, BuyerRefundSignature: request.BuyerRefundSignature, SellerRefundSignature: sellerRefund, FundingTx: funding.Bytes()}
+	if err := engine.VerifyOpening(proof); err != nil {
+		t.Fatal(err)
+	}
+	return engine, proof
 }

@@ -18,6 +18,11 @@ import (
 
 const finalPoolSequence = ^uint32(0)
 
+// Bitcoin nLockTime values below this threshold are block heights; values at
+// or above it are Unix timestamps. A refund must be checked against exactly
+// one of those clocks, never both.
+const lockTimeTimestampThreshold uint32 = 500_000_000
+
 type MultisigPoolEngineConfig struct {
 	BuyerPubKey   []byte
 	SellerPubKey  []byte
@@ -297,10 +302,16 @@ func (engine *MultisigPoolEngine) VerifyRefundExpired(proof *OpeningProof, now t
 	if err != nil {
 		return err
 	}
-	if engine.blockHeight != nil && refund.LockTime <= engine.blockHeight() {
-		return nil
+	if refund.LockTime < lockTimeTimestampThreshold {
+		if engine.blockHeight == nil {
+			return invalid("block-height refund requires a block-height provider")
+		}
+		if refund.LockTime <= engine.blockHeight() {
+			return nil
+		}
+		return ErrNotExpired
 	}
-	if refund.LockTime != 0 && now.Unix() >= int64(refund.LockTime) {
+	if now.Unix() >= int64(refund.LockTime) {
 		return nil
 	}
 	return ErrNotExpired

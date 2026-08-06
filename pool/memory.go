@@ -67,6 +67,8 @@ func (store *MemoryStore) SaveOpeningProof(ctx context.Context, proof *OpeningPr
 		return err
 	}
 	cloned.Version = MajorVersion
+	cloned.MultisigProtocol = MultisigProtocol
+	cloned.MultisigVersion = MultisigVersion
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if old := store.openingsBySpend[spendTxID]; old != nil && !openingProofCompatible(old, cloned) {
@@ -107,6 +109,9 @@ func (store *MemoryStore) SaveAcceptedPayment(_ context.Context, state *PaymentS
 	}
 	if state == nil || len(state.RawTx) == 0 {
 		return fmt.Errorf("%w: payment state is incomplete", ErrInvalidEvidence)
+	}
+	if state.ArbiterAmountSat != 0 {
+		return fmt.Errorf("%w: arbiter amount must be zero", ErrInvalidEvidence)
 	}
 	cloned := clonePaymentState(state)
 	store.mu.Lock()
@@ -225,33 +230,23 @@ func (store *MemoryStore) Release(_ context.Context, spendTxID, requestHash Hash
 	return nil
 }
 
-func clonePaymentState(state *PaymentState) *PaymentState {
-	if state == nil {
-		return nil
-	}
-	cloned := *state
-	cloned.RawTx = append([]byte(nil), state.RawTx...)
-	cloned.PoolLockingScript = append([]byte(nil), state.PoolLockingScript...)
-	return &cloned
-}
-
 func paymentStateEqual(left, right *PaymentState) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.SpendTxID == right.SpendTxID && left.PaymentSequence == right.PaymentSequence && left.SellerAmountSat == right.SellerAmountSat && left.ClientAmountSat == right.ClientAmountSat && left.ContentRequestTermsHash == right.ContentRequestTermsHash && left.PoolOutputSatoshis == right.PoolOutputSatoshis && string(left.RawTx) == string(right.RawTx) && string(left.PoolLockingScript) == string(right.PoolLockingScript)
+	return left.SpendTxID == right.SpendTxID && left.PaymentSequence == right.PaymentSequence && left.BuyerAmountSat == right.BuyerAmountSat && left.SellerAmountSat == right.SellerAmountSat && left.ArbiterAmountSat == right.ArbiterAmountSat && left.PaymentAuthorizationHash == right.PaymentAuthorizationHash && string(left.RawTx) == string(right.RawTx) && string(left.PoolLockingScript) == string(right.PoolLockingScript)
 }
 
 func openingProofEqual(left, right *OpeningProof) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.Version == right.Version && left.PoolOutputIndex == right.PoolOutputIndex && left.PoolOutputSatoshis == right.PoolOutputSatoshis && left.MinerFeeRateSatPerKB == right.MinerFeeRateSatPerKB && string(left.RefundTx) == string(right.RefundTx) && string(left.SpendTxID) == string(right.SpendTxID) && string(left.FundingTxID) == string(right.FundingTxID) && string(left.PoolLockingScript) == string(right.PoolLockingScript) && string(left.ServerPubKey) == string(right.ServerPubKey) && string(left.BuyerPubKey) == string(right.BuyerPubKey) && string(left.ArbiterPubKey) == string(right.ArbiterPubKey) && string(left.BuyerRefundSignature) == string(right.BuyerRefundSignature) && string(left.SellerRefundSignature) == string(right.SellerRefundSignature) && string(left.FundingTx) == string(right.FundingTx)
+	return left.Version == right.Version && left.MultisigProtocol == right.MultisigProtocol && left.MultisigVersion == right.MultisigVersion && left.PoolOutputIndex == right.PoolOutputIndex && left.PoolOutputSatoshis == right.PoolOutputSatoshis && left.MinerFeeRateSatPerKB == right.MinerFeeRateSatPerKB && string(left.RefundTx) == string(right.RefundTx) && string(left.SpendTxID) == string(right.SpendTxID) && string(left.FundingTxID) == string(right.FundingTxID) && string(left.PoolLockingScript) == string(right.PoolLockingScript) && string(left.BuyerPubKey) == string(right.BuyerPubKey) && string(left.SellerPubKey) == string(right.SellerPubKey) && string(left.ArbiterPubKey) == string(right.ArbiterPubKey) && string(left.BuyerRefundSignature) == string(right.BuyerRefundSignature) && string(left.SellerRefundSignature) == string(right.SellerRefundSignature) && string(left.FundingTx) == string(right.FundingTx)
 }
 
 func openingProofCompatible(left, right *OpeningProof) bool {
 	if !openingProofEqual(left, right) {
-		if left == nil || right == nil || left.Version != right.Version || left.PoolOutputIndex != right.PoolOutputIndex || left.PoolOutputSatoshis != right.PoolOutputSatoshis || left.MinerFeeRateSatPerKB != right.MinerFeeRateSatPerKB || string(left.RefundTx) != string(right.RefundTx) || string(left.SpendTxID) != string(right.SpendTxID) || string(left.FundingTxID) != string(right.FundingTxID) || string(left.PoolLockingScript) != string(right.PoolLockingScript) || string(left.ServerPubKey) != string(right.ServerPubKey) || string(left.BuyerPubKey) != string(right.BuyerPubKey) || string(left.ArbiterPubKey) != string(right.ArbiterPubKey) || string(left.BuyerRefundSignature) != string(right.BuyerRefundSignature) || string(left.SellerRefundSignature) != string(right.SellerRefundSignature) {
+		if left == nil || right == nil || left.Version != right.Version || left.MultisigProtocol != right.MultisigProtocol || left.MultisigVersion != right.MultisigVersion || left.PoolOutputIndex != right.PoolOutputIndex || left.PoolOutputSatoshis != right.PoolOutputSatoshis || left.MinerFeeRateSatPerKB != right.MinerFeeRateSatPerKB || string(left.RefundTx) != string(right.RefundTx) || string(left.SpendTxID) != string(right.SpendTxID) || string(left.FundingTxID) != string(right.FundingTxID) || string(left.PoolLockingScript) != string(right.PoolLockingScript) || string(left.BuyerPubKey) != string(right.BuyerPubKey) || string(left.SellerPubKey) != string(right.SellerPubKey) || string(left.ArbiterPubKey) != string(right.ArbiterPubKey) || string(left.BuyerRefundSignature) != string(right.BuyerRefundSignature) || string(left.SellerRefundSignature) != string(right.SellerRefundSignature) {
 			return false
 		}
 		// A proof may be upgraded exactly once from the presign form to the

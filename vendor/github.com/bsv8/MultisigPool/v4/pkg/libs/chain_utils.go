@@ -43,8 +43,3 @@ import (
 func GetAddressFromPublicKey(pubKey *ec.PublicKey, isMain bool) (*script.Address, error) {
 	return script.NewAddressFromPublicKey(pubKey, isMain)
 }
-
-// GetAddressFromPubKey is kept for backward compatibility.
-func GetAddressFromPubKey(pubKey *ec.PublicKey, isMain bool) (*script.Address, error) {
-	return GetAddressFromPublicKey(pubKey, isMain)
-}

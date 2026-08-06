@@ -2,7 +2,11 @@
 // not import BitFS quote or content types.
 package pool
 
-import "errors"
+import (
+	"crypto/sha256"
+	"errors"
+	"fmt"
+)
 
 var (
 	ErrInvalidEvidence      = errors.New("invalid pool evidence")
@@ -14,3 +18,14 @@ var (
 	ErrNotExpired           = errors.New("pool refund expiry has not been reached")
 	ErrPoolStateUncertain   = errors.New("pool state requires external reconciliation")
 )
+
+func invalid(message string) error { return fmt.Errorf("%w: %s", ErrInvalidEvidence, message) }
+
+func hash32FromBytes(raw []byte) Hash32 {
+	var result Hash32
+	if len(raw) == sha256.Size {
+		copy(result[:], raw)
+		return result
+	}
+	return Hash32(sha256.Sum256(raw))
+}

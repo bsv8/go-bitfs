@@ -4,10 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestFileStoreRejectsPreviousSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool-state.json")
+	if err := os.WriteFile(path, []byte(`{"version":3,"openings":[],"accepted":[],"pending":[],"uncertain":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFileStore(path, testIDCalculator{}); err == nil || !strings.Contains(err.Error(), "unsupported pool store snapshot version 3") {
+		t.Fatalf("NewFileStore() error = %v, want schema rejection", err)
+	}
+}
 
 type testIDCalculator struct{}
 
@@ -56,7 +68,7 @@ func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := &OpeningProof{
-		Version:  MajorVersion,
+		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
 		RefundTx: []byte("refund"),
 		// The seller's pre-sign proof has no externally computed spend ID yet;
 		// the store must derive the stable anchor from RefundTx before saving.
@@ -64,7 +76,7 @@ func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {
 		FundingTxID:        make([]byte, 32),
 		PoolOutputSatoshis: 100,
 		PoolLockingScript:  []byte("script"),
-		ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
+		SellerPubKey:       []byte("seller"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 		BuyerRefundSignature:  []byte("buyer"),
 		SellerRefundSignature: []byte("seller"),
 	}
@@ -112,13 +124,13 @@ func TestFileStoreRehydratesPoolPaymentAndPendingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := &OpeningProof{
-		Version:            MajorVersion,
+		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
 		RefundTx:           []byte("refund"),
 		SpendTxID:          bytes32(3),
 		FundingTxID:        make([]byte, 32),
 		PoolOutputSatoshis: 100,
 		PoolLockingScript:  []byte("script"),
-		ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
+		SellerPubKey:       []byte("seller"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 		BuyerRefundSignature:  []byte("buyer"),
 		SellerRefundSignature: []byte("seller"),
 		FundingTx:             []byte("funding"),
@@ -131,12 +143,12 @@ func TestFileStoreRehydratesPoolPaymentAndPendingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &PaymentState{
-		SpendTxID:               spend,
-		RawTx:                   []byte("accepted-payment"),
-		PaymentSequence:         2,
-		SellerAmountSat:         7,
-		ClientAmountSat:         92,
-		ContentRequestTermsHash: Hash32{3},
+		SpendTxID:                spend,
+		RawTx:                    []byte("accepted-payment"),
+		PaymentSequence:          2,
+		SellerAmountSat:          7,
+		BuyerAmountSat:           92,
+		PaymentAuthorizationHash: Hash32{3},
 	}
 	if err := first.SaveAcceptedPayment(ctx, state); err != nil {
 		t.Fatal(err)
@@ -185,13 +197,13 @@ func TestFileStoreInstancesReloadBeforeMutating(t *testing.T) {
 	}
 	proof := func(marker byte) *OpeningProof {
 		return &OpeningProof{
-			Version:            MajorVersion,
+			Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
 			RefundTx:           []byte{marker},
 			SpendTxID:          bytes32(marker + 10),
 			FundingTxID:        bytes32(marker),
 			PoolOutputSatoshis: 100,
 			PoolLockingScript:  []byte("script"),
-			ServerPubKey:       []byte("server"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
+			SellerPubKey:       []byte("seller"), BuyerPubKey: []byte("buyer-key"), ArbiterPubKey: []byte("arbiter"),
 			BuyerRefundSignature:  []byte("buyer"),
 			SellerRefundSignature: []byte("seller"),
 			FundingTx:             []byte{marker, 0xff},

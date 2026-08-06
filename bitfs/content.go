@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const contentProtocolVersion uint64 = 2
+const contentProtocolVersion uint64 = 3
 
 // Hash32 is a fixed-size SHA-256 reference used by the new protocol.
 type Hash32 [sha256.Size]byte
@@ -56,8 +56,8 @@ type SignedContentRequest struct {
 
 // ContentDeliveryTerms is the unsigned, signed-bytes portion of 004.
 type ContentDeliveryTerms struct {
-	ContentRequestTermsHash []byte
-	ContentBytes            []byte
+	PaymentAuthorizationHash []byte
+	ContentBytes             []byte
 }
 
 // SignedContentDelivery is the complete 004 credential.
@@ -153,7 +153,7 @@ func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	return cloneContentRequestTerms(terms), nil
 }
 
-func ContentRequestTermsHash(termsCBOR []byte) (Hash32, error) {
+func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	if _, err := DecodeContentRequestTerms(termsCBOR); err != nil {
 		return Hash32{}, err
 	}
@@ -227,7 +227,7 @@ func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	}
 	return canonicalEnc.Marshal([]any{
 		contentProtocolVersion,
-		bstr(terms.ContentRequestTermsHash),
+		bstr(terms.PaymentAuthorizationHash),
 		bstr(terms.ContentBytes),
 	})
 }
@@ -242,7 +242,7 @@ func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
 	if err := decode(values[0], &version); err != nil || version != contentProtocolVersion {
 		return nil, fmt.Errorf("%w: unsupported content delivery terms version", ErrInvalidEvidence)
 	}
-	if err := decode(values[1], &terms.ContentRequestTermsHash); err != nil {
+	if err := decode(values[1], &terms.PaymentAuthorizationHash); err != nil {
 		return nil, fmt.Errorf("%w: request terms hash: %v", ErrInvalidEvidence, err)
 	}
 	if err := decode(values[2], &terms.ContentBytes); err != nil {
@@ -275,13 +275,13 @@ func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sig
 	if request == nil {
 		return nil, errors.New("signed content request is required")
 	}
-	requestHash, err := ContentRequestTermsHash(request.TermsCBOR)
+	requestHash, err := PaymentAuthorizationHash(request.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
 	terms, err := EncodeContentDeliveryTerms(&ContentDeliveryTerms{
-		ContentRequestTermsHash: requestHash[:],
-		ContentBytes:            append([]byte(nil), payload...),
+		PaymentAuthorizationHash: requestHash[:],
+		ContentBytes:             append([]byte(nil), payload...),
 	})
 	if err != nil {
 		return nil, err
@@ -371,8 +371,8 @@ func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 	if terms == nil {
 		return errors.New("content delivery terms are required")
 	}
-	if len(terms.ContentRequestTermsHash) != sha256.Size {
-		return errors.New("content_request_terms_hash must be 32 bytes")
+	if len(terms.PaymentAuthorizationHash) != sha256.Size {
+		return errors.New("payment_authorization_hash must be 32 bytes")
 	}
 	if len(terms.ContentBytes) > int(BlockSize) {
 		return fmt.Errorf("content_bytes exceeds %d bytes", BlockSize)
@@ -574,8 +574,8 @@ func verifySignedContentDeliveryAt(request *SignedContentRequest, delivery *Sign
 	if err != nil {
 		return nil, err
 	}
-	requestHash, _ := ContentRequestTermsHash(request.TermsCBOR)
-	if !bytes.Equal(deliveryTerms.ContentRequestTermsHash, requestHash[:]) {
+	requestHash, _ := PaymentAuthorizationHash(request.TermsCBOR)
+	if !bytes.Equal(deliveryTerms.PaymentAuthorizationHash, requestHash[:]) {
 		return nil, fmt.Errorf("%w: delivery does not reference supplied request", ErrInvalidEvidence)
 	}
 	if sellerVerifier == nil {
@@ -632,7 +632,7 @@ func cloneContentDeliveryTerms(terms *ContentDeliveryTerms) *ContentDeliveryTerm
 	if terms == nil {
 		return nil
 	}
-	return &ContentDeliveryTerms{ContentRequestTermsHash: append([]byte(nil), terms.ContentRequestTermsHash...), ContentBytes: append([]byte(nil), terms.ContentBytes...)}
+	return &ContentDeliveryTerms{PaymentAuthorizationHash: append([]byte(nil), terms.PaymentAuthorizationHash...), ContentBytes: append([]byte(nil), terms.ContentBytes...)}
 }
 
 func cloneSignedContentDelivery(delivery *SignedContentDelivery) *SignedContentDelivery {

@@ -24,19 +24,11 @@ func SellerPresignRefund(ctx context.Context, request *RefundPresignRequest, hoo
 		return nil, fmt.Errorf("%w: seller refund signature is empty", ErrInvalidEvidence)
 	}
 	proof := &OpeningProof{
-		Version:               MajorVersion,
-		RefundTx:              append([]byte(nil), request.RefundTx...),
-		SpendTxID:             nil,
-		FundingTxID:           append([]byte(nil), request.FundingTxID...),
-		PoolOutputIndex:       request.PoolOutputIndex,
-		PoolOutputSatoshis:    request.PoolOutputSatoshis,
-		PoolLockingScript:     append([]byte(nil), request.PoolLockingScript...),
-		ServerPubKey:          append([]byte(nil), request.ServerPubKey...),
-		BuyerPubKey:           append([]byte(nil), request.BuyerPubKey...),
-		ArbiterPubKey:         append([]byte(nil), request.ArbiterPubKey...),
-		MinerFeeRateSatPerKB:  request.MinerFeeRateSatPerKB,
-		BuyerRefundSignature:  append([]byte(nil), request.BuyerRefundSignature...),
-		SellerRefundSignature: append([]byte(nil), signature...),
+		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
+		RefundTx: append([]byte(nil), request.RefundTx...), SpendTxID: nil, FundingTxID: append([]byte(nil), request.FundingTxID...),
+		PoolOutputIndex: request.PoolOutputIndex, PoolOutputSatoshis: request.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), request.PoolLockingScript...),
+		BuyerPubKey: append([]byte(nil), request.BuyerPubKey...), SellerPubKey: append([]byte(nil), request.SellerPubKey...), ArbiterPubKey: append([]byte(nil), request.ArbiterPubKey...),
+		MinerFeeRateSatPerKB: request.MinerFeeRateSatPerKB, BuyerRefundSignature: append([]byte(nil), request.BuyerRefundSignature...), SellerRefundSignature: append([]byte(nil), signature...),
 	}
 	if err := hooks.SaveOpeningProof(ctx, proof); err != nil {
 		return nil, fmt.Errorf("save pending opening proof: %w", err)
@@ -74,20 +66,11 @@ func BuyerAcceptRefundPresign(ctx context.Context, request *RefundPresignRequest
 		return nil, fmt.Errorf("calculate spend transaction ID: %w", err)
 	}
 	proof := &OpeningProof{
-		Version:               MajorVersion,
-		RefundTx:              append([]byte(nil), request.RefundTx...),
-		SpendTxID:             spendTxID[:],
-		FundingTxID:           append([]byte(nil), request.FundingTxID...),
-		PoolOutputIndex:       request.PoolOutputIndex,
-		PoolOutputSatoshis:    request.PoolOutputSatoshis,
-		PoolLockingScript:     append([]byte(nil), request.PoolLockingScript...),
-		ServerPubKey:          append([]byte(nil), request.ServerPubKey...),
-		BuyerPubKey:           append([]byte(nil), request.BuyerPubKey...),
-		ArbiterPubKey:         append([]byte(nil), request.ArbiterPubKey...),
-		MinerFeeRateSatPerKB:  request.MinerFeeRateSatPerKB,
-		BuyerRefundSignature:  append([]byte(nil), request.BuyerRefundSignature...),
-		SellerRefundSignature: append([]byte(nil), response.SellerRefundSignature...),
-		FundingTx:             append([]byte(nil), fundingTx...),
+		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
+		RefundTx: append([]byte(nil), request.RefundTx...), SpendTxID: spendTxID[:], FundingTxID: append([]byte(nil), request.FundingTxID...),
+		PoolOutputIndex: request.PoolOutputIndex, PoolOutputSatoshis: request.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), request.PoolLockingScript...),
+		BuyerPubKey: append([]byte(nil), request.BuyerPubKey...), SellerPubKey: append([]byte(nil), request.SellerPubKey...), ArbiterPubKey: append([]byte(nil), request.ArbiterPubKey...),
+		MinerFeeRateSatPerKB: request.MinerFeeRateSatPerKB, BuyerRefundSignature: append([]byte(nil), request.BuyerRefundSignature...), SellerRefundSignature: append([]byte(nil), response.SellerRefundSignature...), FundingTx: append([]byte(nil), fundingTx...),
 	}
 	if err := hooks.SaveOpeningProof(ctx, proof); err != nil {
 		return nil, fmt.Errorf("save complete opening proof: %w", err)

@@ -1,0 +1,16 @@
+; Current go-bitfs pool workflow v3, bound to MultisigPool v4.
+pool-refund-presign-request = [3, "bitfs.pool.v4", 4, refund-tx, funding-txid, output-index, pool-satoshis, pool-lock, buyer-pubkey, seller-pubkey, arbiter-pubkey, fee-rate, buyer-signature]
+opening-proof = [3, "bitfs.pool.v4", 4, refund-tx, spend-txid, funding-txid, output-index, pool-satoshis, pool-lock, buyer-pubkey, seller-pubkey, arbiter-pubkey, fee-rate, buyer-signature, seller-signature, funding-tx]
+refund-tx = bstr
+funding-tx = bstr
+funding-txid = bstr .size 32
+spend-txid = bstr .size 32
+output-index = uint
+pool-satoshis = uint
+pool-lock = bstr
+buyer-pubkey = bstr
+seller-pubkey = bstr
+arbiter-pubkey = bstr
+fee-rate = uint
+buyer-signature = bstr
+seller-signature = bstr

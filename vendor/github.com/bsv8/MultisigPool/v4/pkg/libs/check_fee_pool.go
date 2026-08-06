@@ -5,7 +5,7 @@ import (
 )
 
 type FeePoolInfo struct {
-	// ServerAmount  uint64
+	// BuyerAmount  uint64
 	ExpiredHeight uint32
 	PreviousID    *[]byte
 }
@@ -18,9 +18,9 @@ func GetInfoFromTxOne(
 ) (info *FeePoolInfo, err error) {
 
 	info = &FeePoolInfo{}
-	// info.ServerAmount = tx.Outputs[0].Satoshis
-	// if info.ServerAmount < minFeePoolAmount {
-	// 	return false, nil, errors.New("server amount is too small")
+	// info.BuyerAmount = tx.Outputs[0].Satoshis
+	// if info.BuyerAmount < minFeePoolAmount {
+	// 	return false, nil, errors.New("buyer amount is too small")
 	// }
 
 	info.ExpiredHeight = tx.LockTime

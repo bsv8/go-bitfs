@@ -31,11 +31,11 @@ func (c *ChainUtils) OrganizeUnspent(
 	}
 
 	// 前序交易锁定脚本
-	clientAddress, err := c.GetAddressFromPubKey(priv.PubKey())
+	buyerAddress, err := c.GetAddressFromPublicKey(priv.PubKey())
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get address: %w", err)
 	}
-	prevScript, err := p2pkh.Lock(clientAddress)
+	prevScript, err := p2pkh.Lock(buyerAddress)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create locking script: %w", err)
 	}

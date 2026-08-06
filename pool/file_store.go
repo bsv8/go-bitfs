@@ -25,7 +25,7 @@ type FileStore struct {
 	memory *MemoryStore
 }
 
-const fileStoreSchemaVersion uint8 = 3
+const fileStoreSchemaVersion uint8 = 4
 
 type fileStoreSnapshot struct {
 	Version   uint8                   `json:"version"`

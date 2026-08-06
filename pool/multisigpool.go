@@ -1,225 +1,112 @@
 package pool
 
-// The pool package is the sole transaction-library boundary. Workflow
-// packages pass validated role material here and never construct scripts or
-// calculate signatures themselves.
 import (
-	"bytes"
 	"context"
-	"fmt"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	mp "github.com/bsv8/MultisigPool/pkg"
+	mp "github.com/bsv8/MultisigPool/v4/pkg"
 	"github.com/bsv8/go-bitfs/bitfs"
 )
 
-type PoolRoles struct{ Server, A, B *ec.PublicKey }
-
-type PrivateKeyProvider interface {
-	PrivateKey(context.Context) (*ec.PrivateKey, error)
-}
-
-type MultisigPoolAdapter struct {
-	Roles PoolRoles
-	BKey  PrivateKeyProvider
-}
-
-func BuildPoolLock(roles PoolRoles) ([]byte, error) {
-	if roles.Server == nil || roles.A == nil || roles.B == nil {
-		return nil, fmt.Errorf("server, A and B public keys are required")
-	}
-	lock, err := mp.BuildTriplePoolLock(roles.Server, roles.A, roles.B)
+// BuildPoolLock is the public role-explicit lock adapter. The argument order
+// is permanently Buyer, Seller, Arbiter through the v4 role object.
+func BuildPoolLock(roles mp.ArbitratedPoolRoles) ([]byte, error) {
+	lock, err := mp.BuildArbitratedPoolLock(roles)
 	if err != nil {
 		return nil, err
 	}
 	return append([]byte(nil), lock.Bytes()...), nil
 }
 
-// Deprecated: use MergePoolServerAWithRoles.
-func MergePoolServerA(rawTx string, serverSig, aSig *[]byte) ([]byte, error) {
-	if serverSig == nil || aSig == nil || len(*serverSig) == 0 || len(*aSig) == 0 {
-		return nil, fmt.Errorf("server and A signatures are required")
-	}
-	tx, err := mp.MergeTriplePoolServerA(rawTx, serverSig, aSig)
-	if err != nil {
-		return nil, err
-	}
-	return tx.Bytes(), nil
+// PrivateKeyProvider is intentionally narrower than the workflow Signer:
+// MultisigPool must receive the actual private key so it can calculate its
+// canonical sighash and detached signature.
+type PrivateKeyProvider interface {
+	PrivateKey(context.Context) (*ec.PrivateKey, error)
 }
 
-// MergePoolServerAWithRoles is the role-explicit adapter entry point. New
-// callers must provide the pool roles and source amount so MultisigPool can
-// reject signatures from the wrong slot before assembly.
-func MergePoolServerAWithRoles(rawTx string, roles PoolRoles, poolAmount uint64, serverSig, aSig *[]byte) ([]byte, error) {
-	if serverSig == nil || aSig == nil || len(*serverSig) == 0 || len(*aSig) == 0 {
-		return nil, fmt.Errorf("server and A signatures are required")
-	}
-	merged, err := mp.MergeTriplePoolServerAWithRoles(rawTx, serverSig, aSig, roles.Server, roles.A, roles.B, poolAmount)
-	if err != nil {
-		return nil, err
-	}
-	return merged.Bytes(), nil
-}
-
-// Deprecated: use MergePoolServerBWithRoles.
-func MergePoolServerB(rawTx string, serverSig, bSig *[]byte) ([]byte, error) {
-	if serverSig == nil || bSig == nil || len(*serverSig) == 0 || len(*bSig) == 0 {
-		return nil, fmt.Errorf("server and B signatures are required")
-	}
-	tx, err := mp.MergeTriplePoolServerB(rawTx, serverSig, bSig)
-	if err != nil {
-		return nil, err
-	}
-	return tx.Bytes(), nil
-}
-
-// MergePoolServerBWithRoles is the role-explicit server+B arbitration entry
-// point.
-func MergePoolServerBWithRoles(rawTx string, roles PoolRoles, poolAmount uint64, serverSig, bSig *[]byte) ([]byte, error) {
-	if serverSig == nil || bSig == nil || len(*serverSig) == 0 || len(*bSig) == 0 {
-		return nil, fmt.Errorf("server and B signatures are required")
-	}
-	merged, err := mp.MergeTriplePoolServerBWithRoles(rawTx, serverSig, bSig, roles.Server, roles.A, roles.B, poolAmount)
-	if err != nil {
-		return nil, err
-	}
-	return merged.Bytes(), nil
+// MultisigPoolAdapter is the arbiter-facing capability. It contains no legacy
+// role aliases and never constructs a replacement candidate transaction.
+type MultisigPoolAdapter struct {
+	Engine     *MultisigPoolEngine
+	ArbiterKey PrivateKeyProvider
 }
 
 func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
-	if adapter == nil || proof == nil {
-		return fmt.Errorf("multisig pool adapter and opening proof are required")
+	if adapter == nil || adapter.Engine == nil {
+		return invalid("MultisigPool adapter requires an engine")
 	}
-	lock, err := BuildPoolLock(adapter.Roles)
-	if err != nil {
-		return err
-	}
-	if len(proof.PoolLockingScript) == 0 || !bytes.Equal(lock, proof.PoolLockingScript) {
-		return fmt.Errorf("opening proof pool roles do not match adapter")
-	}
-	if err := ValidateOpeningProof(proof); err != nil {
-		return err
-	}
-	if len(proof.FundingTx) == 0 {
-		return fmt.Errorf("complete funding transaction is required")
-	}
-	funding, err := tx.NewTransactionFromBytes(proof.FundingTx)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(funding.TxID().CloneBytes(), proof.FundingTxID) || int(proof.PoolOutputIndex) >= len(funding.Outputs) || funding.Outputs[proof.PoolOutputIndex] == nil {
-		return fmt.Errorf("funding transaction does not match opening proof")
-	}
-	output := funding.Outputs[proof.PoolOutputIndex]
-	if output.Satoshis != proof.PoolOutputSatoshis || !bytes.Equal(output.LockingScript.Bytes(), proof.PoolLockingScript) {
-		return fmt.Errorf("funding pool output does not match opening proof")
-	}
-	refund, err := tx.NewTransactionFromBytes(proof.RefundTx)
-	if err != nil {
-		return err
-	}
-	if len(refund.Inputs) != 1 || refund.Inputs[0] == nil || refund.Inputs[0].SourceTXID == nil || !bytes.Equal(refund.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || refund.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
-		return fmt.Errorf("refund transaction does not spend the opening pool outpoint")
-	}
-	if refund.Inputs[0].SourceTxOutput() == nil {
-		refund.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})
-	}
-	refundUnlocking := refund.Inputs[0].UnlockingScript
-	refund.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
-	stateErr := mp.VerifyTriplePoolStateWithFee(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, 0, mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB))
-	refund.Inputs[0].UnlockingScript = refundUnlocking
-	if stateErr != nil {
-		return stateErr
-	}
-	if ok, err := mp.VerifyTriplePoolASignature(refund, adapter.Roles.A, adapter.Roles.Server, adapter.Roles.B, &proof.BuyerRefundSignature); err != nil || !ok {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("A refund signature is invalid")
-	}
-	if ok, err := mp.VerifyTriplePoolServerSignature(refund, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, &proof.SellerRefundSignature); err != nil || !ok {
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("server refund signature is invalid")
-	}
-	return nil
+	return adapter.Engine.VerifyOpening(proof)
 }
 
-func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context, raw []byte, proof *OpeningProof, terms *bitfs.ContentRequestTerms, sellerSig []byte) (*PaymentState, error) {
-	if err := adapter.VerifyOpening(proof); err != nil {
+func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context, raw []byte, proof *OpeningProof, terms *bitfs.ContentRequestTerms, sellerSig []byte) (*UnsignedPayment, error) {
+	if adapter == nil || adapter.Engine == nil || terms == nil {
+		return nil, invalid("arbitration candidate inputs are incomplete")
+	}
+	if err := adapter.Engine.VerifyOpening(proof); err != nil {
 		return nil, err
 	}
-	if terms == nil || len(raw) == 0 || len(sellerSig) == 0 {
-		return nil, fmt.Errorf("arbitration candidate inputs are incomplete")
+	if terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB || terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter > uint64(^uint32(0)) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
+		return nil, invalid("arbitration candidate authorization is invalid")
 	}
-	if terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB {
-		return nil, fmt.Errorf("arbitration candidate fee rate does not match opening proof")
-	}
-	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter > uint64(^uint32(0)) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
-		return nil, fmt.Errorf("invalid target payment sequence")
-	}
-	candidate, err := tx.NewTransactionFromBytes(raw)
+	unsigned, err := unsignedFromRaw(raw, proof)
 	if err != nil {
-		return nil, fmt.Errorf("decode arbitration candidate: %w", err)
-	}
-	if len(candidate.Inputs) != 1 || candidate.Inputs[0] == nil || len(candidate.Outputs) != 2 {
-		return nil, fmt.Errorf("arbitration candidate shape is invalid")
-	}
-	if candidate.Inputs[0].SourceTXID == nil || !bytes.Equal(candidate.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || candidate.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
-		return nil, fmt.Errorf("arbitration candidate does not spend the opening pool outpoint")
-	}
-	if candidate.Inputs[0].SourceTxOutput() == nil {
-		candidate.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})
-	}
-	if candidate.Inputs[0].SequenceNumber != uint32(terms.PaymentSequenceAfter) || candidate.Outputs[0].Satoshis != terms.SellerAmountAfterSat {
-		return nil, fmt.Errorf("arbitration candidate does not match authorization")
-	}
-	if err := mp.VerifyTriplePoolStateWithFee(candidate, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, proof.PoolOutputSatoshis, terms.SellerAmountAfterSat, mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB)); err != nil {
 		return nil, err
 	}
-	valid, err := mp.VerifyTriplePoolServerSignature(candidate, adapter.Roles.Server, adapter.Roles.A, adapter.Roles.B, &sellerSig)
-	if err != nil {
-		return nil, fmt.Errorf("seller signature: %w", err)
+	if unsigned.PaymentSequence != uint32(terms.PaymentSequenceAfter) || unsigned.SellerAmountSat != terms.SellerAmountAfterSat {
+		return nil, invalid("arbitration candidate does not match authorization")
 	}
-	if !valid {
-		return nil, fmt.Errorf("seller signature is invalid")
+	if err := adapter.Engine.VerifySellerPayment(unsigned, sellerSig, proof); err != nil {
+		return nil, err
 	}
-	return &PaymentState{SpendTxID: hash32FromBytes(proof.SpendTxID), RawTx: append([]byte(nil), raw...), PaymentSequence: uint32(terms.PaymentSequenceAfter), SellerAmountSat: terms.SellerAmountAfterSat, ClientAmountSat: candidate.Outputs[1].Satoshis, PoolOutputSatoshis: proof.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), proof.PoolLockingScript...)}, nil
+	return unsigned, nil
 }
 
 func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context, raw []byte, proof *OpeningProof, _ Signer) ([]byte, error) {
-	if adapter == nil || adapter.BKey == nil {
-		return nil, fmt.Errorf("B key provider is required")
+	if adapter == nil || adapter.Engine == nil || adapter.ArbiterKey == nil {
+		return nil, invalid("arbiter private-key provider is required")
 	}
-	if err := adapter.VerifyOpening(proof); err != nil {
-		return nil, err
-	}
-	b, err := adapter.BKey.PrivateKey(ctx)
+	unsigned, err := unsignedFromRaw(raw, proof)
 	if err != nil {
 		return nil, err
 	}
-	if b == nil || !b.PubKey().IsEqual(adapter.Roles.B) {
-		return nil, fmt.Errorf("B private key does not match pool role")
-	}
-	candidate, err := tx.NewTransactionFromBytes(raw)
+	state, err := tx.NewTransactionFromBytes(unsigned.RawTx)
 	if err != nil {
 		return nil, err
 	}
-	if len(candidate.Inputs) != 1 || candidate.Inputs[0] == nil {
-		return nil, fmt.Errorf("arbitration candidate must have exactly one input")
-	}
-	if candidate.Inputs[0].SourceTXID == nil || !bytes.Equal(candidate.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || candidate.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
-		return nil, fmt.Errorf("arbitration candidate does not spend the opening pool outpoint")
-	}
-	if candidate.Inputs[0].SourceTxOutput() == nil {
-		candidate.Inputs[0].SetSourceTxOutput(&tx.TransactionOutput{Satoshis: proof.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), proof.PoolLockingScript...))})
-	}
-	sig, err := mp.SignTriplePoolAsB(candidate, b, adapter.Roles.Server, adapter.Roles.A)
+	setPoolSource(state, unsigned.PoolOutputSatoshis, unsigned.PoolLockingScript)
+	key, err := adapter.ArbiterKey.PrivateKey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), (*sig)...), nil
+	if key == nil || !key.PubKey().IsEqual(adapter.Engine.arbiter) {
+		return nil, invalid("arbiter private key does not match arbiter role")
+	}
+	if err := requireUnsigned(state); err != nil {
+		return nil, err
+	}
+	sig, err := mp.SignArbitratedPoolAsArbiter(state, unsigned.PoolOutputSatoshis, adapter.Engine.roles(), key)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), sig...), nil
+}
+
+func unsignedFromRaw(raw []byte, proof *OpeningProof) (*UnsignedPayment, error) {
+	if proof == nil || len(raw) == 0 {
+		return nil, invalid("unsigned state transaction and opening proof are required")
+	}
+	state, err := tx.NewTransactionFromBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(state.Inputs) != 1 || len(state.Outputs) != 3 {
+		return nil, invalid("pool state must have exactly three outputs")
+	}
+	setPoolSource(state, proof.PoolOutputSatoshis, proof.PoolLockingScript)
+	if state.Inputs[0].UnlockingScript != nil && len(state.Inputs[0].UnlockingScript.Bytes()) != 0 {
+		return nil, invalid("arbitration candidate must have an empty unlocking script")
+	}
+	return &UnsignedPayment{SpendTxID: hash32FromBytes(proof.SpendTxID), RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: proof.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), proof.PoolLockingScript...)}, nil
 }

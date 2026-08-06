@@ -1,0 +1,5 @@
+; 005 always carries an unsigned three-output state and a detached Buyer signature.
+cumulative-payment-update = [3, payment-authorization-hash, unsigned-state-tx, buyer-signature]
+payment-authorization-hash = bstr .size 32
+unsigned-state-tx = bstr
+buyer-signature = bstr

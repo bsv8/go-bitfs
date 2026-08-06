@@ -1,6 +1,6 @@
-// Package arbiter implements the V2 seller-arbitration signature workflow.
+// Package arbiter implements the v3 seller-arbitration signature workflow.
 // The arbiter validates the buyer's final authorization and the seller's
-// candidate transaction, then adds only the B signature. It never prices
+// candidate transaction, then adds only the Arbiter signature. It never prices
 // content, constructs a transaction, or receives a 005 buyer signature.
 package arbiter
 
@@ -16,7 +16,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-const MajorVersion uint64 = 2
+const MajorVersion uint64 = 3
 
 var (
 	arbiterEnc cbor.EncMode
@@ -42,7 +42,7 @@ func init() {
 	}
 }
 
-// ArbitrationRequest is the complete V2 wire request. All transaction bytes
+// ArbitrationRequest is the complete v3 wire request. All transaction bytes
 // are unsigned-template bytes; the seller signature is deliberately separate.
 type ArbitrationRequest struct {
 	Version                    uint64
@@ -52,8 +52,8 @@ type ArbitrationRequest struct {
 	SellerTransactionSignature []byte
 }
 
-// PaymentSignatureRequest is retained as a source-level name for callers; it
-// is exactly the V2 arbitration request, not a second message model.
+// PaymentSignatureRequest is retained as the public workflow name; it is
+// exactly the v3 arbitration request, not a second message model.
 type PaymentSignatureRequest = ArbitrationRequest
 
 type ArbitrationResponse struct {
@@ -67,10 +67,11 @@ type PaymentSignatureResponse = ArbitrationResponse
 
 // PoolVerifier is the only transaction capability required by the arbiter.
 // Implementations must validate the transaction using MultisigPool and must
-// not mutate the candidate or construct a replacement transaction.
+// not mutate the candidate or construct a replacement transaction. The
+// arbiter contributes the Arbiter role signature after Seller verification.
 type PoolVerifier interface {
 	VerifyOpening(*pool.OpeningProof) error
-	VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.PaymentState, error)
+	VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
 	SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
 }
 
@@ -78,7 +79,6 @@ type ServiceConfig struct {
 	Signer                pool.Signer
 	Pool                  PoolVerifier
 	AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
-	// Deprecated migration field. It is never used by the V2 service.
 }
 
 type Service struct {
@@ -89,7 +89,7 @@ type Service struct {
 
 func NewService(config ServiceConfig) (*Service, error) {
 	if config.Signer == nil || config.Pool == nil || config.AuthorizationVerifier == nil {
-		return nil, errors.New("arbiter service requires B signer, authorization verifier and MultisigPool verifier")
+		return nil, errors.New("arbiter service requires arbiter signer, authorization verifier and MultisigPool verifier")
 	}
 	return &Service{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
 }
@@ -215,14 +215,14 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 }
 
 func ValidateRequest(request *ArbitrationRequest) error {
-	if request == nil || (request.Version != 0 && request.Version != MajorVersion) || len(request.PoolOpeningProofCBOR) == 0 || len(request.PaymentAuthorizationCBOR) == 0 || len(request.UnsignedStateTxRaw) == 0 || len(request.SellerTransactionSignature) == 0 {
+	if request == nil || request.Version != MajorVersion || len(request.PoolOpeningProofCBOR) == 0 || len(request.PaymentAuthorizationCBOR) == 0 || len(request.UnsignedStateTxRaw) == 0 || len(request.SellerTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration request is incomplete", pool.ErrInvalidEvidence)
 	}
 	return nil
 }
 
 func ValidateResponse(response *ArbitrationResponse) error {
-	if response == nil || (response.Version != 0 && response.Version != MajorVersion) || len(response.PaymentAuthorizationHash) != sha256.Size || len(response.UnsignedStateTxHash) != sha256.Size || len(response.ArbiterTransactionSignature) == 0 {
+	if response == nil || response.Version != MajorVersion || len(response.PaymentAuthorizationHash) != sha256.Size || len(response.UnsignedStateTxHash) != sha256.Size || len(response.ArbiterTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration response is incomplete", pool.ErrInvalidEvidence)
 	}
 	return nil
@@ -235,8 +235,8 @@ func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.Openi
 	if len(proof.BuyerPubKey) != 0 && !bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) {
 		return fmt.Errorf("%w: buyer role mismatch", pool.ErrInvalidEvidence)
 	}
-	if len(proof.ServerPubKey) != 0 && !bytes.Equal(terms.SellerPubkey, proof.ServerPubKey) {
-		return fmt.Errorf("%w: server role mismatch", pool.ErrInvalidEvidence)
+	if len(proof.SellerPubKey) != 0 && !bytes.Equal(terms.SellerPubkey, proof.SellerPubKey) {
+		return fmt.Errorf("%w: seller role mismatch", pool.ErrInvalidEvidence)
 	}
 	if len(proof.ArbiterPubKey) != 0 && !bytes.Equal(terms.SelectedArbiterPubkey, proof.ArbiterPubKey) {
 		return fmt.Errorf("%w: arbiter role mismatch", pool.ErrInvalidEvidence)

@@ -6,34 +6,35 @@ import (
 	"time"
 )
 
-// ProtocolFamily is a package boundary identifier. MajorVersion is scoped to
-// this family is independent from any historical settlement package.
-const ProtocolFamily = "bitfs.pool.v2"
+// ProtocolFamily is the go-bitfs pool workflow protocol.  It is deliberately
+// separate from the MultisigPool library protocol embedded in OpeningProof.
+const ProtocolFamily = "bitfs.pool.workflow.v3"
 
-const MajorVersion uint64 = 2
+const MajorVersion uint64 = 3
 
-// Hash32 is a fixed-size transaction or evidence reference.
+const MultisigProtocol = "bitfs.pool.v4"
+
+const MultisigVersion uint64 = 4
+
 type Hash32 [sha256.Size]byte
 
-// Reference is the stable pool reference used by 003. It never contains a
-// per-payment transaction ID.
 type Reference struct {
 	SpendTxID           Hash32
 	BasePaymentSequence uint32
 }
 
-// OpeningProof is the portable evidence retained for a generic 2-of-3 pool.
-// FundingTx is empty while the seller's refund pre-signature is pending.
 type OpeningProof struct {
 	Version               uint64
+	MultisigProtocol      string
+	MultisigVersion       uint64
 	RefundTx              []byte
 	SpendTxID             []byte
 	FundingTxID           []byte
 	PoolOutputIndex       uint32
 	PoolOutputSatoshis    uint64
 	PoolLockingScript     []byte
-	ServerPubKey          []byte
 	BuyerPubKey           []byte
+	SellerPubKey          []byte
 	ArbiterPubKey         []byte
 	MinerFeeRateSatPerKB  uint64
 	BuyerRefundSignature  []byte
@@ -43,13 +44,15 @@ type OpeningProof struct {
 
 type RefundPresignRequest struct {
 	Version              uint64
+	MultisigProtocol     string
+	MultisigVersion      uint64
 	RefundTx             []byte
 	FundingTxID          []byte
 	PoolOutputIndex      uint32
 	PoolOutputSatoshis   uint64
 	PoolLockingScript    []byte
-	ServerPubKey         []byte
 	BuyerPubKey          []byte
+	SellerPubKey         []byte
 	ArbiterPubKey        []byte
 	MinerFeeRateSatPerKB uint64
 	BuyerRefundSignature []byte
@@ -65,73 +68,49 @@ type FundingTxDelivery struct {
 	FundingTx []byte
 }
 
-// OpeningInput contains only generic pool construction data. It has no quote,
-// content or price fields, keeping 002 independent from BitFS business data.
-type OpeningInput struct {
-	FundingTx            []byte
-	PoolOutputIndex      uint32
-	ExpiryLockTime       uint32
-	MinerFeeRateSatPerKB uint64
-	SellerPubKey         []byte
-	ArbiterPubKey        []byte
-}
-
-// PendingRequest is seller-side delivery protection plus the price commitment
-// calculated from the already verified request and delivery. The pool layer
-// stores only the satoshi delta; it does not know BitFS quote semantics.
-type PendingRequest struct {
-	SpendTxID               Hash32
-	BasePaymentSequence     uint32
-	ContentRequestHash      Hash32
-	ExpectedSellerAmountSat uint64
-}
-
-// PendingAcquireResult makes the atomic latch outcome explicit. A retry of
-// the same request is not a fresh acquisition and must never re-enter the
-// delivery side effect.
-type PendingAcquireResult uint8
-
-const (
-	PendingAcquired    PendingAcquireResult = 1
-	PendingAlreadyHeld PendingAcquireResult = 2
-	PendingConflict    PendingAcquireResult = 3
-)
-
-// PaymentUpdate is the 005 transport container. ContentRequestTermsHash is
-// the hash of the final 003 payment authorization (the historical field name
-// is retained); amounts and sequence are derived from PartialSpendTx by
-// role-scoped pool port, never from this wrapper.
+// PaymentUpdate is the v3 005 transport container.  It carries an unsigned
+// state transaction and a detached Buyer signature; it never carries a
+// partially unlocked transaction.
 type PaymentUpdate struct {
-	Version                 uint64
-	ContentRequestTermsHash []byte
-	PartialSpendTx          []byte
+	Version                   uint64
+	PaymentAuthorizationHash  []byte
+	UnsignedStateTxRaw        []byte
+	BuyerTransactionSignature []byte
 }
 
-// PaymentState is the last transaction state accepted by the pool node.
+// PaymentState only represents a fully merged transaction accepted by a
+// node. Detached signatures are kept explicitly when a workflow needs to
+// carry them across an API boundary, but RawTx is never a single-signature
+// or unsigned transaction.
 type PaymentState struct {
-	SpendTxID               Hash32
-	RawTx                   []byte
-	PaymentSequence         uint32
-	SellerAmountSat         uint64
-	ClientAmountSat         uint64
-	ContentRequestTermsHash Hash32
-	// SourceOutput fields are derived from the opening proof and are never
-	// serialized in 005. They are retained in-process so a signer can recreate
-	// the BSV sighash after the raw transaction crosses a process boundary.
-	PoolOutputSatoshis uint64
-	PoolLockingScript  []byte
+	SpendTxID                   Hash32
+	RawTx                       []byte
+	PaymentSequence             uint32
+	BuyerAmountSat              uint64
+	SellerAmountSat             uint64
+	ArbiterAmountSat            uint64
+	PaymentAuthorizationHash    Hash32
+	BuyerTransactionSignature   []byte
+	SellerTransactionSignature  []byte
+	ArbiterTransactionSignature []byte
+	PoolOutputSatoshis          uint64
+	PoolLockingScript           []byte
 }
 
-// SignedPayment is a fully assembled transaction ready for final or
-// non-final submission.
 type SignedPayment struct {
 	State PaymentState
 	RawTx []byte
 }
 
+// UnsignedPayment is the only transaction object accepted by single-sign
+// methods. It contains no unlocking script and no embedded signature.
 type UnsignedPayment struct {
 	SpendTxID          Hash32
 	RawTx              []byte
+	PaymentSequence    uint32
+	BuyerAmountSat     uint64
+	SellerAmountSat    uint64
+	ArbiterAmountSat   uint64
 	PoolOutputSatoshis uint64
 	PoolLockingScript  []byte
 }
@@ -155,8 +134,6 @@ type UpdateAcceptance struct {
 	PaymentSequence uint32
 }
 
-// OpeningProofStore persists raw proof material and makes identical retries
-// idempotent.
 type OpeningProofStore interface {
 	SaveOpeningProof(context.Context, *OpeningProof) error
 	LoadOpeningProof(context.Context, Hash32) (*OpeningProof, error)
@@ -211,8 +188,21 @@ type PoolStore interface {
 	ReconcileExternalState(context.Context, Hash32, *PaymentState) error
 }
 
-// PendingRequestStore must implement TryAcquire atomically with respect to
-// the same SpendTxID. Release must be conditional on request hash.
+type PendingRequest struct {
+	SpendTxID               Hash32
+	BasePaymentSequence     uint32
+	ContentRequestHash      Hash32
+	ExpectedSellerAmountSat uint64
+}
+
+type PendingAcquireResult uint8
+
+const (
+	PendingAcquired    PendingAcquireResult = 1
+	PendingAlreadyHeld PendingAcquireResult = 2
+	PendingConflict    PendingAcquireResult = 3
+)
+
 type PendingRequestStore interface {
 	TryAcquire(context.Context, PendingRequest) (PendingAcquireResult, error)
 	Load(context.Context, Hash32) (*PendingRequest, error)
@@ -228,21 +218,19 @@ type SignatureVerifier interface {
 	Verify(pubkey, payload, signature []byte) error
 }
 
-// PoolNodeVerifierPort is the read-only transaction capability needed by the
-// verified node adapter.
 type PoolNodeVerifierPort interface {
 	FundingTxID([]byte) (Hash32, error)
 	TransactionID([]byte) (Hash32, error)
 	BuildRefundSubmission(*OpeningProof) ([]byte, error)
 	VerifyRefundExpired(*OpeningProof, time.Time) error
 	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
 	ParseFinalPaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
 	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
 	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
 	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
 }
 
-// BuyerPoolPort is the role-scoped transaction capability used by buyer.Client.
 type BuyerPoolPort interface {
 	TransactionID([]byte) (Hash32, error)
 	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
@@ -250,42 +238,51 @@ type BuyerPoolPort interface {
 	VerifyRefundExpired(*OpeningProof, time.Time) error
 	VerifyOpening(*OpeningProof) error
 	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
 	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
+	VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
 	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
 	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
 	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-	SignBuyerPayment(context.Context, *UnsignedPayment, Signer) (*PaymentState, error)
-	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, error)
+	SignBuyerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
+	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, []byte, error)
 }
 
-// SellerPoolPort is the role-scoped transaction capability used by seller.Service.
 type SellerPoolPort interface {
 	TransactionID([]byte) (Hash32, error)
 	FundingTxID([]byte) (Hash32, error)
 	BuildRefundSubmission(*OpeningProof) ([]byte, error)
 	VerifyOpening(*OpeningProof) error
 	ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
+	ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
 	VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
 	VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
-	VerifyBuyerPayment(*PaymentState, *OpeningProof) error
-	VerifySellerPayment(*PaymentState, *OpeningProof) error
-	VerifySellerPaymentSignature(*PaymentState, []byte, *OpeningProof) error
+	VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
+	VerifySellerPayment(*UnsignedPayment, []byte, *OpeningProof) error
 	CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
 	BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
 	SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-	AttachSellerArbitrationSignature(context.Context, *PaymentState, []byte) (*PaymentState, error)
-	AddSellerSignature(context.Context, *PaymentState, Signer) (*SignedPayment, error)
-	AddArbitrationSignature(context.Context, *PaymentState, []byte) (*SignedPayment, error)
+	SignSellerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
+	MergeBuyerSellerPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
+	MergeSellerArbiterPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
+	SignImmediateClose(context.Context, *UnsignedPayment, []byte, Signer) (*SignedPayment, error)
 }
 
-// NonFinalPoolNode must return only after the node accepted the update as the
-// current higher-sequence spend of the pool output.
-type NonFinalPoolNode interface {
-	SubmitUpdate(context.Context, []byte) (*UpdateAcceptance, error)
-	SubmitFinal(context.Context, []byte) (Hash32, error)
+// OpeningInput contains generic pool construction data only.
+type OpeningInput struct {
+	FundingTx            []byte
+	PoolOutputIndex      uint32
+	ExpiryLockTime       uint32
+	MinerFeeRateSatPerKB uint64
+	SellerPubKey         []byte
+	ArbiterPubKey        []byte
 }
 
 type ParticipantVerifier interface {
-	VerifyPoolParticipants(proof *OpeningProof, buyerPubkey, sellerPubkey, arbiterPubkey []byte) error
+	VerifyPoolParticipants(*OpeningProof, []byte, []byte, []byte) error
+}
+
+type NonFinalPoolNode interface {
+	SubmitUpdate(context.Context, []byte) (*UpdateAcceptance, error)
+	SubmitFinal(context.Context, []byte) (Hash32, error)
 }

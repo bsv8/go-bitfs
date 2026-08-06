@@ -12,7 +12,7 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
-const ProtocolFamily = "bitfs.protocol.v2"
+const ProtocolFamily = "bitfs.protocol.v3"
 
 type Kind uint16
 

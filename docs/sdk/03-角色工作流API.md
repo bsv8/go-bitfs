@@ -73,12 +73,12 @@ func (c *buyer.Client) AcceptDelivery(
 // 若节点已保存更高付款状态，节点会拒绝该旧退款；这不是 SDK 可绕过的失败。
 func (c *buyer.Client) RefundAfterExpiry(ctx context.Context, spendTxID Hash32) (Hash32, error)
 
-// BuildImmediateClose 构造并由买方签名协商关闭交易。
+// BuildImmediateClose 构造空解锁协商关闭交易并返回 Buyer detached signature。
 // 交易的 nSequence 与 nLockTime 都为 0xffffffff；它不适用于单方到期退款。
 func (c *buyer.Client) BuildImmediateClose(
     ctx context.Context,
     input pool.CloseInput,
-) (*pool.PaymentState, error)
+) (*pool.UnsignedPayment, []byte, error)
 
 // SubmitImmediateClose 提交卖方已补足签名的最终交易。
 // 它只调用 SubmitFinal，不会写入或覆盖非最终交易池状态。
@@ -104,7 +104,7 @@ type Config struct {
     Pools        PoolStore          // 开池证明与已接受付款状态。
     Pending      PendingRequestStore // 单请求门闩，必须支持原子 TryAcquire。
     Content      ContentSource      // 按内容哈希读取原始内容。
-    Transactions MultisigPoolPort   // 交易验签和 server 签名。
+    Transactions MultisigPoolPort   // 交易验签和 Seller detached signature。
     Node         NonFinalPoolNode   // 提交并确认远期更新。
 }
 
@@ -148,14 +148,16 @@ func (s *seller.Service) AcceptPayment(
     payment *pool.PaymentUpdate,
 ) (*pool.PaymentState, error)
 
-// SignImmediateClose 验证买方签出的立即关闭交易与开池证明、最后累计金额一致，
-// 补足卖方签名并返回可立即提交的交易。它不自行广播，便于买方保留最终提交控制权。
+// SignImmediateClose 验证空解锁关闭交易和 Buyer detached signature，
+// 补足 Seller detached signature 并返回可立即提交的完整交易。它不自行广播。
 func (s *seller.Service) SignImmediateClose(
     ctx context.Context,
-    close *pool.PaymentState,
+    close *pool.UnsignedPayment,
+    buyerSignature []byte,
+    signer pool.Signer,
 ) (*pool.SignedPayment, error)
 
-// BuildArbitrationRequestFromAuthorization 依据最终 003 授权和当前状态构造空解锁候选，并签 server。
+// BuildArbitrationRequestFromAuthorization 依据最终 003 授权和当前状态构造空解锁候选，并签 Seller。
 func (s *seller.Service) BuildArbitrationRequest(
     ctx context.Context,
     proof *pool.OpeningProof,
@@ -179,7 +181,7 @@ func (s *seller.Service) SubmitArbitratedPayment(
 // package arbiter
 type Config struct {
     Signer       Signer             // 仲裁者 2-of-3 交易签名能力。
-    Pool         arbiter.PoolVerifier // 只调用 MultisigPool 验证和 B 签名。
+    Pool         arbiter.PoolVerifier // 只调用 MultisigPool 验证和 Arbiter 签名。
 }
 
 func New(config Config) (*Service, error)

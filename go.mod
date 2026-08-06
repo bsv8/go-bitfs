@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/bsv-blockchain/go-sdk v1.2.18
-	github.com/bsv8/MultisigPool v0.1.0
+	github.com/bsv8/MultisigPool/v4 v4.0.0
 	github.com/fxamacker/cbor/v2 v2.9.2
 )
 

@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -203,7 +204,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if _, err := client.AcceptQuote(ctx, quote); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := pool.Build2of3LockingScript([][]byte{sellerKey.PubKey().Compressed(), buyerKey.PubKey().Compressed(), arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript([][]byte{buyerKey.PubKey().Compressed(), sellerKey.PubKey().Compressed(), arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +230,9 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if _, err := service.AcceptPoolFunding(ctx, &pool.FundingTxDelivery{Version: pool.MajorVersion, FundingTx: funding.Bytes()}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := client.RefundAfterExpiry(ctx, reference.SpendTxID); err != nil {
+		t.Fatalf("initial sequence-2 refund: %v", err)
+	}
 	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
 	if err != nil {
 		t.Fatal(err)
@@ -249,8 +253,11 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accepted.PaymentSequence != 2 || accepted.SellerAmountSat == 0 || node.updates != 1 {
+	if accepted.PaymentSequence != 3 || accepted.SellerAmountSat == 0 || node.updates != 1 {
 		t.Fatalf("normal payment = %+v, updates=%d", accepted, node.updates)
+	}
+	if _, err := client.RefundAfterExpiry(ctx, reference.SpendTxID); !errors.Is(err, pool.ErrNonFinalRejected) {
+		t.Fatalf("refund after sequence-3 payment error = %v, want ErrNonFinalRejected", err)
 	}
 	if _, err := service.AcceptPayment(ctx, update); err != nil {
 		t.Fatalf("idempotent payment retry failed: %v", err)
@@ -274,7 +281,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if _, err := service.DeliverRequestedContent(ctx, request2); err != nil {
 		t.Fatal(err)
 	}
-	arbiterService, err := arbiter.NewService(arbiter.ServiceConfig{Signer: integrationSigner{arbiterKey}, Pool: &pool.MultisigPoolAdapter{Roles: pool.PoolRoles{Server: sellerKey.PubKey(), A: buyerKey.PubKey(), B: arbiterKey.PubKey()}, BKey: integrationKeyProvider{arbiterKey}}, AuthorizationVerifier: verifyIntegrationSignature})
+	arbiterService, err := arbiter.NewService(arbiter.ServiceConfig{Signer: integrationSigner{arbiterKey}, Pool: &pool.MultisigPoolAdapter{Engine: engine, ArbiterKey: integrationKeyProvider{arbiterKey}}, AuthorizationVerifier: verifyIntegrationSignature})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,11 +300,11 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if arbitrated.PaymentSequence != latest.PaymentSequence+1 || node.updates != 2 {
 		t.Fatalf("arbitrated payment = %+v, updates=%d", arbitrated, node.updates)
 	}
-	closeState, err := client.BuildImmediateClose(ctx, pool.CloseInput{Opening: opening, Latest: arbitrated, SellerAmountAfterSat: arbitrated.SellerAmountSat})
+	closeUnsigned, closeBuyerSig, err := client.BuildImmediateClose(ctx, pool.CloseInput{Opening: opening, Latest: arbitrated, SellerAmountAfterSat: arbitrated.SellerAmountSat})
 	if err != nil {
 		t.Fatalf("build immediate close: %v", err)
 	}
-	closed, err := service.SignImmediateClose(ctx, closeState)
+	closed, err := service.SignImmediateClose(ctx, closeUnsigned, closeBuyerSig, sellerSigner)
 	if err != nil {
 		t.Fatalf("seller sign immediate close: %v", err)
 	}

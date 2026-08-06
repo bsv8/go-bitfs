@@ -44,9 +44,10 @@ func TestNewWirePreservesTypedCBOR(t *testing.T) {
 
 func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 	update := &pool.PaymentUpdate{
-		Version:                 pool.MajorVersion,
-		ContentRequestTermsHash: bytes.Repeat([]byte{1}, 32),
-		PartialSpendTx:          []byte{2, 3},
+		Version:                   pool.MajorVersion,
+		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, 32),
+		UnsignedStateTxRaw:        []byte{2, 3},
+		BuyerTransactionSignature: []byte{4},
 	}
 	raw, err := MarshalPaymentUpdate(update)
 	if err != nil {
@@ -56,7 +57,7 @@ func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.PartialSpendTx, update.PartialSpendTx) {
+	if !bytes.Equal(decoded.UnsignedStateTxRaw, update.UnsignedStateTxRaw) {
 		t.Fatal("payment update changed during wire round trip")
 	}
 }

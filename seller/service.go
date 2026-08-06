@@ -225,7 +225,7 @@ func (service *Service) DeliverRequestedContent(ctx context.Context, request *bi
 	}); err != nil {
 		return nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}
-	requestHash, err := bitfs.ContentRequestTermsHash(request.TermsCBOR)
+	requestHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if err := pool.ValidatePaymentUpdate(update); err != nil {
 		return nil, err
 	}
-	fundingTxID, err := service.transactions.FundingTxID(append([]byte(nil), update.PartialSpendTx...))
+	fundingTxID, err := service.transactions.FundingTxID(append([]byte(nil), update.UnsignedStateTxRaw...))
 	if err != nil {
 		return nil, fmt.Errorf("read payment funding outpoint: %w", err)
 	}
@@ -287,24 +287,24 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if err := service.pools.EnsurePoolHealthy(ctx, spendTxID); err != nil {
 		return nil, err
 	}
-	state, err := service.transactions.ParsePaymentState(ctx, append([]byte(nil), update.PartialSpendTx...), opening)
+	unsigned, err := service.transactions.ParseUnsignedPayment(ctx, append([]byte(nil), update.UnsignedStateTxRaw...), opening)
 	if err != nil {
-		return nil, fmt.Errorf("parse payment state: %w", err)
+		return nil, fmt.Errorf("parse unsigned payment state: %w", err)
 	}
-	if state == nil {
-		return nil, fmt.Errorf("%w: empty payment state", pool.ErrInvalidEvidence)
+	if unsigned == nil {
+		return nil, fmt.Errorf("%w: empty unsigned payment state", pool.ErrInvalidEvidence)
 	}
-	if state.SpendTxID != spendTxID {
+	if unsigned.SpendTxID != spendTxID {
 		return nil, fmt.Errorf("%w: payment state spend transaction mismatch", pool.ErrInvalidEvidence)
 	}
-	if err := service.transactions.VerifyBuyerPayment(state, opening); err != nil {
+	if err := service.transactions.VerifyBuyerPayment(unsigned, update.BuyerTransactionSignature, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer payment: %w", err)
 	}
-	pending, err := service.pending.Load(ctx, state.SpendTxID)
+	pending, err := service.pending.Load(ctx, unsigned.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load pending request: %w", err)
 	}
-	previous, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
+	previous, err := service.pools.LoadAcceptedPayment(ctx, unsigned.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load accepted payment: %w", err)
 	}
@@ -315,12 +315,12 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if err := service.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify previous accepted payment: %w", err)
 	}
-	if state.SellerAmountSat < previous.SellerAmountSat {
+	if unsigned.SellerAmountSat < previous.SellerAmountSat {
 		return nil, fmt.Errorf("%w: seller amount cannot decrease", pool.ErrInvalidEvidence)
 	}
-	requestHash := poolHash32Seller(update.ContentRequestTermsHash)
+	requestHash := poolHash32Seller(update.PaymentAuthorizationHash)
 	if pending == nil {
-		if previous != nil && previous.PaymentSequence == state.PaymentSequence && previous.SellerAmountSat == state.SellerAmountSat && previous.ClientAmountSat == state.ClientAmountSat && previous.ContentRequestTermsHash == requestHash {
+		if previous != nil && previous.PaymentSequence == unsigned.PaymentSequence && previous.SellerAmountSat == unsigned.SellerAmountSat && previous.BuyerAmountSat == unsigned.BuyerAmountSat && previous.PaymentAuthorizationHash == requestHash {
 			return clonePaymentStateSeller(previous), nil
 		}
 		return nil, pool.ErrStalePaymentSequence
@@ -328,21 +328,25 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if pending.ContentRequestHash != requestHash {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	if ^uint64(0)-previous.SellerAmountSat < pending.ExpectedSellerAmountSat || state.SellerAmountSat != previous.SellerAmountSat+pending.ExpectedSellerAmountSat {
+	if ^uint64(0)-previous.SellerAmountSat < pending.ExpectedSellerAmountSat || unsigned.SellerAmountSat != previous.SellerAmountSat+pending.ExpectedSellerAmountSat {
 		return nil, fmt.Errorf("%w: payment seller amount does not match the verified content price", pool.ErrInvalidEvidence)
 	}
-	if previous != nil && previous.PaymentSequence == state.PaymentSequence && previous.SellerAmountSat == state.SellerAmountSat && previous.ClientAmountSat == state.ClientAmountSat && previous.ContentRequestTermsHash == requestHash {
-		if err := service.pending.Release(ctx, state.SpendTxID, pending.ContentRequestHash); err != nil {
+	if previous != nil && previous.PaymentSequence == unsigned.PaymentSequence && previous.SellerAmountSat == unsigned.SellerAmountSat && previous.BuyerAmountSat == unsigned.BuyerAmountSat && previous.PaymentAuthorizationHash == requestHash {
+		if err := service.pending.Release(ctx, unsigned.SpendTxID, pending.ContentRequestHash); err != nil {
 			return nil, fmt.Errorf("release pending request: %w", err)
 		}
 		return clonePaymentStateSeller(previous), nil
 	}
-	if state.PaymentSequence <= previous.PaymentSequence || state.PaymentSequence <= pending.BasePaymentSequence {
+	if unsigned.PaymentSequence <= previous.PaymentSequence || unsigned.PaymentSequence <= pending.BasePaymentSequence {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	signed, err := service.transactions.AddSellerSignature(ctx, state, service.signer)
+	sellerSig, err := service.transactions.SignSellerPayment(ctx, unsigned, service.signer)
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
+	}
+	signed, err := service.transactions.MergeBuyerSellerPayment(unsigned, update.BuyerTransactionSignature, sellerSig)
+	if err != nil {
+		return nil, fmt.Errorf("merge buyer and seller payment signatures: %w", err)
 	}
 	if signed == nil || len(signed.RawTx) == 0 {
 		return nil, fmt.Errorf("%w: seller returned empty signed payment", pool.ErrInvalidEvidence)
@@ -355,12 +359,12 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 	if err != nil {
 		return nil, fmt.Errorf("calculate accepted transaction ID: %w", err)
 	}
-	if acceptance == nil || acceptance.SpendTxID != state.SpendTxID || acceptance.PaymentSequence != signed.State.PaymentSequence || acceptance.TxID != txID {
+	if acceptance == nil || acceptance.SpendTxID != unsigned.SpendTxID || acceptance.PaymentSequence != signed.State.PaymentSequence || acceptance.TxID != txID {
 		return nil, fmt.Errorf("%w: node returned inconsistent payment acceptance", pool.ErrInvalidEvidence)
 	}
 	accepted := signed.State
 	accepted.RawTx = append([]byte(nil), signed.RawTx...)
-	accepted.ContentRequestTermsHash = requestHash
+	accepted.PaymentAuthorizationHash = requestHash
 	if err := service.pools.SaveAcceptedPayment(ctx, &accepted); err != nil {
 		markErr := service.pools.MarkExternalStateUncertain(ctx, accepted.SpendTxID, txID)
 		uncertain := fmt.Errorf("%w: local persistence failed after non-final node acceptance", pool.ErrPoolStateUncertain)
@@ -369,7 +373,7 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 		}
 		return nil, errors.Join(uncertain, err)
 	}
-	if err := service.pending.Release(ctx, state.SpendTxID, pending.ContentRequestHash); err != nil {
+	if err := service.pending.Release(ctx, unsigned.SpendTxID, pending.ContentRequestHash); err != nil {
 		return nil, fmt.Errorf("release pending request: %w", err)
 	}
 	return clonePaymentStateSeller(&accepted), nil
@@ -377,15 +381,14 @@ func (service *Service) AcceptPayment(ctx context.Context, update *pool.PaymentU
 
 // SignImmediateClose complements the buyer's final close signature. It does
 // not submit or alter pool state; the buyer decides when to call SubmitFinal.
-func (service *Service) SignImmediateClose(ctx context.Context, state *pool.PaymentState) (*pool.SignedPayment, error) {
+func (service *Service) SignImmediateClose(ctx context.Context, unsigned *pool.UnsignedPayment, buyerSig []byte, _ pool.Signer) (*pool.SignedPayment, error) {
 	if service == nil {
 		return nil, errors.New("seller service is required")
 	}
-	state = pool.ClonePaymentState(state)
-	if state == nil || state.PaymentSequence != ^uint32(0) {
+	if unsigned == nil || unsigned.PaymentSequence != ^uint32(0) {
 		return nil, fmt.Errorf("%w: immediate close must use the final sequence", pool.ErrInvalidEvidence)
 	}
-	opening, err := service.pools.LoadOpeningProof(ctx, state.SpendTxID)
+	opening, err := service.pools.LoadOpeningProof(ctx, unsigned.SpendTxID)
 	if err != nil {
 		return nil, err
 	}
@@ -393,17 +396,10 @@ func (service *Service) SignImmediateClose(ctx context.Context, state *pool.Paym
 	if err := service.transactions.VerifyOpening(opening); err != nil {
 		return nil, err
 	}
-	fundingTxID, err := service.transactions.FundingTxID(state.RawTx)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(fundingTxID[:], opening.FundingTxID) {
-		return nil, fmt.Errorf("%w: close does not spend opening funding output", pool.ErrInvalidEvidence)
-	}
-	if err := service.transactions.VerifyBuyerPayment(state, opening); err != nil {
+	if err := service.transactions.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer close signature: %w", err)
 	}
-	latest, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
+	latest, err := service.pools.LoadAcceptedPayment(ctx, unsigned.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load latest accepted payment: %w", err)
 	}
@@ -416,13 +412,14 @@ func (service *Service) SignImmediateClose(ctx context.Context, state *pool.Paym
 			return nil, fmt.Errorf("verify latest accepted payment: %w", err)
 		}
 	}
-	if state.SellerAmountSat < latest.SellerAmountSat {
+	if unsigned.SellerAmountSat < latest.SellerAmountSat {
 		return nil, fmt.Errorf("%w: immediate close cannot reduce seller amount", pool.ErrInvalidEvidence)
 	}
-	stateCopy := *state
-	stateCopy.PoolOutputSatoshis = opening.PoolOutputSatoshis
-	stateCopy.PoolLockingScript = append([]byte(nil), opening.PoolLockingScript...)
-	signed, err := service.transactions.AddSellerSignature(ctx, &stateCopy, service.signer)
+	sellerSig, err := service.transactions.SignSellerPayment(ctx, unsigned, service.signer)
+	if err != nil {
+		return nil, err
+	}
+	signed, err := service.transactions.MergeBuyerSellerPayment(unsigned, buyerSig, sellerSig)
 	if err != nil {
 		return nil, err
 	}
@@ -540,31 +537,24 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	if err := validateSellerAuthorizationPool(terms, proof); err != nil {
 		return nil, err
 	}
-	state, err := service.transactions.ParsePaymentState(ctx, request.UnsignedStateTxRaw, proof)
+	unsigned, err := service.transactions.ParseUnsignedPayment(ctx, request.UnsignedStateTxRaw, proof)
 	if err != nil {
 		return nil, err
 	}
-	if state.PaymentSequence != uint32(terms.PaymentSequenceAfter) || state.SellerAmountSat != terms.SellerAmountAfterSat {
+	if unsigned.PaymentSequence != uint32(terms.PaymentSequenceAfter) || unsigned.SellerAmountSat != terms.SellerAmountAfterSat {
 		return nil, fmt.Errorf("%w: arbitration candidate does not match payment authorization", pool.ErrInvalidEvidence)
 	}
-	state, err = service.transactions.AttachSellerArbitrationSignature(ctx, state, request.SellerTransactionSignature)
-	if err != nil {
+	if err := service.transactions.VerifySellerPayment(unsigned, request.SellerTransactionSignature, proof); err != nil {
 		return nil, err
 	}
-	if err := service.transactions.VerifySellerPayment(state, proof); err != nil {
-		return nil, err
-	}
-	if err := service.transactions.VerifySellerPaymentSignature(state, request.SellerTransactionSignature, proof); err != nil {
-		return nil, err
-	}
-	latest, err := service.pools.LoadAcceptedPayment(ctx, state.SpendTxID)
+	latest, err := service.pools.LoadAcceptedPayment(ctx, unsigned.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load latest accepted payment: %w", err)
 	}
-	if latest == nil || latest.PaymentSequence >= state.PaymentSequence {
+	if latest == nil || latest.PaymentSequence >= unsigned.PaymentSequence {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	signed, err := service.transactions.AddArbitrationSignature(ctx, state, response.ArbiterTransactionSignature)
+	signed, err := service.transactions.MergeSellerArbiterPayment(unsigned, request.SellerTransactionSignature, response.ArbiterTransactionSignature)
 	if err != nil {
 		return nil, err
 	}
@@ -579,14 +569,14 @@ func (service *Service) SubmitArbitratedPayment(ctx context.Context, request *ar
 	if err != nil {
 		return nil, err
 	}
-	if accepted == nil || accepted.TxID != txID || accepted.SpendTxID != state.SpendTxID || accepted.PaymentSequence != state.PaymentSequence {
+	if accepted == nil || accepted.TxID != txID || accepted.SpendTxID != unsigned.SpendTxID || accepted.PaymentSequence != unsigned.PaymentSequence {
 		return nil, fmt.Errorf("%w: inconsistent arbitration acceptance", pool.ErrInvalidEvidence)
 	}
-	requestHash, err := bitfs.ContentRequestTermsHash(authorization.TermsCBOR)
+	requestHash, err := bitfs.PaymentAuthorizationHash(authorization.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
-	signed.State.ContentRequestTermsHash = poolHash32Seller(requestHash[:])
+	signed.State.PaymentAuthorizationHash = poolHash32Seller(requestHash[:])
 	if err := service.pools.SaveAcceptedPayment(ctx, &signed.State); err != nil {
 		markErr := service.pools.MarkExternalStateUncertain(ctx, signed.State.SpendTxID, txID)
 		uncertain := fmt.Errorf("%w: local persistence failed after arbitration node acceptance", pool.ErrPoolStateUncertain)
@@ -604,7 +594,7 @@ func validateSellerAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *po
 	}
 	if !bytes.Equal(terms.SpendTxID, proof.SpendTxID) ||
 		!bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) ||
-		!bytes.Equal(terms.SellerPubkey, proof.ServerPubKey) ||
+		!bytes.Equal(terms.SellerPubkey, proof.SellerPubKey) ||
 		!bytes.Equal(terms.SelectedArbiterPubkey, proof.ArbiterPubKey) {
 		return fmt.Errorf("%w: authorization pool roles do not match opening proof", pool.ErrInvalidEvidence)
 	}

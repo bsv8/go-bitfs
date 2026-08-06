@@ -96,7 +96,7 @@ func (client *Client) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQu
 }
 
 // AcceptRefundPresign verifies and durably records the complete pool proof,
-// then records RefundTx as the initial accepted payment state (sequence 1,
+// then records RefundTx as the initial accepted payment state (sequence 2,
 // seller amount 0).  The caller may reveal fundingTx only after this method
 // succeeds, matching the 002 message ordering.
 func (client *Client) AcceptRefundPresign(ctx context.Context, request *pool.RefundPresignRequest, response *pool.RefundPresignResponse, fundingTx []byte) (*pool.Reference, error) {
@@ -121,7 +121,7 @@ func (client *Client) AcceptRefundPresign(ctx context.Context, request *pool.Ref
 	if err != nil {
 		return nil, fmt.Errorf("parse initial pool state: %w", err)
 	}
-	if initial.PaymentSequence != 1 || initial.SellerAmountSat != 0 {
+	if initial.PaymentSequence != 2 || initial.SellerAmountSat != 0 || initial.ArbiterAmountSat != 0 {
 		return nil, fmt.Errorf("%w: refund transaction is not the initial pool state", pool.ErrInvalidEvidence)
 	}
 	if err := client.pools.SaveAcceptedPayment(ctx, initial); err != nil {
@@ -178,7 +178,7 @@ func (client *Client) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash
 		if err := client.transactions.VerifyAcceptedPayment(latest, opening); err != nil {
 			return pool.Hash32{}, fmt.Errorf("verify stored pool state: %w", err)
 		}
-		if latest.PaymentSequence > 1 {
+		if latest.PaymentSequence > 2 {
 			return pool.Hash32{}, fmt.Errorf("%w: a higher cumulative payment state already exists", pool.ErrNonFinalRejected)
 		}
 	}
@@ -207,26 +207,26 @@ func (client *Client) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash
 	return submittedTxID, nil
 }
 
-func (client *Client) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.PaymentState, error) {
+func (client *Client) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.UnsignedPayment, []byte, error) {
 	if client == nil {
-		return nil, errors.New("buyer client is required")
+		return nil, nil, errors.New("buyer client is required")
 	}
 	localInput := pool.CloneCloseInput(input)
-	unsigned, err := client.transactions.BuildImmediateClose(ctx, localInput)
+	unsigned, _, err := client.transactions.BuildImmediateClose(ctx, localInput)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	state, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
+	buyerSig, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if state == nil || state.PaymentSequence != ^uint32(0) {
-		return nil, fmt.Errorf("%w: immediate close is not final", pool.ErrInvalidEvidence)
+	if unsigned == nil || unsigned.PaymentSequence != ^uint32(0) {
+		return nil, nil, fmt.Errorf("%w: immediate close is not final", pool.ErrInvalidEvidence)
 	}
-	if err := client.transactions.VerifyBuyerPayment(state, localInput.Opening); err != nil {
-		return nil, fmt.Errorf("verify immediate close: %w", err)
+	if err := client.transactions.VerifyBuyerPayment(unsigned, buyerSig, localInput.Opening); err != nil {
+		return nil, nil, fmt.Errorf("verify immediate close: %w", err)
 	}
-	return state, nil
+	return unsigned, buyerSig, nil
 }
 
 func (client *Client) SubmitImmediateClose(ctx context.Context, close *pool.SignedPayment) (pool.Hash32, error) {
@@ -461,17 +461,14 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 	if err != nil {
 		return nil, fmt.Errorf("build payment update: %w", err)
 	}
-	state, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
+	buyerSig, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
 	}
-	if state == nil {
-		return nil, fmt.Errorf("%w: transaction engine returned empty payment state", bitfs.ErrInvalidEvidence)
-	}
-	if err := client.transactions.VerifyBuyerPayment(state, opening); err != nil {
+	if err := client.transactions.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer payment: %w", err)
 	}
-	if state == nil || state.SpendTxID != spendTxID || state.PaymentSequence <= previous.PaymentSequence {
+	if unsigned == nil || unsigned.SpendTxID != spendTxID || unsigned.PaymentSequence <= previous.PaymentSequence {
 		return nil, fmt.Errorf("%w: signed payment state is stale", bitfs.ErrStalePaymentSequence)
 	}
 	if client.contentSink != nil {
@@ -479,14 +476,15 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 			return nil, fmt.Errorf("save verified content: %w", err)
 		}
 	}
-	requestHash, err := bitfs.ContentRequestTermsHash(localRequest.TermsCBOR)
+	requestHash, err := bitfs.PaymentAuthorizationHash(localRequest.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
 	return &pool.PaymentUpdate{
-		Version:                 pool.MajorVersion,
-		ContentRequestTermsHash: requestHash[:],
-		PartialSpendTx:          append([]byte(nil), state.RawTx...),
+		Version:                   pool.MajorVersion,
+		PaymentAuthorizationHash:  requestHash[:],
+		UnsignedStateTxRaw:        append([]byte(nil), unsigned.RawTx...),
+		BuyerTransactionSignature: append([]byte(nil), buyerSig...),
 	}, nil
 }
 

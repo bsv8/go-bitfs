@@ -1,0 +1,26 @@
+{
+  "link.title.Explore": {
+    "message": "探索",
+    "description": "The title of the footer links column with title=Explore in the footer"
+  },
+  "link.title.Community": {
+    "message": "社区",
+    "description": "The title of the footer links column with title=Community in the footer"
+  },
+  "link.item.label.Guides": {
+    "message": "指南",
+    "description": "The label of footer link with label=Guides linking to /docs/sdk/protocol-foundations-and-cbor"
+  },
+  "link.item.label.API Reference": {
+    "message": "API 参考",
+    "description": "The label of footer link with label=API Reference linking to /api/"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub",
+    "description": "The label of footer link with label=GitHub linking to https://github.com/bsv8/go-bitfs"
+  },
+  "copyright": {
+    "message": "Copyright © 2026 go-bitfs contributors.",
+    "description": "The footer copyright"
+  }
+}

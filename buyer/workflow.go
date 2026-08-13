@@ -12,11 +12,13 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
+// QuoteStore defines storage operations used by the workflow.
 type QuoteStore interface {
 	SaveQuote(context.Context, *bitfs.SignedFileQuote) error
 	LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
 }
 
+// ContentSink receives verified content bytes after request and delivery validation succeeds.
 type ContentSink interface {
 	SaveVerifiedContent(context.Context, bitfs.Hash32, []byte) error
 }
@@ -27,6 +29,7 @@ type SeedSource interface {
 	LoadSeed(context.Context, bitfs.Hash32) ([]byte, error)
 }
 
+// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
 type WorkflowConfig struct {
 	Signer            pool.Signer
 	QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
@@ -42,6 +45,7 @@ type WorkflowConfig struct {
 	SeedSource        SeedSource
 }
 
+// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
 type Workflow struct {
 	signer            pool.Signer
 	quoteVerifier     bitfs.QuoteTermsSignatureVerifier
@@ -57,6 +61,8 @@ type Workflow struct {
 	seedSource        SeedSource
 }
 
+// NewWorkflow creates a buyer workflow, requires every protocol port, and
+// defaults Clock to time.Now when it is omitted.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.QuoteVerifier == nil || config.SignatureVerifier == nil || config.Quotes == nil || config.Pools == nil || config.Opening == nil || config.Participants == nil || config.Transactions == nil {
 		return nil, errors.New("buyer workflow requires signer, verifiers, quote, opening, participant, pool and transaction ports")
@@ -80,6 +86,7 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	}, nil
 }
 
+// AcceptQuote verifies the seller signature, terms, and expiry before storing the quote.
 func (workflow *Workflow) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQuote) (*bitfs.FileQuoteTerms, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -139,6 +146,7 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.Ope
 	return workflow.transactions.BuildRefundPresignRequest(ctx, pool.CloneOpeningInput(input), workflow.signer)
 }
 
+// BuildFundingTxDelivery verifies the opening proof and returns the buyer funding transaction for seller submission.
 func (workflow *Workflow) BuildFundingTxDelivery(fundingTx []byte) (*pool.FundingTxDelivery, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -207,6 +215,7 @@ func (workflow *Workflow) RefundAfterExpiry(ctx context.Context, spendTxID pool.
 	return submittedTxID, nil
 }
 
+// BuildImmediateClose constructs the buyer-authorized immediate-close transaction from the accepted payment state.
 func (workflow *Workflow) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.UnsignedPayment, []byte, error) {
 	if workflow == nil {
 		return nil, nil, errors.New("buyer workflow is required")
@@ -229,6 +238,8 @@ func (workflow *Workflow) BuildImmediateClose(ctx context.Context, input pool.Cl
 	return unsigned, buyerSig, nil
 }
 
+// SubmitImmediateClose verifies a fully signed final state, submits it, and
+// records the state only after the node returns the expected transaction ID.
 func (workflow *Workflow) SubmitImmediateClose(ctx context.Context, close *pool.SignedPayment) (pool.Hash32, error) {
 	if workflow == nil {
 		return pool.Hash32{}, errors.New("buyer workflow is required")
@@ -270,6 +281,7 @@ func (workflow *Workflow) SubmitImmediateClose(ctx context.Context, close *pool.
 	return txID, nil
 }
 
+// ContentRequestInput contains the quote, pool reference, content reference, and deadline for a request.
 type ContentRequestInput struct {
 	QuoteTermsHash        bitfs.Hash32
 	Pool                  pool.Reference
@@ -279,6 +291,7 @@ type ContentRequestInput struct {
 	DeliveryDeadline      bitfs.UnixSeconds
 }
 
+// RequestContent creates the signed protocol request for the selected content or workflow step.
 func (workflow *Workflow) RequestContent(ctx context.Context, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -385,6 +398,8 @@ func (workflow *Workflow) RequestContent(ctx context.Context, input ContentReque
 	return &bitfs.SignedContentRequest{TermsCBOR: raw, BuyerSignature: append([]byte(nil), signature...)}, nil
 }
 
+// AcceptDelivery verifies 004 and its content, optionally stores the payload,
+// then constructs and buyer-signs the corresponding cumulative payment update.
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery) (*pool.PaymentUpdate, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")

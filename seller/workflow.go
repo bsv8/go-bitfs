@@ -13,15 +13,18 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
+// QuoteStore defines storage operations used by the workflow.
 type QuoteStore interface {
 	SaveQuote(context.Context, *bitfs.SignedFileQuote) error
 	LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
 }
 
+// ContentSource reads seed or block bytes selected by a validated content request.
 type ContentSource interface {
 	LoadContent(context.Context, bitfs.Hash32) ([]byte, error)
 }
 
+// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
 type WorkflowConfig struct {
 	Signer            pool.Signer
 	SignatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -37,6 +40,7 @@ type WorkflowConfig struct {
 	Node              pool.NonFinalPoolNode
 }
 
+// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
 type Workflow struct {
 	signer            pool.Signer
 	signatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -52,6 +56,8 @@ type Workflow struct {
 	node              pool.NonFinalPoolNode
 }
 
+// NewWorkflow creates a seller workflow, requires every signing, storage,
+// transaction, and node port, and defaults Clock to time.Now.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.SignatureVerifier == nil || config.QuoteVerifier == nil {
 		return nil, errors.New("seller workflow requires signer and signature verifiers")
@@ -78,6 +84,8 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	}, nil
 }
 
+// CreateQuote signs the seller's deterministic quote terms and persists the
+// resulting credential before returning it.
 func (workflow *Workflow) CreateQuote(ctx context.Context, draft bitfs.FileQuoteTerms, recommendedFilename string) (*bitfs.SignedFileQuote, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -99,6 +107,7 @@ func (workflow *Workflow) CreateQuote(ctx context.Context, draft bitfs.FileQuote
 	return quote, nil
 }
 
+// PresignPoolOpening prepares and records the presigned pool-opening evidence.
 func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.RefundPresignRequest) (*pool.RefundPresignResponse, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -106,6 +115,8 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 	return pool.SellerPresignRefund(ctx, pool.CloneRefundPresignRequest(request), workflow.openingHooks)
 }
 
+// AcceptPoolFunding verifies the delivered funding transaction, completes the
+// opening proof, and records the initial accepted refund state.
 func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, delivery *pool.FundingTxDelivery) (*pool.OpeningProof, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -131,6 +142,7 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, delivery *pool.
 	return proof, nil
 }
 
+// DeliverRequestedContent reads and signs the content selected by the validated request.
 func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *bitfs.SignedContentRequest) (delivery *bitfs.SignedContentDelivery, err error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -260,6 +272,8 @@ func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *
 	return delivery, nil
 }
 
+// AcceptPayment verifies the buyer-authorized cumulative state, adds the seller
+// signature, submits it, and advances storage only after node acceptance.
 func (workflow *Workflow) AcceptPayment(ctx context.Context, update *pool.PaymentUpdate) (*pool.PaymentState, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -458,6 +472,7 @@ func (workflow *Workflow) BuildArbitrationRequest(context.Context, *pool.Opening
 	return nil, fmt.Errorf("%w: use BuildArbitrationRequestFromAuthorization", pool.ErrInvalidEvidence)
 }
 
+// BuildArbitrationRequestFromAuthorization packages the seller evidence and buyer authorization for arbiter review.
 func (workflow *Workflow) BuildArbitrationRequestFromAuthorization(ctx context.Context, proof *pool.OpeningProof, authorization *bitfs.SignedContentRequest, latest *pool.PaymentState) (*arbitration.ArbitrationRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -497,6 +512,8 @@ func (workflow *Workflow) BuildArbitrationRequestFromAuthorization(ctx context.C
 	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, PoolOpeningProofCBOR: openingCBOR, PaymentAuthorizationCBOR: authCBOR, UnsignedStateTxRaw: append([]byte(nil), unsigned.RawTx...), SellerTransactionSignature: sellerSig}, nil
 }
 
+// SubmitArbitratedPayment verifies the arbiter response, merges seller and
+// arbiter signatures, and submits the exact authorized cumulative state.
 func (workflow *Workflow) SubmitArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse) (*pool.PaymentState, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")

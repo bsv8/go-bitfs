@@ -12,20 +12,31 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
+// ProtocolFamily is the wire protocol identifier carried by the transport layer.
 const ProtocolFamily = "bitfs.protocol.v3"
 
+// Kind is the CBOR kind tag for the corresponding pool-opening message.
 type Kind uint16
 
 const (
-	Quote                     Kind = 1
-	PoolRefundPresignRequest  Kind = 2
+	// Quote identifies a signed file quote message.
+	Quote Kind = 1
+	// PoolRefundPresignRequest identifies a pool opening request.
+	PoolRefundPresignRequest Kind = 2
+	// PoolRefundPresignResponse identifies a pool opening response.
 	PoolRefundPresignResponse Kind = 3
-	PoolFundingTxDelivery     Kind = 4
-	ContentRequest            Kind = 5
-	ContentDelivery           Kind = 6
-	CumulativePayment         Kind = 7
-	ArbitrationRequest        Kind = 8
-	ArbitrationResponse       Kind = 9
+	// PoolFundingTxDelivery identifies delivery of the pool funding transaction.
+	PoolFundingTxDelivery Kind = 4
+	// ContentRequest identifies a buyer's signed content request.
+	ContentRequest Kind = 5
+	// ContentDelivery identifies a seller's signed content delivery.
+	ContentDelivery Kind = 6
+	// CumulativePayment identifies a buyer-authorized payment update.
+	CumulativePayment Kind = 7
+	// ArbitrationRequest identifies evidence sent from a seller to an arbiter.
+	ArbitrationRequest Kind = 8
+	// ArbitrationResponse identifies the arbiter signature returned to a seller.
+	ArbitrationResponse Kind = 9
 )
 
 // Packet is the exact CBOR data item to pass to a transport adapter.
@@ -34,6 +45,8 @@ type Packet struct {
 	CBOR []byte
 }
 
+// Marshal dispatches message to the canonical encoder selected by kind and
+// returns transport-ready CBOR without adding an envelope.
 func Marshal(kind Kind, message any) (Packet, error) {
 	var (
 		raw []byte
@@ -103,6 +116,7 @@ func Marshal(kind Kind, message any) (Packet, error) {
 	return Packet{Kind: kind, CBOR: append([]byte(nil), raw...)}, nil
 }
 
+// Unmarshal dispatches rawCBOR to the strict decoder selected by kind.
 func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 	if len(rawCBOR) == 0 {
 		return nil, errors.New("wire CBOR is required")
@@ -131,11 +145,13 @@ func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 	}
 }
 
+// MarshalQuote encodes a SignedFileQuote with bitfs's canonical encoder.
 func MarshalQuote(message *bitfs.SignedFileQuote) ([]byte, error) {
 	packet, err := Marshal(Quote, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalQuote strictly decodes a SignedFileQuote.
 func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error) {
 	message, err := Unmarshal(Quote, rawCBOR)
 	if err != nil {
@@ -144,11 +160,13 @@ func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error) {
 	return message.(*bitfs.SignedFileQuote), nil
 }
 
+// MarshalContentRequest encodes a SignedContentRequest with bitfs's canonical encoder.
 func MarshalContentRequest(message *bitfs.SignedContentRequest) ([]byte, error) {
 	packet, err := Marshal(ContentRequest, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalContentRequest strictly decodes a SignedContentRequest.
 func UnmarshalContentRequest(rawCBOR []byte) (*bitfs.SignedContentRequest, error) {
 	message, err := Unmarshal(ContentRequest, rawCBOR)
 	if err != nil {
@@ -157,11 +175,13 @@ func UnmarshalContentRequest(rawCBOR []byte) (*bitfs.SignedContentRequest, error
 	return message.(*bitfs.SignedContentRequest), nil
 }
 
+// MarshalContentDelivery encodes a SignedContentDelivery with bitfs's canonical encoder.
 func MarshalContentDelivery(message *bitfs.SignedContentDelivery) ([]byte, error) {
 	packet, err := Marshal(ContentDelivery, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalContentDelivery strictly decodes a SignedContentDelivery.
 func UnmarshalContentDelivery(rawCBOR []byte) (*bitfs.SignedContentDelivery, error) {
 	message, err := Unmarshal(ContentDelivery, rawCBOR)
 	if err != nil {
@@ -170,11 +190,13 @@ func UnmarshalContentDelivery(rawCBOR []byte) (*bitfs.SignedContentDelivery, err
 	return message.(*bitfs.SignedContentDelivery), nil
 }
 
+// MarshalPoolRefundPresignRequest encodes a pool-opening presign request.
 func MarshalPoolRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error) {
 	packet, err := Marshal(PoolRefundPresignRequest, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalPoolRefundPresignRequest strictly decodes a pool-opening presign request.
 func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error) {
 	message, err := Unmarshal(PoolRefundPresignRequest, rawCBOR)
 	if err != nil {
@@ -183,11 +205,13 @@ func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignReque
 	return message.(*pool.RefundPresignRequest), nil
 }
 
+// MarshalPoolRefundPresignResponse encodes a pool-opening presign response.
 func MarshalPoolRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error) {
 	packet, err := Marshal(PoolRefundPresignResponse, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalPoolRefundPresignResponse strictly decodes a pool-opening presign response.
 func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error) {
 	message, err := Unmarshal(PoolRefundPresignResponse, rawCBOR)
 	if err != nil {
@@ -196,11 +220,13 @@ func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResp
 	return message.(*pool.RefundPresignResponse), nil
 }
 
+// MarshalPoolFundingTxDelivery encodes delivery of the pool funding transaction.
 func MarshalPoolFundingTxDelivery(message *pool.FundingTxDelivery) ([]byte, error) {
 	packet, err := Marshal(PoolFundingTxDelivery, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalPoolFundingTxDelivery strictly decodes a pool funding transaction delivery.
 func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, error) {
 	message, err := Unmarshal(PoolFundingTxDelivery, rawCBOR)
 	if err != nil {
@@ -209,11 +235,13 @@ func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, er
 	return message.(*pool.FundingTxDelivery), nil
 }
 
+// MarshalPaymentUpdate encodes a buyer-authorized cumulative payment update.
 func MarshalPaymentUpdate(message *pool.PaymentUpdate) ([]byte, error) {
 	packet, err := Marshal(CumulativePayment, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalPaymentUpdate strictly decodes a cumulative payment update.
 func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error) {
 	message, err := Unmarshal(CumulativePayment, rawCBOR)
 	if err != nil {
@@ -222,11 +250,13 @@ func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error) {
 	return message.(*pool.PaymentUpdate), nil
 }
 
+// MarshalArbitrationRequest encodes a seller's complete 007 evidence package.
 func MarshalArbitrationRequest(message *arbitration.ArbitrationRequest) ([]byte, error) {
 	packet, err := Marshal(ArbitrationRequest, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalArbitrationRequest strictly decodes a 007 evidence package.
 func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbitration.ArbitrationRequest, error) {
 	message, err := Unmarshal(ArbitrationRequest, rawCBOR)
 	if err != nil {
@@ -235,11 +265,13 @@ func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbitration.ArbitrationReques
 	return message.(*arbitration.ArbitrationRequest), nil
 }
 
+// MarshalArbitrationResponse encodes the arbiter hashes and detached signature.
 func MarshalArbitrationResponse(message *arbitration.ArbitrationResponse) ([]byte, error) {
 	packet, err := Marshal(ArbitrationResponse, message)
 	return packet.CBOR, err
 }
 
+// UnmarshalArbitrationResponse strictly decodes an arbiter response.
 func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationResponse, error) {
 	message, err := Unmarshal(ArbitrationResponse, rawCBOR)
 	if err != nil {

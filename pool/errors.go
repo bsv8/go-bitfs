@@ -9,14 +9,23 @@ import (
 )
 
 var (
-	ErrInvalidEvidence      = errors.New("invalid pool evidence")
-	ErrPoolBusy             = errors.New("pool busy")
+	// ErrInvalidEvidence is returned when pool evidence fails structural or protocol validation.
+	ErrInvalidEvidence = errors.New("invalid pool evidence")
+	// ErrPoolBusy indicates that a pool already has an active delivery.
+	ErrPoolBusy = errors.New("pool busy")
+	// ErrStalePaymentSequence indicates that an update does not extend current state.
 	ErrStalePaymentSequence = errors.New("stale payment sequence")
-	ErrInsufficientBalance  = errors.New("insufficient pool balance")
-	ErrNonFinalRejected     = errors.New("non-final pool rejected update")
-	ErrFinalRejected        = errors.New("pool node rejected final transaction")
-	ErrNotExpired           = errors.New("pool refund expiry has not been reached")
-	ErrPoolStateUncertain   = errors.New("pool state requires external reconciliation")
+	// ErrInsufficientBalance indicates that a payment exceeds the pool balance.
+	ErrInsufficientBalance = errors.New("insufficient pool balance")
+	// ErrNonFinalRejected indicates that the node rejected a non-final payment update.
+	ErrNonFinalRejected = errors.New("non-final pool rejected update")
+	// ErrFinalRejected indicates that the node rejected a final transaction.
+	ErrFinalRejected = errors.New("pool node rejected final transaction")
+	// ErrNotExpired indicates that the refund locktime has not yet been reached.
+	ErrNotExpired = errors.New("pool refund expiry has not been reached")
+	// ErrPoolStateUncertain indicates that node acceptance must be reconciled
+	// after local persistence failed.
+	ErrPoolStateUncertain = errors.New("pool state requires external reconciliation")
 )
 
 func invalid(message string) error { return fmt.Errorf("%w: %s", ErrInvalidEvidence, message) }

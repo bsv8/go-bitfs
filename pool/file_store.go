@@ -72,28 +72,34 @@ func NewFileStore(path string, calculator TransactionIDCalculator) (*FileStore, 
 	return store, nil
 }
 
+// SaveOpeningProof validates and persists the opening proof keyed by its spend transaction ID.
 func (store *FileStore) SaveOpeningProof(ctx context.Context, proof *OpeningProof) error {
 	return store.mutate(func() error { return store.memory.SaveOpeningProof(ctx, CloneOpeningProof(proof)) })
 }
 
+// LoadOpeningProof loads the opening proof keyed by spend transaction ID.
 func (store *FileStore) LoadOpeningProof(ctx context.Context, spendTxID Hash32) (*OpeningProof, error) {
 	return store.loadOpening(func() (*OpeningProof, error) { return store.memory.LoadOpeningProof(ctx, spendTxID) })
 }
 
+// LoadOpeningProofByFundingTxID finds an opening proof by its funding transaction ID.
 func (store *FileStore) LoadOpeningProofByFundingTxID(ctx context.Context, fundingTxID Hash32) (*OpeningProof, error) {
 	return store.loadOpening(func() (*OpeningProof, error) {
 		return store.memory.LoadOpeningProofByFundingTxID(ctx, fundingTxID)
 	})
 }
 
+// SaveAcceptedPayment stores a payment by spend transaction ID and rejects sequence rollback or conflicting same-sequence state.
 func (store *FileStore) SaveAcceptedPayment(ctx context.Context, state *PaymentState) error {
 	return store.mutate(func() error { return store.memory.SaveAcceptedPayment(ctx, ClonePaymentState(state)) })
 }
 
+// LoadAcceptedPayment returns the accepted payment state for a spend transaction ID.
 func (store *FileStore) LoadAcceptedPayment(ctx context.Context, spendTxID Hash32) (*PaymentState, error) {
 	return store.loadPayment(func() (*PaymentState, error) { return store.memory.LoadAcceptedPayment(ctx, spendTxID) })
 }
 
+// EnsurePoolHealthy rejects operations after an uncertain external submission is recorded.
 func (store *FileStore) EnsurePoolHealthy(ctx context.Context, spendTxID Hash32) error {
 	if store == nil || store.memory == nil {
 		return fmt.Errorf("%w: file store is required", ErrInvalidEvidence)
@@ -108,14 +114,17 @@ func (store *FileStore) EnsurePoolHealthy(ctx context.Context, spendTxID Hash32)
 	})
 }
 
+// MarkExternalStateUncertain records a transaction ID whose node outcome must be reconciled.
 func (store *FileStore) MarkExternalStateUncertain(ctx context.Context, spendTxID, txID Hash32) error {
 	return store.mutate(func() error { return store.memory.MarkExternalStateUncertain(ctx, spendTxID, txID) })
 }
 
+// ReconcileExternalState clears uncertainty after the caller supplies the accepted payment state.
 func (store *FileStore) ReconcileExternalState(ctx context.Context, spendTxID Hash32, state *PaymentState) error {
 	return store.mutate(func() error { return store.memory.ReconcileExternalState(ctx, spendTxID, ClonePaymentState(state)) })
 }
 
+// TryAcquire atomically claims a pending request lease unless another owner or hash conflict exists.
 func (store *FileStore) TryAcquire(ctx context.Context, request PendingRequest) (PendingAcquireResult, error) {
 	if store == nil || store.memory == nil {
 		return 0, fmt.Errorf("%w: file store is required", ErrInvalidEvidence)
@@ -142,6 +151,7 @@ func (store *FileStore) TryAcquire(ctx context.Context, request PendingRequest) 
 	return result, err
 }
 
+// Load returns the pending delivery request for spendTxID from the latest disk snapshot.
 func (store *FileStore) Load(ctx context.Context, spendTxID Hash32) (*PendingRequest, error) {
 	if store == nil || store.memory == nil {
 		return nil, fmt.Errorf("%w: file store is required", ErrInvalidEvidence)
@@ -160,6 +170,7 @@ func (store *FileStore) Load(ctx context.Context, spendTxID Hash32) (*PendingReq
 	return result, err
 }
 
+// Release removes a pending request lease only when the caller supplies the matching request hash.
 func (store *FileStore) Release(ctx context.Context, spendTxID, requestHash Hash32) error {
 	return store.mutate(func() error { return store.memory.Release(ctx, spendTxID, requestHash) })
 }

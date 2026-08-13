@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// BuildSeedBytes 按 BitFS v1 的唯一格式构造 seed：仅顺序拼接 32 字节 block hash。
+// BuildSeedBytes constructs a seed by concatenating 32-byte block hashes in order.
 func BuildSeedBytes(blockHashes [][]byte) ([]byte, error) {
 	seed := make([]byte, 0, len(blockHashes)*sha256.Size)
 	for index, blockHash := range blockHashes {
@@ -18,7 +18,7 @@ func BuildSeedBytes(blockHashes [][]byte) ([]byte, error) {
 	return seed, nil
 }
 
-// ParseSeedBytes 按 BitFS v1 的唯一格式解析 seed，并返回独立副本的 block hash 列表。
+// ParseSeedBytes parses a seed and returns independent copies of its block hashes.
 func ParseSeedBytes(seed []byte) ([][]byte, error) {
 	if len(seed)%sha256.Size != 0 {
 		return nil, fmt.Errorf("seed length must be a multiple of %d, got %d", sha256.Size, len(seed))
@@ -30,7 +30,7 @@ func ParseSeedBytes(seed []byte) ([][]byte, error) {
 	return blockHashes, nil
 }
 
-// SeedHash 计算 BitFS v1 seed 的 sha256 摘要。
+// SeedHash computes the SHA-256 digest of seed bytes.
 func SeedHash(seed []byte) [sha256.Size]byte {
 	return sha256.Sum256(seed)
 }

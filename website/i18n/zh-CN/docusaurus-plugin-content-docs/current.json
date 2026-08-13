@@ -1,0 +1,26 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.docsSidebar.category.SDK guides": {
+    "message": "SDK 指南",
+    "description": "The label for category 'SDK guides' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Protocol": {
+    "message": "协议",
+    "description": "The label for category 'Protocol' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Legacy": {
+    "message": "历史版本",
+    "description": "The label for category 'Legacy' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.doc.SDK foundations": {
+    "message": "SDK 基础",
+    "description": "The label for the doc item 'SDK foundations' in sidebar 'docsSidebar', linking to the doc sdk/protocol-foundations-and-cbor"
+  },
+  "sidebar.docsSidebar.doc.Migration": {
+    "message": "迁移",
+    "description": "The label for the doc item 'Migration' in sidebar 'docsSidebar', linking to the doc migration/migrate-from-bsv8-gateway"
+  }
+}

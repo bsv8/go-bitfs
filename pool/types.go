@@ -10,19 +10,25 @@ import (
 // separate from the MultisigPool library protocol embedded in OpeningProof.
 const ProtocolFamily = "bitfs.pool.workflow.v3"
 
+// MajorVersion is the current major version of the pool workflow protocol.
 const MajorVersion uint64 = 3
 
+// MultisigProtocol identifies the embedded MultisigPool transaction protocol.
 const MultisigProtocol = "bitfs.pool.v4"
 
+// MultisigVersion is the version of the embedded MultisigPool protocol.
 const MultisigVersion uint64 = 4
 
+// Hash32 stores a fixed-width 32-byte hash used for protocol identities and transaction IDs.
 type Hash32 [sha256.Size]byte
 
+// Reference identifies the settlement pool and payment sequence used by a content request.
 type Reference struct {
 	SpendTxID           Hash32
 	BasePaymentSequence uint32
 }
 
+// OpeningProof records the mutually verified refund and funding transactions that open a pool.
 type OpeningProof struct {
 	Version               uint64
 	MultisigProtocol      string
@@ -42,6 +48,7 @@ type OpeningProof struct {
 	FundingTx             []byte
 }
 
+// RefundPresignRequest contains the buyer-seller terms for a presigned refund transaction.
 type RefundPresignRequest struct {
 	Version              uint64
 	MultisigProtocol     string
@@ -58,11 +65,13 @@ type RefundPresignRequest struct {
 	BuyerRefundSignature []byte
 }
 
+// RefundPresignResponse carries the seller signature over the presigned refund transaction.
 type RefundPresignResponse struct {
 	Version               uint64
 	SellerRefundSignature []byte
 }
 
+// FundingTxDelivery carries the buyer-signed funding transaction revealed after refund verification.
 type FundingTxDelivery struct {
 	Version   uint64
 	FundingTx []byte
@@ -97,6 +106,7 @@ type PaymentState struct {
 	PoolLockingScript           []byte
 }
 
+// SignedPayment contains one detached role signature over an unsigned payment transaction.
 type SignedPayment struct {
 	State PaymentState
 	RawTx []byte
@@ -115,6 +125,7 @@ type UnsignedPayment struct {
 	PoolLockingScript  []byte
 }
 
+// PaymentUpdateInput supplies the next cumulative payment state and its transaction bytes.
 type PaymentUpdateInput struct {
 	Opening              *OpeningProof
 	Previous             *PaymentState
@@ -122,54 +133,65 @@ type PaymentUpdateInput struct {
 	SellerAmountAfterSat uint64
 }
 
+// CloseInput supplies the signatures and transaction data required for an immediate close.
 type CloseInput struct {
 	Opening              *OpeningProof
 	Latest               *PaymentState
 	SellerAmountAfterSat uint64
 }
 
+// UpdateAcceptance describes the node acceptance result for a non-final payment update.
 type UpdateAcceptance struct {
 	TxID            Hash32
 	SpendTxID       Hash32
 	PaymentSequence uint32
 }
 
+// OpeningProofStore persists and retrieves OpeningProof values keyed by spend transaction ID.
 type OpeningProofStore interface {
 	SaveOpeningProof(context.Context, *OpeningProof) error
 	LoadOpeningProof(context.Context, Hash32) (*OpeningProof, error)
 }
 
+// PendingOpeningProofStore persists and retrieves opening proofs keyed by funding transaction ID.
 type PendingOpeningProofStore interface {
 	SaveOpeningProof(context.Context, *OpeningProof) error
 	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
 }
 
+// TransactionIDCalculator computes a canonical 32-byte transaction identifier from raw transaction bytes.
 type TransactionIDCalculator interface {
 	TransactionID(context.Context, []byte) (Hash32, error)
 }
 
+// RefundTxSigner produces the seller's detached signature over a presigned refund transaction.
 type RefundTxSigner interface {
 	SignRefundTx(context.Context, *RefundPresignRequest) ([]byte, error)
 }
 
+// RefundTxSignatureVerifier validates the seller's detached refund signature against the presign request.
 type RefundTxSignatureVerifier interface {
 	VerifySellerRefundSignature(context.Context, *RefundPresignRequest, []byte) error
 }
 
+// FundingTxVerifier validates that a raw funding transaction matches its opening proof.
 type FundingTxVerifier interface {
 	VerifyFundingTx(context.Context, []byte, *OpeningProof) error
 }
 
+// TransactionSubmitter broadcasts a raw transaction to the network and returns its canonical transaction ID.
 type TransactionSubmitter interface {
 	SubmitTransaction(context.Context, []byte) (Hash32, error)
 }
 
+// BuyerPoolOpeningHooks supplies persistence and verification capabilities for buyer-side pool opening.
 type BuyerPoolOpeningHooks interface {
 	OpeningProofStore
 	RefundTxSignatureVerifier
 	TransactionIDCalculator
 }
 
+// SellerPoolOpeningHooks supplies signing, verification, persistence, and submission for seller-side opening.
 type SellerPoolOpeningHooks interface {
 	PendingOpeningProofStore
 	RefundTxSigner
@@ -178,6 +200,7 @@ type SellerPoolOpeningHooks interface {
 	TransactionSubmitter
 }
 
+// PoolStore persists opening proofs, accepted payments, and pool health state.
 type PoolStore interface {
 	OpeningProofStore
 	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
@@ -188,6 +211,7 @@ type PoolStore interface {
 	ReconcileExternalState(context.Context, Hash32, *PaymentState) error
 }
 
+// PendingRequest records the request hash and ownership lease used to serialize delivery.
 type PendingRequest struct {
 	SpendTxID               Hash32
 	BasePaymentSequence     uint32
@@ -195,29 +219,37 @@ type PendingRequest struct {
 	ExpectedSellerAmountSat uint64
 }
 
+// PendingAcquireResult reports whether a delivery lease was acquired, held, or conflicted.
 type PendingAcquireResult uint8
 
 const (
-	PendingAcquired    PendingAcquireResult = 1
+	// PendingAcquired indicates the delivery lease was successfully acquired.
+	PendingAcquired PendingAcquireResult = 1
+	// PendingAlreadyHeld indicates that another request currently owns the lock.
 	PendingAlreadyHeld PendingAcquireResult = 2
-	PendingConflict    PendingAcquireResult = 3
+	// PendingConflict indicates that the request hash conflicts with the owner.
+	PendingConflict PendingAcquireResult = 3
 )
 
+// PendingRequestStore manages content-request delivery leases keyed by spend transaction ID.
 type PendingRequestStore interface {
 	TryAcquire(context.Context, PendingRequest) (PendingAcquireResult, error)
 	Load(context.Context, Hash32) (*PendingRequest, error)
 	Release(context.Context, Hash32, Hash32) error
 }
 
+// Signer provides a public key and produces detached signatures.
 type Signer interface {
 	PublicKey(context.Context) ([]byte, error)
 	Sign(context.Context, []byte) ([]byte, error)
 }
 
+// SignatureVerifier validates a detached signature against a public key and payload.
 type SignatureVerifier interface {
 	Verify(pubkey, payload, signature []byte) error
 }
 
+// PoolNodeVerifierPort verifies pool transactions before they reach a concrete node adapter.
 type PoolNodeVerifierPort interface {
 	FundingTxID([]byte) (Hash32, error)
 	TransactionID([]byte) (Hash32, error)
@@ -231,6 +263,7 @@ type PoolNodeVerifierPort interface {
 	VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
 }
 
+// BuyerPoolPort exposes buyer-side pool construction, signing, and payment validation operations.
 type BuyerPoolPort interface {
 	TransactionID([]byte) (Hash32, error)
 	BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
@@ -248,6 +281,7 @@ type BuyerPoolPort interface {
 	BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, []byte, error)
 }
 
+// SellerPoolPort exposes seller-side pool validation, signing, and payment merge operations.
 type SellerPoolPort interface {
 	TransactionID([]byte) (Hash32, error)
 	FundingTxID([]byte) (Hash32, error)
@@ -278,10 +312,12 @@ type OpeningInput struct {
 	ArbiterPubKey        []byte
 }
 
+// ParticipantVerifier checks that an opening proof's buyer, seller, and arbiter keys match the expected values.
 type ParticipantVerifier interface {
 	VerifyPoolParticipants(*OpeningProof, []byte, []byte, []byte) error
 }
 
+// NonFinalPoolNode submits verified cumulative updates and final settlement transactions to a node.
 type NonFinalPoolNode interface {
 	SubmitUpdate(context.Context, []byte) (*UpdateAcceptance, error)
 	SubmitFinal(context.Context, []byte) (Hash32, error)

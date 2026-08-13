@@ -1,0 +1,22 @@
+{
+  "title": {
+    "message": "go-bitfs",
+    "description": "The title in the navbar"
+  },
+  "logo.alt": {
+    "message": "go-bitfs mark",
+    "description": "The alt text of navbar logo"
+  },
+  "item.label.Guides": {
+    "message": "指南",
+    "description": "Navbar item with label Guides"
+  },
+  "item.label.API Reference": {
+    "message": "API 参考",
+    "description": "Navbar item with label API Reference"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub",
+    "description": "Navbar item with label GitHub"
+  }
+}

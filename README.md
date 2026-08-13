@@ -1,34 +1,30 @@
 # go-bitfs
 
-BitFS v3 的 Go 协议真值库，覆盖文件交换、自动仲裁与 MultisigPool v4.0.0 2-of-3 费用池结算。
+go-bitfs is the source of truth for the BitFS v3 Go protocol: file exchange, arbitration, and MultisigPool v4 2-of-3 settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
 
-历史兼容 wire schema 位于 `spec/v1/`，不可用于当前协议。当前 v3 业务语义以本 README 下的 001–007 编号文档和 `spec/v3/` CDDL 为准，并使用严格 deterministic CBOR 编码。费用池固定使用 `[Buyer, Seller, Arbiter]` 三输出，`ArbiterAmountSat` 固定为 0；单签只传 detached signature，`PaymentState.RawTx` 只表示完整双签交易。BitFS 不定义发现或网络传输，队列、WebSocket、TCP、libp2p 等适配器只负责投递同一组 CBOR bytes。
+The protocol is documented in the multilingual [Docusaurus site](website/README.md). English is the normative website language; Simplified Chinese is maintained under `website/i18n/zh-CN/`.
 
-协议按业务顺序编号；每一步都有供实现对照的规范和解释设计意图的需求文档：
-
-| 编号 | 施工规范 | 需求与业务意图 |
+| Step | Specification | Requirements and intent |
 |---:|---|---|
-| 001 | [`报价凭证`](docs/protocol/001-报价凭证规范.md) | [`报价凭证需求`](docs/protocol/001-报价凭证需求.md) |
-| 002 | [`费用池开池`](docs/protocol/002-费用池开池规范.md) | [`费用池开池需求`](docs/protocol/002-费用池开池需求.md) |
-| 003 | [`内容获取请求`](docs/protocol/003-内容获取请求规范.md) | [`内容获取请求需求`](docs/protocol/003-内容获取请求需求.md) |
-| 004 | [`内容交付凭证`](docs/protocol/004-内容交付凭证规范.md) | [`内容交付凭证需求`](docs/protocol/004-内容交付凭证需求.md) |
-| 005 | [`累计支付`](docs/protocol/005-累计支付规范.md) | [`累计支付需求`](docs/protocol/005-累计支付需求.md) |
-| 006 | [`费用池无条件关闭`](docs/protocol/006-费用池无条件关闭规范.md) | [`费用池关闭需求`](docs/protocol/006-费用池关闭需求.md) |
-| 007 | [`卖方仲裁提交`](docs/protocol/007-卖方仲裁提交规范.md) | [`卖方仲裁提交需求`](docs/protocol/007-卖方仲裁提交需求.md) |
+| 001 | [Quote credential](website/docs/protocol/001-quote-credential-spec.md) | [Requirements](website/docs/protocol/001-quote-credential-requirements.md) |
+| 002 | [Pool opening](website/docs/protocol/002-pool-opening-spec.md) | [Requirements](website/docs/protocol/002-pool-opening-requirements.md) |
+| 003 | [Content request](website/docs/protocol/003-content-request-spec.md) | [Requirements](website/docs/protocol/003-content-request-requirements.md) |
+| 004 | [Content delivery](website/docs/protocol/004-content-delivery-spec.md) | [Requirements](website/docs/protocol/004-content-delivery-requirements.md) |
+| 005 | [Cumulative payment](website/docs/protocol/005-cumulative-payment-spec.md) | [Requirements](website/docs/protocol/005-cumulative-payment-requirements.md) |
+| 006 | [Pool close](website/docs/protocol/006-unconditional-pool-close-spec.md) | [Requirements](website/docs/protocol/006-pool-close-requirements.md) |
+| 007 | [Seller arbitration](website/docs/protocol/007-seller-arbitration-submission-spec.md) | [Requirements](website/docs/protocol/007-seller-arbitration-submission-requirements.md) |
 
-001 的报价凭证保持独立版本；002/005/006/007 使用 v3 major，003/004 使用 v3 内容凭证。当前 CDDL 位于 `spec/v3/`，原始 BSV 交易字节仍按 Bitcoin 交易序列化规则编码。交易脚本、费用、签名和状态构造的唯一真值是发布版 `github.com/bsv8/MultisigPool/v4 v4.0.0`，节点/WoC 仍通过接口注入。
+The current CDDL is under `spec/v3/`. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
 
-面向应用开发者的公开 Go API 设计见 [`SDK API 框架设计`](docs/sdk/SDK-API框架设计.md)，对应代码已拆成 `buyer.Workflow`、`seller.Workflow`、`pool`、`arbitration` 和 `wire` 包。费用池交易语义由 MultisigPool 提供，数据库、钱包和非最终交易池仍通过接口注入。
+## Packages
 
-执行测试：
+- `bitfs/`: quote and content credentials, seeds, hashes, and evidence validation.
+- `pool/`: independent 002/005/006 settlement state machine, transaction engine, persistence ports, and memory reference implementation.
+- `buyer/` and `seller/`: role workflows for the v3 protocol.
+- `arbitration/` and `wire/`: arbitration evidence signing and typed protocol message dispatch.
+
+Run the test suite with:
 
 ```bash
 go test ./...
 ```
-
-目录职责：
-
-- `bitfs/`：报价、003/004 内容凭证、seed、哈希和证据校验；
-- `pool/`：独立的 002/005/006 费用池状态机、交易引擎、持久化端口和内存参考实现；
-- `buyer/`、`seller/`：v3 协议角色工作流；历史会话运行时已从当前构建删除；
-- `arbitration/`、`wire/`：007 仲裁证据签名工作流和新协议报文分派。

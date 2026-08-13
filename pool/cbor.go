@@ -9,9 +9,12 @@ import (
 )
 
 const (
-	KindPoolRefundPresignRequest  uint64 = 12
+	// KindPoolRefundPresignRequest is the CBOR tag for a refund presign request.
+	KindPoolRefundPresignRequest uint64 = 12
+	// KindPoolRefundPresignResponse identifies a refund signature response.
 	KindPoolRefundPresignResponse uint64 = 13
-	KindPoolFundingTxDelivery     uint64 = 14
+	// KindPoolFundingTxDelivery identifies a funding transaction delivery.
+	KindPoolFundingTxDelivery uint64 = 14
 )
 
 var poolEnc cbor.EncMode
@@ -33,6 +36,7 @@ func init() {
 	}
 }
 
+// EncodePaymentUpdate encodes its input as the protocol-defined deterministic CBOR array.
 func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	if err := ValidatePaymentUpdate(update); err != nil {
 		return nil, err
@@ -40,6 +44,7 @@ func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	return poolEnc.Marshal([]any{MajorVersion, update.PaymentAuthorizationHash, update.UnsignedStateTxRaw, update.BuyerTransactionSignature})
 }
 
+// DecodePaymentUpdate decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	values, err := decodePoolArray(data, 4)
 	if err != nil {
@@ -71,6 +76,7 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	return clonePaymentUpdate(update), nil
 }
 
+// EncodeRefundPresignRequest encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
@@ -83,6 +89,7 @@ func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	})
 }
 
+// DecodeRefundPresignRequest decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	values, err := decodePoolArray(data, 13)
 	if err != nil {
@@ -141,6 +148,7 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	return cloneRefundPresignRequest(request), nil
 }
 
+// EncodeRefundPresignResponse encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error) {
 	if err := ValidateRefundPresignResponse(response); err != nil {
 		return nil, err
@@ -148,6 +156,7 @@ func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error
 	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignResponse, response.SellerRefundSignature})
 }
 
+// DecodeRefundPresignResponse decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	values, err := decodePoolArray(data, 3)
 	if err != nil {
@@ -177,6 +186,7 @@ func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	return cloneRefundPresignResponse(response), nil
 }
 
+// EncodeFundingTxDelivery encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeFundingTxDelivery(delivery *FundingTxDelivery) ([]byte, error) {
 	if err := ValidateFundingTxDelivery(delivery); err != nil {
 		return nil, err
@@ -184,6 +194,7 @@ func EncodeFundingTxDelivery(delivery *FundingTxDelivery) ([]byte, error) {
 	return poolEnc.Marshal([]any{MajorVersion, KindPoolFundingTxDelivery, delivery.FundingTx})
 }
 
+// DecodeFundingTxDelivery decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	values, err := decodePoolArray(data, 3)
 	if err != nil {
@@ -213,6 +224,7 @@ func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	return cloneFundingTxDelivery(delivery), nil
 }
 
+// EncodeOpeningProof encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	if err := ValidateOpeningProof(proof); err != nil {
 		return nil, err
@@ -228,6 +240,7 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	})
 }
 
+// DecodeOpeningProof decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	values, err := decodePoolArray(data, 16)
 	if err != nil {
@@ -295,6 +308,7 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	return cloneOpeningProof(proof), nil
 }
 
+// ValidatePaymentUpdate checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update == nil {
 		return fmt.Errorf("%w: payment update is required", ErrInvalidEvidence)
@@ -314,6 +328,7 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	return nil
 }
 
+// ValidateRefundPresignRequest checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request == nil || request.Version != MajorVersion {
 		return fmt.Errorf("%w: invalid refund presign request", ErrInvalidEvidence)
@@ -330,6 +345,7 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	return nil
 }
 
+// ValidateRefundPresignResponse checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: invalid refund presign response", ErrInvalidEvidence)
@@ -337,6 +353,7 @@ func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	return nil
 }
 
+// ValidateFundingTxDelivery checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	if delivery == nil || delivery.Version != MajorVersion || len(delivery.FundingTx) == 0 {
 		return fmt.Errorf("%w: invalid funding transaction delivery", ErrInvalidEvidence)
@@ -344,6 +361,7 @@ func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	return nil
 }
 
+// ValidateOpeningProof checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof == nil {
 		return fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)

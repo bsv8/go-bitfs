@@ -13,6 +13,7 @@ type BSVTransactionIDCalculator struct {
 	Engine *MultisigPoolEngine
 }
 
+// TransactionID computes the canonical transaction identifier from raw transaction bytes.
 func (calculator BSVTransactionIDCalculator) TransactionID(_ context.Context, rawTx []byte) (Hash32, error) {
 	if calculator.Engine == nil {
 		return Hash32{}, fmt.Errorf("%w: MultisigPool engine is required", ErrInvalidEvidence)
@@ -33,6 +34,7 @@ type MemoryStore struct {
 	uncertain         map[Hash32]Hash32
 }
 
+// NewMemoryStore requires a transaction ID calculator and returns a concurrency-safe in-memory pool store.
 func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
 	if calculator == nil {
 		return nil, fmt.Errorf("%w: transaction ID calculator is required", ErrInvalidEvidence)
@@ -47,6 +49,7 @@ func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
 	}, nil
 }
 
+// SaveOpeningProof validates and persists the opening proof keyed by its spend transaction ID.
 func (store *MemoryStore) SaveOpeningProof(ctx context.Context, proof *OpeningProof) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -85,6 +88,7 @@ func (store *MemoryStore) SaveOpeningProof(ctx context.Context, proof *OpeningPr
 	return nil
 }
 
+// LoadOpeningProof loads the opening proof keyed by spend transaction ID.
 func (store *MemoryStore) LoadOpeningProof(_ context.Context, spendTxID Hash32) (*OpeningProof, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -94,6 +98,7 @@ func (store *MemoryStore) LoadOpeningProof(_ context.Context, spendTxID Hash32) 
 	return cloneOpeningProof(store.openingsBySpend[spendTxID]), nil
 }
 
+// LoadOpeningProofByFundingTxID finds an opening proof by its funding transaction ID.
 func (store *MemoryStore) LoadOpeningProofByFundingTxID(_ context.Context, fundingTxID Hash32) (*OpeningProof, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -103,6 +108,7 @@ func (store *MemoryStore) LoadOpeningProofByFundingTxID(_ context.Context, fundi
 	return cloneOpeningProof(store.openingsByFunding[fundingTxID]), nil
 }
 
+// SaveAcceptedPayment stores a payment by spend transaction ID and rejects sequence rollback or conflicting same-sequence state.
 func (store *MemoryStore) SaveAcceptedPayment(_ context.Context, state *PaymentState) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -128,6 +134,7 @@ func (store *MemoryStore) SaveAcceptedPayment(_ context.Context, state *PaymentS
 	return nil
 }
 
+// LoadAcceptedPayment returns the accepted payment state for a spend transaction ID.
 func (store *MemoryStore) LoadAcceptedPayment(_ context.Context, spendTxID Hash32) (*PaymentState, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -137,6 +144,7 @@ func (store *MemoryStore) LoadAcceptedPayment(_ context.Context, spendTxID Hash3
 	return clonePaymentState(store.accepted[spendTxID]), nil
 }
 
+// EnsurePoolHealthy rejects operations after an uncertain external submission is recorded.
 func (store *MemoryStore) EnsurePoolHealthy(_ context.Context, spendTxID Hash32) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -149,6 +157,7 @@ func (store *MemoryStore) EnsurePoolHealthy(_ context.Context, spendTxID Hash32)
 	return nil
 }
 
+// MarkExternalStateUncertain records a transaction ID whose node outcome must be reconciled.
 func (store *MemoryStore) MarkExternalStateUncertain(_ context.Context, spendTxID, txID Hash32) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -159,6 +168,7 @@ func (store *MemoryStore) MarkExternalStateUncertain(_ context.Context, spendTxI
 	return nil
 }
 
+// ReconcileExternalState clears uncertainty after the caller supplies the accepted payment state.
 func (store *MemoryStore) ReconcileExternalState(ctx context.Context, spendTxID Hash32, state *PaymentState) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -184,6 +194,7 @@ func (store *MemoryStore) ReconcileExternalState(ctx context.Context, spendTxID 
 	return nil
 }
 
+// TryAcquire atomically claims a pending request lease unless another owner or hash conflict exists.
 func (store *MemoryStore) TryAcquire(_ context.Context, request PendingRequest) (PendingAcquireResult, error) {
 	if store == nil {
 		return 0, fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -200,6 +211,7 @@ func (store *MemoryStore) TryAcquire(_ context.Context, request PendingRequest) 
 	return PendingAcquired, nil
 }
 
+// Load returns a copy of the pending delivery request for spendTxID.
 func (store *MemoryStore) Load(_ context.Context, spendTxID Hash32) (*PendingRequest, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
@@ -213,6 +225,7 @@ func (store *MemoryStore) Load(_ context.Context, spendTxID Hash32) (*PendingReq
 	return &request, nil
 }
 
+// Release removes a pending request lease only when the caller supplies the matching request hash.
 func (store *MemoryStore) Release(_ context.Context, spendTxID, requestHash Hash32) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)

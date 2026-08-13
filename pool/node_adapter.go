@@ -34,6 +34,8 @@ type VerifiedNonFinalPoolNode struct {
 	backend  NonFinalPoolBackend
 }
 
+// NewVerifiedNonFinalPoolNode creates a validating node adapter and rejects a
+// missing transaction engine, opening store, or backend.
 func NewVerifiedNonFinalPoolNode(engine PoolNodeVerifierPort, openings OpeningByFundingStore, backend NonFinalPoolBackend) (*VerifiedNonFinalPoolNode, error) {
 	if engine == nil || openings == nil || backend == nil {
 		return nil, fmt.Errorf("%w: node adapter requires transaction engine, opening store and backend", ErrInvalidEvidence)
@@ -41,6 +43,8 @@ func NewVerifiedNonFinalPoolNode(engine PoolNodeVerifierPort, openings OpeningBy
 	return &VerifiedNonFinalPoolNode{engine: engine, openings: openings, backend: backend}, nil
 }
 
+// SubmitUpdate validates a non-final state, submits it to the backend, and
+// requires the returned transaction ID, spend anchor, and sequence to match.
 func (node *VerifiedNonFinalPoolNode) SubmitUpdate(ctx context.Context, rawTx []byte) (*UpdateAcceptance, error) {
 	if node == nil {
 		return nil, fmt.Errorf("%w: node adapter is required", ErrInvalidEvidence)
@@ -81,6 +85,8 @@ func (node *VerifiedNonFinalPoolNode) SubmitUpdate(ctx context.Context, rawTx []
 	return &UpdateAcceptance{TxID: accepted.TxID, SpendTxID: accepted.SpendTxID, PaymentSequence: accepted.PaymentSequence}, nil
 }
 
+// SubmitFinal validates a final close or expired refund, submits it to the
+// backend, and requires the returned transaction ID to match the raw bytes.
 func (node *VerifiedNonFinalPoolNode) SubmitFinal(ctx context.Context, rawTx []byte) (Hash32, error) {
 	if node == nil {
 		return Hash32{}, fmt.Errorf("%w: node adapter is required", ErrInvalidEvidence)

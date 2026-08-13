@@ -1,6 +1,7 @@
-// Package arbitration 实现 v3 卖方仲裁签名工作流。
-// 仲裁工作流验证买方的最终授权和卖方候选交易，然后仅添加 Arbiter 签名；
-// 不负责内容定价、交易构造或接收 005 买方签名。
+// Package arbitration implements the BitFS v3 seller-arbitration signing workflow.
+// It verifies the buyer authorization and seller candidate transaction, then
+// adds only the arbiter signature. It does not price content, construct
+// transactions, or receive the 005 buyer signature.
 package arbitration
 
 import (
@@ -15,6 +16,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// MajorVersion is the current major version of the pool workflow protocol.
 const MajorVersion uint64 = 3
 
 var (
@@ -51,6 +53,7 @@ type ArbitrationRequest struct {
 	SellerTransactionSignature []byte
 }
 
+// ArbitrationResponse contains the arbiter decision signature and resulting payment transaction.
 type ArbitrationResponse struct {
 	Version                     uint64
 	PaymentAuthorizationHash    []byte
@@ -58,27 +61,32 @@ type ArbitrationResponse struct {
 	ArbiterTransactionSignature []byte
 }
 
-// PoolPort 是仲裁工作流所需的唯一交易能力端口。
-// 实现必须使用 MultisigPool 验证交易，不得修改候选交易或构造替代交易；
-// Seller 验证通过后，由 Arbiter 提供 Arbiter 角色签名。
+// PoolPort is the only transaction capability required by the arbitration
+// workflow. Implementations must verify transactions with MultisigPool,
+// never modify the candidate or construct a replacement, and provide the
+// arbiter role signature after seller verification succeeds.
 type PoolPort interface {
 	VerifyOpening(*pool.OpeningProof) error
 	VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
 	SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
 }
 
+// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
 type WorkflowConfig struct {
 	Signer                pool.Signer
 	Pool                  PoolPort
 	AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
+// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
 type Workflow struct {
 	signer                pool.Signer
 	pool                  PoolPort
 	authorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
+// NewWorkflow creates an arbiter workflow and requires its signer, payment-pool
+// verifier, and buyer-authorization verifier.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.Pool == nil || config.AuthorizationVerifier == nil {
 		return nil, errors.New("arbitration workflow requires an arbiter signer, an authorization verifier, and a pool verification and signing port")
@@ -86,6 +94,8 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	return &Workflow{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
 }
 
+// SignPayment verifies the opening proof, buyer authorization, candidate
+// transaction, and seller signature before returning an arbiter signature.
 func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationRequest) (*ArbitrationResponse, error) {
 	if workflow == nil {
 		return nil, errors.New("arbitration workflow is required")
@@ -127,6 +137,7 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	return &ArbitrationResponse{Version: MajorVersion, PaymentAuthorizationHash: authHash[:], UnsignedStateTxHash: txHash[:], ArbiterTransactionSignature: append([]byte(nil), arbiterSig...)}, nil
 }
 
+// MarshalRequest validates and encodes a five-field 007 arbitration request.
 func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 	if err := ValidateRequest(request); err != nil {
 		return nil, err
@@ -134,6 +145,7 @@ func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 	return arbitrationEnc.Marshal([]any{MajorVersion, request.PoolOpeningProofCBOR, request.PaymentAuthorizationCBOR, request.UnsignedStateTxRaw, request.SellerTransactionSignature})
 }
 
+// UnmarshalRequest strictly decodes and canonicalizes a 007 arbitration request.
 func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	values, err := decodeArray(data, 5)
 	if err != nil {
@@ -168,6 +180,7 @@ func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	return cloneRequest(request), nil
 }
 
+// MarshalResponse validates and encodes a four-field 007 arbitration response.
 func MarshalResponse(response *ArbitrationResponse) ([]byte, error) {
 	if err := ValidateResponse(response); err != nil {
 		return nil, err
@@ -175,6 +188,7 @@ func MarshalResponse(response *ArbitrationResponse) ([]byte, error) {
 	return arbitrationEnc.Marshal([]any{MajorVersion, response.PaymentAuthorizationHash, response.UnsignedStateTxHash, response.ArbiterTransactionSignature})
 }
 
+// UnmarshalResponse strictly decodes and canonicalizes a 007 arbitration response.
 func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	values, err := decodeArray(data, 4)
 	if err != nil {
@@ -206,6 +220,7 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	return cloneResponse(response), nil
 }
 
+// ValidateRequest checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateRequest(request *ArbitrationRequest) error {
 	if request == nil || request.Version != MajorVersion || len(request.PoolOpeningProofCBOR) == 0 || len(request.PaymentAuthorizationCBOR) == 0 || len(request.UnsignedStateTxRaw) == 0 || len(request.SellerTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration request is incomplete", pool.ErrInvalidEvidence)
@@ -213,6 +228,7 @@ func ValidateRequest(request *ArbitrationRequest) error {
 	return nil
 }
 
+// ValidateResponse checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateResponse(response *ArbitrationResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.PaymentAuthorizationHash) != sha256.Size || len(response.UnsignedStateTxHash) != sha256.Size || len(response.ArbiterTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration response is incomplete", pool.ErrInvalidEvidence)

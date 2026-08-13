@@ -33,6 +33,7 @@ type quoteStoreEntry struct {
 	Quote     *SignedFileQuote `json:"quote"`
 }
 
+// NewFileQuoteStore opens or creates a lock-protected quote snapshot at path.
 func NewFileQuoteStore(path string) (*FileQuoteStore, error) {
 	if path == "" {
 		return nil, fmt.Errorf("quote store path is required")
@@ -44,6 +45,7 @@ func NewFileQuoteStore(path string) (*FileQuoteStore, error) {
 	return store, nil
 }
 
+// SaveQuote validates and atomically persists a defensive copy keyed by its terms hash.
 func (store *FileQuoteStore) SaveQuote(_ context.Context, quote *SignedFileQuote) error {
 	if store == nil {
 		return fmt.Errorf("quote store is required")
@@ -77,6 +79,7 @@ func (store *FileQuoteStore) SaveQuote(_ context.Context, quote *SignedFileQuote
 	})
 }
 
+// LoadQuote reloads the snapshot under its process lock and returns a defensive copy.
 func (store *FileQuoteStore) LoadQuote(_ context.Context, termsHash Hash32) (*SignedFileQuote, error) {
 	if store == nil {
 		return nil, fmt.Errorf("quote store is required")

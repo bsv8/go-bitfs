@@ -20,7 +20,9 @@ type UnixSeconds int64
 type ContentType uint64
 
 const (
-	ContentSeed  ContentType = 0
+	// ContentSeed selects the seed payload in a content reference.
+	ContentSeed ContentType = 0
+	// ContentBlock identifies a block payload.
 	ContentBlock ContentType = 1
 )
 
@@ -73,6 +75,7 @@ type ContentTermsSigner func(termsCBOR []byte) ([]byte, error)
 // ContentTermsSignatureVerifier verifies a signature over exact bytes.
 type ContentTermsSignatureVerifier func(pubkey, termsCBOR, signature []byte) error
 
+// EncodeContentRequestTerms encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	if err := ValidateContentRequestTerms(terms); err != nil {
 		return nil, fmt.Errorf("%w: content request terms: %v", ErrInvalidEvidence, err)
@@ -94,6 +97,7 @@ func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	})
 }
 
+// DecodeContentRequestTerms decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	values, err := decodeArray(data, 13)
 	if err != nil {
@@ -153,6 +157,7 @@ func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	return cloneContentRequestTerms(terms), nil
 }
 
+// PaymentAuthorizationHash validates canonical request terms and returns their SHA-256 digest.
 func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	if _, err := DecodeContentRequestTerms(termsCBOR); err != nil {
 		return Hash32{}, err
@@ -160,6 +165,8 @@ func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	return Hash32(sha256.Sum256(termsCBOR)), nil
 }
 
+// NewSignedContentRequest deterministically encodes request terms and signs
+// those exact bytes with the buyer-supplied signer.
 func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSigner) (*SignedContentRequest, error) {
 	if signer == nil {
 		return nil, errors.New("content request signer is required")
@@ -181,6 +188,7 @@ func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSign
 	}, nil
 }
 
+// EncodeSignedContentRequest encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
 		return nil, errors.New("signed content request and buyer signature are required")
@@ -195,6 +203,7 @@ func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 	})
 }
 
+// DecodeSignedContentRequest decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -221,6 +230,7 @@ func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	return cloneSignedContentRequest(request), nil
 }
 
+// EncodeContentDeliveryTerms encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	if err := ValidateContentDeliveryTerms(terms); err != nil {
 		return nil, fmt.Errorf("%w: content delivery terms: %v", ErrInvalidEvidence, err)
@@ -232,6 +242,7 @@ func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	})
 }
 
+// DecodeContentDeliveryTerms decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -261,6 +272,7 @@ func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
 	return cloneContentDeliveryTerms(terms), nil
 }
 
+// ContentDeliveryTermsHash validates canonical delivery terms and returns their SHA-256 digest.
 func ContentDeliveryTermsHash(termsCBOR []byte) (Hash32, error) {
 	if _, err := DecodeContentDeliveryTerms(termsCBOR); err != nil {
 		return Hash32{}, err
@@ -268,6 +280,8 @@ func ContentDeliveryTermsHash(termsCBOR []byte) (Hash32, error) {
 	return Hash32(sha256.Sum256(termsCBOR)), nil
 }
 
+// NewSignedContentDelivery binds payload bytes to the request authorization
+// hash and signs the resulting deterministic delivery terms.
 func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, signer ContentTermsSigner) (*SignedContentDelivery, error) {
 	if signer == nil {
 		return nil, errors.New("content delivery signer is required")
@@ -296,6 +310,7 @@ func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sig
 	return &SignedContentDelivery{TermsCBOR: terms, SellerSignature: append([]byte(nil), signature...)}, nil
 }
 
+// EncodeSignedContentDelivery encodes its input as the protocol-defined deterministic CBOR array.
 func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error) {
 	if delivery == nil || len(delivery.SellerSignature) == 0 {
 		return nil, errors.New("signed content delivery and seller signature are required")
@@ -310,6 +325,7 @@ func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error
 	})
 }
 
+// DecodeSignedContentDelivery decodes deterministic CBOR and rejects malformed array lengths or field encodings.
 func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -336,6 +352,7 @@ func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	return cloneSignedContentDelivery(delivery), nil
 }
 
+// ValidateContentRequestTerms checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if terms == nil {
 		return errors.New("content request terms are required")
@@ -367,6 +384,7 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	return nil
 }
 
+// ValidateContentDeliveryTerms checks field lengths, versions, hashes, signatures, and transaction relationships.
 func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 	if terms == nil {
 		return errors.New("content delivery terms are required")

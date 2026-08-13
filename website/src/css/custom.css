@@ -1,0 +1,11 @@
+:root { --ifm-color-primary: #d59124; --ifm-color-primary-dark: #b77816; --ifm-background-color: #101214; --ifm-font-family-base: Inter, ui-sans-serif, system-ui, sans-serif; --ifm-heading-font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+[data-theme='light'] { --ifm-background-color: #f4f1eb; --ifm-font-color-base: #22211f; --ifm-navbar-background-color: #f4f1eb; }
+.navbar { border-bottom: 1px solid rgba(213,145,36,.24); box-shadow: none; }
+.navbar__title { letter-spacing: .08em; text-transform: uppercase; font-size: .82rem; }
+.theme-doc-markdown h1,.theme-doc-markdown h2,.theme-doc-markdown h3 { letter-spacing: -.03em; }
+.theme-doc-sidebar-container { border-right: 1px solid rgba(213,145,36,.18); }
+.footer { background: #0b0d0f; }
+.api-shell { max-width: 1400px; padding: 1rem 1.5rem 3rem; }.api-shell__notice { border-left: 3px solid var(--ifm-color-primary); padding: .8rem 1rem; margin-bottom: 1rem; color: var(--ifm-color-emphasis-700); }.api-shell__frame { width: 100%; min-height: 75vh; border: 1px solid rgba(213,145,36,.25); background: white; }
+.button--amber { background: #d59124; color: #17120a; border: 1px solid #d59124; }
+.button--amber:hover { background: #efad3b; color: #17120a; }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }

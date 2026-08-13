@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
           cache: true
 
       - name: Set up Node.js
@@ -32,6 +32,17 @@ jobs:
       - name: Install site dependencies
         run: npm ci
         working-directory: website
+
+      - name: Verify Go source
+        run: |
+          set -euo pipefail
+          files=$(gofmt -l $(find . -path './vendor' -prune -o -name '*.go' -print))
+          if [ -n "$files" ]; then
+            echo "Unformatted Go files:"
+            echo "$files"
+            exit 1
+          fi
+          go test ./...
 
       - name: Build source-driven documentation
         run: npm run build

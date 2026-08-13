@@ -33,6 +33,7 @@ type MultisigPoolAdapter struct {
 	ArbiterKey PrivateKeyProvider
 }
 
+// VerifyOpening verifies the referenced credentials, signatures, and transaction invariants before acceptance.
 func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 	if adapter == nil || adapter.Engine == nil {
 		return invalid("MultisigPool adapter requires an engine")
@@ -40,6 +41,7 @@ func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 	return adapter.Engine.VerifyOpening(proof)
 }
 
+// VerifyArbitrationCandidate verifies the referenced credentials, signatures, and transaction invariants before acceptance.
 func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context, raw []byte, proof *OpeningProof, terms *bitfs.ContentRequestTerms, sellerSig []byte) (*UnsignedPayment, error) {
 	if adapter == nil || adapter.Engine == nil || terms == nil {
 		return nil, invalid("arbitration candidate inputs are incomplete")
@@ -63,6 +65,7 @@ func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context
 	return unsigned, nil
 }
 
+// SignArbitrationCandidate signs the role-specific transaction or authorization bytes with the injected signer.
 func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context, raw []byte, proof *OpeningProof, _ Signer) ([]byte, error) {
 	if adapter == nil || adapter.Engine == nil || adapter.ArbiterKey == nil {
 		return nil, invalid("arbiter private-key provider is required")

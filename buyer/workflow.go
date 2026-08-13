@@ -27,7 +27,7 @@ type SeedSource interface {
 	LoadSeed(context.Context, bitfs.Hash32) ([]byte, error)
 }
 
-type ClientConfig struct {
+type WorkflowConfig struct {
 	Signer            pool.Signer
 	QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
 	SignatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -42,7 +42,7 @@ type ClientConfig struct {
 	SeedSource        SeedSource
 }
 
-type Client struct {
+type Workflow struct {
 	signer            pool.Signer
 	quoteVerifier     bitfs.QuoteTermsSignatureVerifier
 	signatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -57,14 +57,14 @@ type Client struct {
 	seedSource        SeedSource
 }
 
-func NewClient(config ClientConfig) (*Client, error) {
+func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.QuoteVerifier == nil || config.SignatureVerifier == nil || config.Quotes == nil || config.Pools == nil || config.Opening == nil || config.Participants == nil || config.Transactions == nil {
-		return nil, errors.New("buyer client requires signer, verifiers, quote, opening, participant, pool and transaction ports")
+		return nil, errors.New("buyer workflow requires signer, verifiers, quote, opening, participant, pool and transaction ports")
 	}
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
-	return &Client{
+	return &Workflow{
 		signer:            config.Signer,
 		quoteVerifier:     config.QuoteVerifier,
 		signatureVerifier: config.SignatureVerifier,
@@ -80,16 +80,16 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}, nil
 }
 
-func (client *Client) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQuote) (*bitfs.FileQuoteTerms, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQuote) (*bitfs.FileQuoteTerms, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
 	localQuote := bitfs.CloneSignedFileQuote(quote)
-	terms, err := bitfs.VerifySignedFileQuoteAt(localQuote, client.clock(), client.quoteVerifier)
+	terms, err := bitfs.VerifySignedFileQuoteAt(localQuote, workflow.clock(), workflow.quoteVerifier)
 	if err != nil {
 		return nil, err
 	}
-	if err := client.quotes.SaveQuote(ctx, localQuote); err != nil {
+	if err := workflow.quotes.SaveQuote(ctx, localQuote); err != nil {
 		return nil, fmt.Errorf("save quote: %w", err)
 	}
 	return terms, nil
@@ -99,32 +99,32 @@ func (client *Client) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQu
 // then records RefundTx as the initial accepted payment state (sequence 2,
 // seller amount 0).  The caller may reveal fundingTx only after this method
 // succeeds, matching the 002 message ordering.
-func (client *Client) AcceptRefundPresign(ctx context.Context, request *pool.RefundPresignRequest, response *pool.RefundPresignResponse, fundingTx []byte) (*pool.Reference, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, request *pool.RefundPresignRequest, response *pool.RefundPresignResponse, fundingTx []byte) (*pool.Reference, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
 	localRequest := pool.CloneRefundPresignRequest(request)
 	localResponse := pool.CloneRefundPresignResponse(response)
 	localFundingTx := append([]byte(nil), fundingTx...)
-	proof, err := pool.BuyerAcceptRefundPresign(ctx, localRequest, localResponse, localFundingTx, client.opening)
+	proof, err := pool.BuyerAcceptRefundPresign(ctx, localRequest, localResponse, localFundingTx, workflow.opening)
 	if err != nil {
 		return nil, err
 	}
-	if err := client.transactions.VerifyOpening(proof); err != nil {
+	if err := workflow.transactions.VerifyOpening(proof); err != nil {
 		return nil, fmt.Errorf("verify complete pool opening proof: %w", err)
 	}
-	initialRaw, err := client.transactions.BuildRefundSubmission(proof)
+	initialRaw, err := workflow.transactions.BuildRefundSubmission(proof)
 	if err != nil {
 		return nil, fmt.Errorf("assemble initial refund state: %w", err)
 	}
-	initial, err := client.transactions.ParsePaymentState(ctx, initialRaw, proof)
+	initial, err := workflow.transactions.ParsePaymentState(ctx, initialRaw, proof)
 	if err != nil {
 		return nil, fmt.Errorf("parse initial pool state: %w", err)
 	}
 	if initial.PaymentSequence != 2 || initial.SellerAmountSat != 0 || initial.ArbiterAmountSat != 0 {
 		return nil, fmt.Errorf("%w: refund transaction is not the initial pool state", pool.ErrInvalidEvidence)
 	}
-	if err := client.pools.SaveAcceptedPayment(ctx, initial); err != nil {
+	if err := workflow.pools.SaveAcceptedPayment(ctx, initial); err != nil {
 		return nil, fmt.Errorf("save initial pool state: %w", err)
 	}
 	return &pool.Reference{SpendTxID: initial.SpendTxID, BasePaymentSequence: initial.PaymentSequence}, nil
@@ -132,16 +132,16 @@ func (client *Client) AcceptRefundPresign(ctx context.Context, request *pool.Ref
 
 // PreparePoolOpening asks the transaction engine to build the generic 002
 // refund evidence. FundingTx remains caller-owned and is not submitted here.
-func (client *Client) PreparePoolOpening(ctx context.Context, input pool.OpeningInput) (*pool.RefundPresignRequest, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.OpeningInput) (*pool.RefundPresignRequest, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
-	return client.transactions.BuildRefundPresignRequest(ctx, pool.CloneOpeningInput(input), client.signer)
+	return workflow.transactions.BuildRefundPresignRequest(ctx, pool.CloneOpeningInput(input), workflow.signer)
 }
 
-func (client *Client) BuildFundingTxDelivery(fundingTx []byte) (*pool.FundingTxDelivery, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) BuildFundingTxDelivery(fundingTx []byte) (*pool.FundingTxDelivery, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
 	delivery := &pool.FundingTxDelivery{Version: pool.MajorVersion, FundingTx: append([]byte(nil), fundingTx...)}
 	if err := pool.ValidateFundingTxDelivery(delivery); err != nil {
@@ -154,50 +154,50 @@ func (client *Client) BuildFundingTxDelivery(fundingTx []byte) (*pool.FundingTxD
 // signatures into a broadcastable refund, and submits it. If a higher
 // accepted cumulative state exists, the non-final node remains authoritative
 // and this method refuses to bypass it.
-func (client *Client) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash32) (pool.Hash32, error) {
-	if client == nil {
-		return pool.Hash32{}, errors.New("buyer client is required")
+func (workflow *Workflow) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash32) (pool.Hash32, error) {
+	if workflow == nil {
+		return pool.Hash32{}, errors.New("buyer workflow is required")
 	}
-	if client.node == nil {
-		return pool.Hash32{}, errors.New("buyer client has no final pool node")
+	if workflow.node == nil {
+		return pool.Hash32{}, errors.New("buyer workflow has no final pool node")
 	}
-	opening, err := client.pools.LoadOpeningProof(ctx, spendTxID)
+	opening, err := workflow.pools.LoadOpeningProof(ctx, spendTxID)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
 	opening = pool.CloneOpeningProof(opening)
-	if err := client.transactions.VerifyRefundExpired(opening, client.clock()); err != nil {
+	if err := workflow.transactions.VerifyRefundExpired(opening, workflow.clock()); err != nil {
 		return pool.Hash32{}, err
 	}
-	latest, err := client.pools.LoadAcceptedPayment(ctx, spendTxID)
+	latest, err := workflow.pools.LoadAcceptedPayment(ctx, spendTxID)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
 	if latest != nil {
 		latest = pool.ClonePaymentState(latest)
-		if err := client.transactions.VerifyAcceptedPayment(latest, opening); err != nil {
+		if err := workflow.transactions.VerifyAcceptedPayment(latest, opening); err != nil {
 			return pool.Hash32{}, fmt.Errorf("verify stored pool state: %w", err)
 		}
 		if latest.PaymentSequence > 2 {
 			return pool.Hash32{}, fmt.Errorf("%w: a higher cumulative payment state already exists", pool.ErrNonFinalRejected)
 		}
 	}
-	unsignedRefund, err := client.transactions.BuildRefundSubmission(opening)
+	unsignedRefund, err := workflow.transactions.BuildRefundSubmission(opening)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
-	txID, err := client.transactions.TransactionID(opening.RefundTx)
+	txID, err := workflow.transactions.TransactionID(opening.RefundTx)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
 	if txID != spendTxID {
 		return pool.Hash32{}, fmt.Errorf("%w: stored opening proof does not match requested SpendTxID", pool.ErrInvalidEvidence)
 	}
-	submittedTxID, err := client.transactions.TransactionID(unsignedRefund)
+	submittedTxID, err := workflow.transactions.TransactionID(unsignedRefund)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
-	accepted, err := client.node.SubmitFinal(ctx, append([]byte(nil), unsignedRefund...))
+	accepted, err := workflow.node.SubmitFinal(ctx, append([]byte(nil), unsignedRefund...))
 	if err != nil {
 		return pool.Hash32{}, fmt.Errorf("%w: submit refund: %v", pool.ErrFinalRejected, err)
 	}
@@ -207,60 +207,60 @@ func (client *Client) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash
 	return submittedTxID, nil
 }
 
-func (client *Client) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.UnsignedPayment, []byte, error) {
-	if client == nil {
-		return nil, nil, errors.New("buyer client is required")
+func (workflow *Workflow) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.UnsignedPayment, []byte, error) {
+	if workflow == nil {
+		return nil, nil, errors.New("buyer workflow is required")
 	}
 	localInput := pool.CloneCloseInput(input)
-	unsigned, _, err := client.transactions.BuildImmediateClose(ctx, localInput)
+	unsigned, _, err := workflow.transactions.BuildImmediateClose(ctx, localInput)
 	if err != nil {
 		return nil, nil, err
 	}
-	buyerSig, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
+	buyerSig, err := workflow.transactions.SignBuyerPayment(ctx, unsigned, workflow.signer)
 	if err != nil {
 		return nil, nil, err
 	}
 	if unsigned == nil || unsigned.PaymentSequence != ^uint32(0) {
 		return nil, nil, fmt.Errorf("%w: immediate close is not final", pool.ErrInvalidEvidence)
 	}
-	if err := client.transactions.VerifyBuyerPayment(unsigned, buyerSig, localInput.Opening); err != nil {
+	if err := workflow.transactions.VerifyBuyerPayment(unsigned, buyerSig, localInput.Opening); err != nil {
 		return nil, nil, fmt.Errorf("verify immediate close: %w", err)
 	}
 	return unsigned, buyerSig, nil
 }
 
-func (client *Client) SubmitImmediateClose(ctx context.Context, close *pool.SignedPayment) (pool.Hash32, error) {
-	if client == nil {
-		return pool.Hash32{}, errors.New("buyer client is required")
+func (workflow *Workflow) SubmitImmediateClose(ctx context.Context, close *pool.SignedPayment) (pool.Hash32, error) {
+	if workflow == nil {
+		return pool.Hash32{}, errors.New("buyer workflow is required")
 	}
-	if client.node == nil {
-		return pool.Hash32{}, errors.New("buyer client has no final pool node")
+	if workflow.node == nil {
+		return pool.Hash32{}, errors.New("buyer workflow has no final pool node")
 	}
 	localClose := pool.CloneSignedPayment(close)
 	if localClose == nil || localClose.State.PaymentSequence != ^uint32(0) || len(localClose.RawTx) == 0 || !bytes.Equal(localClose.State.RawTx, localClose.RawTx) {
 		return pool.Hash32{}, fmt.Errorf("%w: final signed payment is required", pool.ErrInvalidEvidence)
 	}
-	opening, err := client.pools.LoadOpeningProof(ctx, localClose.State.SpendTxID)
+	opening, err := workflow.pools.LoadOpeningProof(ctx, localClose.State.SpendTxID)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
 	opening = pool.CloneOpeningProof(opening)
-	if err := client.transactions.VerifyCompletedFinalPayment(localClose, opening); err != nil {
+	if err := workflow.transactions.VerifyCompletedFinalPayment(localClose, opening); err != nil {
 		return pool.Hash32{}, fmt.Errorf("verify final payment: %w", err)
 	}
-	txID, err := client.transactions.TransactionID(localClose.RawTx)
+	txID, err := workflow.transactions.TransactionID(localClose.RawTx)
 	if err != nil {
 		return pool.Hash32{}, err
 	}
-	accepted, err := client.node.SubmitFinal(ctx, append([]byte(nil), localClose.RawTx...))
+	accepted, err := workflow.node.SubmitFinal(ctx, append([]byte(nil), localClose.RawTx...))
 	if err != nil {
 		return pool.Hash32{}, fmt.Errorf("%w: %v", pool.ErrFinalRejected, err)
 	}
 	if accepted != txID {
 		return pool.Hash32{}, fmt.Errorf("%w: final node returned inconsistent transaction ID", pool.ErrInvalidEvidence)
 	}
-	if err := client.pools.SaveAcceptedPayment(ctx, &localClose.State); err != nil {
-		markErr := client.pools.MarkExternalStateUncertain(ctx, localClose.State.SpendTxID, txID)
+	if err := workflow.pools.SaveAcceptedPayment(ctx, &localClose.State); err != nil {
+		markErr := workflow.pools.MarkExternalStateUncertain(ctx, localClose.State.SpendTxID, txID)
 		uncertain := fmt.Errorf("%w: local persistence failed after final node acceptance", pool.ErrPoolStateUncertain)
 		if markErr != nil {
 			return pool.Hash32{}, errors.Join(uncertain, err, markErr)
@@ -279,25 +279,25 @@ type ContentRequestInput struct {
 	DeliveryDeadline      bitfs.UnixSeconds
 }
 
-func (client *Client) RequestContent(ctx context.Context, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) RequestContent(ctx context.Context, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
-	if err := client.pools.EnsurePoolHealthy(ctx, input.Pool.SpendTxID); err != nil {
+	if err := workflow.pools.EnsurePoolHealthy(ctx, input.Pool.SpendTxID); err != nil {
 		return nil, err
 	}
 	selectedArbiter := append([]byte(nil), input.SelectedArbiterPubKey...)
 	contentHash := append([]byte(nil), input.Content.Hash...)
-	quote, err := client.quotes.LoadQuote(ctx, input.QuoteTermsHash)
+	quote, err := workflow.quotes.LoadQuote(ctx, input.QuoteTermsHash)
 	if err != nil {
 		return nil, fmt.Errorf("load quote: %w", err)
 	}
 	quote = bitfs.CloneSignedFileQuote(quote)
-	terms, err := bitfs.VerifySignedFileQuoteAt(quote, client.clock(), client.quoteVerifier)
+	terms, err := bitfs.VerifySignedFileQuoteAt(quote, workflow.clock(), workflow.quoteVerifier)
 	if err != nil {
 		return nil, err
 	}
-	publicKey, err := client.signer.PublicKey(ctx)
+	publicKey, err := workflow.signer.PublicKey(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load buyer public key: %w", err)
 	}
@@ -310,21 +310,21 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 	if len(contentHash) != sha256.Size {
 		return nil, fmt.Errorf("%w: content hash must be 32 bytes", bitfs.ErrInvalidEvidence)
 	}
-	if input.DeliveryDeadline <= bitfs.UnixSeconds(client.clock().Unix()) {
+	if input.DeliveryDeadline <= bitfs.UnixSeconds(workflow.clock().Unix()) {
 		return nil, fmt.Errorf("%w: delivery deadline is not in the future", bitfs.ErrDeliveryDeadline)
 	}
-	opening, err := client.pools.LoadOpeningProof(ctx, input.Pool.SpendTxID)
+	opening, err := workflow.pools.LoadOpeningProof(ctx, input.Pool.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load pool opening proof: %w", err)
 	}
 	opening = pool.CloneOpeningProof(opening)
-	if err := client.transactions.VerifyOpening(opening); err != nil {
+	if err := workflow.transactions.VerifyOpening(opening); err != nil {
 		return nil, fmt.Errorf("verify pool opening proof: %w", err)
 	}
-	if err := client.participants.VerifyPoolParticipants(opening, terms.BuyerPubkey, quote.SellerPubkey, selectedArbiter); err != nil {
+	if err := workflow.participants.VerifyPoolParticipants(opening, terms.BuyerPubkey, quote.SellerPubkey, selectedArbiter); err != nil {
 		return nil, fmt.Errorf("verify pool participants: %w", err)
 	}
-	previous, err := client.pools.LoadAcceptedPayment(ctx, input.Pool.SpendTxID)
+	previous, err := workflow.pools.LoadAcceptedPayment(ctx, input.Pool.SpendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load accepted payment: %w", err)
 	}
@@ -332,10 +332,10 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 		return nil, bitfs.ErrStalePaymentSequence
 	}
 	previous = pool.ClonePaymentState(previous)
-	if err := client.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
+	if err := workflow.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	seed, err := client.seedForContent(ctx, terms, bitfs.ContentRef{Type: input.Content.Type, Hash: contentHash})
+	seed, err := workflow.seedForContent(ctx, terms, bitfs.ContentRef{Type: input.Content.Type, Hash: contentHash})
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 	if err != nil {
 		return nil, err
 	}
-	signature, err := client.signer.Sign(ctx, raw)
+	signature, err := workflow.signer.Sign(ctx, raw)
 	if err != nil {
 		return nil, fmt.Errorf("sign content request: %w", err)
 	}
@@ -385,9 +385,9 @@ func (client *Client) RequestContent(ctx context.Context, input ContentRequestIn
 	return &bitfs.SignedContentRequest{TermsCBOR: raw, BuyerSignature: append([]byte(nil), signature...)}, nil
 }
 
-func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery) (*pool.PaymentUpdate, error) {
-	if client == nil {
-		return nil, errors.New("buyer client is required")
+func (workflow *Workflow) AcceptDelivery(ctx context.Context, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery) (*pool.PaymentUpdate, error) {
+	if workflow == nil {
+		return nil, errors.New("buyer workflow is required")
 	}
 	localRequest := bitfs.CloneSignedContentRequest(request)
 	localDelivery := bitfs.CloneSignedContentDelivery(delivery)
@@ -399,7 +399,7 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 		return nil, err
 	}
 	quoteHash := hash32(requestTerms.QuoteTermsHash)
-	quote, err := client.quotes.LoadQuote(ctx, quoteHash)
+	quote, err := workflow.quotes.LoadQuote(ctx, quoteHash)
 	if err != nil {
 		return nil, fmt.Errorf("load quote: %w", err)
 	}
@@ -408,30 +408,30 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 	if err != nil {
 		return nil, err
 	}
-	seed, err := client.seedForContent(ctx, quoteTerms, bitfs.ContentRef{Type: requestTerms.ContentType, Hash: requestTerms.ContentHash})
+	seed, err := workflow.seedForContent(ctx, quoteTerms, bitfs.ContentRef{Type: requestTerms.ContentType, Hash: requestTerms.ContentHash})
 	if err != nil {
 		return nil, err
 	}
-	payload, err := bitfs.VerifySignedContentDeliveryWithSeedAt(localRequest, localDelivery, quote, seed, client.clock(), client.quoteVerifier, client.signatureVerifier, client.signatureVerifier)
+	payload, err := bitfs.VerifySignedContentDeliveryWithSeedAt(localRequest, localDelivery, quote, seed, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier, workflow.signatureVerifier)
 	if err != nil {
 		return nil, err
 	}
 	spendTxID := poolHash32(requestTerms.SpendTxID)
-	if err := client.pools.EnsurePoolHealthy(ctx, spendTxID); err != nil {
+	if err := workflow.pools.EnsurePoolHealthy(ctx, spendTxID); err != nil {
 		return nil, err
 	}
-	opening, err := client.pools.LoadOpeningProof(ctx, spendTxID)
+	opening, err := workflow.pools.LoadOpeningProof(ctx, spendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load pool opening proof: %w", err)
 	}
 	opening = pool.CloneOpeningProof(opening)
-	if err := client.transactions.VerifyOpening(opening); err != nil {
+	if err := workflow.transactions.VerifyOpening(opening); err != nil {
 		return nil, fmt.Errorf("verify pool opening proof: %w", err)
 	}
-	if err := client.participants.VerifyPoolParticipants(opening, quoteTerms.BuyerPubkey, quote.SellerPubkey, requestTerms.SelectedArbiterPubkey); err != nil {
+	if err := workflow.participants.VerifyPoolParticipants(opening, quoteTerms.BuyerPubkey, quote.SellerPubkey, requestTerms.SelectedArbiterPubkey); err != nil {
 		return nil, fmt.Errorf("verify pool participants: %w", err)
 	}
-	previous, err := client.pools.LoadAcceptedPayment(ctx, spendTxID)
+	previous, err := workflow.pools.LoadAcceptedPayment(ctx, spendTxID)
 	if err != nil {
 		return nil, fmt.Errorf("load accepted payment: %w", err)
 	}
@@ -439,7 +439,7 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 		return nil, bitfs.ErrStalePaymentSequence
 	}
 	previous = pool.ClonePaymentState(previous)
-	if err := client.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
+	if err := workflow.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
 	if requestTerms.PaymentSequenceAfter != uint64(previous.PaymentSequence+1) || requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
@@ -454,25 +454,25 @@ func (client *Client) AcceptDelivery(ctx context.Context, request *bitfs.SignedC
 		PaymentSequenceAfter: previous.PaymentSequence + 1,
 		SellerAmountAfterSat: requestTerms.SellerAmountAfterSat,
 	}
-	if err := client.transactions.CheckPaymentCapacity(ctx, input); err != nil {
+	if err := workflow.transactions.CheckPaymentCapacity(ctx, input); err != nil {
 		return nil, err
 	}
-	unsigned, err := client.transactions.BuildPaymentUpdate(ctx, input)
+	unsigned, err := workflow.transactions.BuildPaymentUpdate(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("build payment update: %w", err)
 	}
-	buyerSig, err := client.transactions.SignBuyerPayment(ctx, unsigned, client.signer)
+	buyerSig, err := workflow.transactions.SignBuyerPayment(ctx, unsigned, workflow.signer)
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
 	}
-	if err := client.transactions.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
+	if err := workflow.transactions.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer payment: %w", err)
 	}
 	if unsigned == nil || unsigned.SpendTxID != spendTxID || unsigned.PaymentSequence <= previous.PaymentSequence {
 		return nil, fmt.Errorf("%w: signed payment state is stale", bitfs.ErrStalePaymentSequence)
 	}
-	if client.contentSink != nil {
-		if err := client.contentSink.SaveVerifiedContent(ctx, hash32(requestTerms.ContentHash), payload); err != nil {
+	if workflow.contentSink != nil {
+		if err := workflow.contentSink.SaveVerifiedContent(ctx, hash32(requestTerms.ContentHash), payload); err != nil {
 			return nil, fmt.Errorf("save verified content: %w", err)
 		}
 	}
@@ -513,15 +513,15 @@ func quoteAllowsArbiter(terms *bitfs.FileQuoteTerms, wanted []byte) bool {
 	return false
 }
 
-func (client *Client) seedForContent(ctx context.Context, quoteTerms *bitfs.FileQuoteTerms, content bitfs.ContentRef) ([]byte, error) {
+func (workflow *Workflow) seedForContent(ctx context.Context, quoteTerms *bitfs.FileQuoteTerms, content bitfs.ContentRef) ([]byte, error) {
 	if content.Type == bitfs.ContentSeed {
 		return nil, nil
 	}
-	if client.seedSource == nil {
+	if workflow.seedSource == nil {
 		return nil, fmt.Errorf("%w: a verified seed is required before requesting a block", bitfs.ErrContentNotInSeed)
 	}
 	seedHash := hash32(quoteTerms.SeedHash)
-	seed, err := client.seedSource.LoadSeed(ctx, seedHash)
+	seed, err := workflow.seedSource.LoadSeed(ctx, seedHash)
 	if err != nil {
 		return nil, fmt.Errorf("load verified seed: %w", err)
 	}

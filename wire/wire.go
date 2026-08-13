@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bsv8/go-bitfs/arbiter"
+	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
 )
@@ -83,17 +83,17 @@ func Marshal(kind Kind, message any) (Packet, error) {
 		}
 		raw, err = pool.EncodePaymentUpdate(value)
 	case ArbitrationRequest:
-		value, ok := message.(*arbiter.PaymentSignatureRequest)
+		value, ok := message.(*arbitration.ArbitrationRequest)
 		if !ok {
-			return Packet{}, fmt.Errorf("wire kind %d requires *arbiter.PaymentSignatureRequest", kind)
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ArbitrationRequest", kind)
 		}
-		raw, err = arbiter.MarshalRequest(value)
+		raw, err = arbitration.MarshalRequest(value)
 	case ArbitrationResponse:
-		value, ok := message.(*arbiter.PaymentSignatureResponse)
+		value, ok := message.(*arbitration.ArbitrationResponse)
 		if !ok {
-			return Packet{}, fmt.Errorf("wire kind %d requires *arbiter.PaymentSignatureResponse", kind)
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ArbitrationResponse", kind)
 		}
-		raw, err = arbiter.MarshalResponse(value)
+		raw, err = arbitration.MarshalResponse(value)
 	default:
 		return Packet{}, fmt.Errorf("unsupported new wire kind %d", kind)
 	}
@@ -123,9 +123,9 @@ func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 	case CumulativePayment:
 		return pool.DecodePaymentUpdate(rawCBOR)
 	case ArbitrationRequest:
-		return arbiter.UnmarshalRequest(rawCBOR)
+		return arbitration.UnmarshalRequest(rawCBOR)
 	case ArbitrationResponse:
-		return arbiter.UnmarshalResponse(rawCBOR)
+		return arbitration.UnmarshalResponse(rawCBOR)
 	default:
 		return nil, fmt.Errorf("unsupported new wire kind %d", kind)
 	}
@@ -222,28 +222,28 @@ func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error) {
 	return message.(*pool.PaymentUpdate), nil
 }
 
-func MarshalArbitrationRequest(message *arbiter.PaymentSignatureRequest) ([]byte, error) {
+func MarshalArbitrationRequest(message *arbitration.ArbitrationRequest) ([]byte, error) {
 	packet, err := Marshal(ArbitrationRequest, message)
 	return packet.CBOR, err
 }
 
-func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbiter.PaymentSignatureRequest, error) {
+func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbitration.ArbitrationRequest, error) {
 	message, err := Unmarshal(ArbitrationRequest, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return message.(*arbiter.PaymentSignatureRequest), nil
+	return message.(*arbitration.ArbitrationRequest), nil
 }
 
-func MarshalArbitrationResponse(message *arbiter.PaymentSignatureResponse) ([]byte, error) {
+func MarshalArbitrationResponse(message *arbitration.ArbitrationResponse) ([]byte, error) {
 	packet, err := Marshal(ArbitrationResponse, message)
 	return packet.CBOR, err
 }
 
-func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbiter.PaymentSignatureResponse, error) {
+func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationResponse, error) {
 	message, err := Unmarshal(ArbitrationResponse, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return message.(*arbiter.PaymentSignatureResponse), nil
+	return message.(*arbitration.ArbitrationResponse), nil
 }

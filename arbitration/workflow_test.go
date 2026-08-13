@@ -1,9 +1,10 @@
-package arbiter
+package arbitration
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -23,6 +24,13 @@ func TestV3ArbitrationRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expected, err := hex.DecodeString("8503420102420304420506420708")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("request CBOR changed: %x", raw)
+	}
 	decoded, err := UnmarshalRequest(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +48,13 @@ func TestV3ArbitrationResponseBindsTwoHashes(t *testing.T) {
 	raw, err := MarshalResponse(response)
 	if err != nil {
 		t.Fatal(err)
+	}
+	expected, err := hex.DecodeString("840358200101010101010101010101010101010101010101010101010101010101010101582002020202020202020202020202020202020202020202020202020202020202024103")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("response CBOR changed: %x", raw)
 	}
 	decoded, err := UnmarshalResponse(raw)
 	if err != nil {
@@ -73,7 +88,7 @@ func (p testArbitrationPool) SignArbitrationCandidate(context.Context, []byte, *
 
 func TestSignPaymentRejectsInvalidBuyerAuthorization(t *testing.T) {
 	proofCBOR, authorization := testArbitrationEvidence(t)
-	service, err := NewService(ServiceConfig{
+	workflow, err := NewWorkflow(WorkflowConfig{
 		Signer:                testArbitrationSigner{},
 		Pool:                  testArbitrationPool{},
 		AuthorizationVerifier: func(_, _, signature []byte) error { return errors.New("invalid buyer signature") },
@@ -81,7 +96,7 @@ func TestSignPaymentRejectsInvalidBuyerAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.SignPayment(context.Background(), &ArbitrationRequest{
+	_, err = workflow.SignPayment(context.Background(), &ArbitrationRequest{
 		Version: MajorVersion, PoolOpeningProofCBOR: proofCBOR,
 		PaymentAuthorizationCBOR: authorization, UnsignedStateTxRaw: []byte{7}, SellerTransactionSignature: []byte{8},
 	})
@@ -92,7 +107,7 @@ func TestSignPaymentRejectsInvalidBuyerAuthorization(t *testing.T) {
 
 func TestSignPaymentRejectsCandidateValidationFailure(t *testing.T) {
 	proofCBOR, authorization := testArbitrationEvidence(t)
-	service, err := NewService(ServiceConfig{
+	workflow, err := NewWorkflow(WorkflowConfig{
 		Signer:                testArbitrationSigner{},
 		Pool:                  testArbitrationPool{candidateErr: errors.New("third output")},
 		AuthorizationVerifier: func(_, _, _ []byte) error { return nil },
@@ -100,7 +115,7 @@ func TestSignPaymentRejectsCandidateValidationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.SignPayment(context.Background(), &ArbitrationRequest{
+	_, err = workflow.SignPayment(context.Background(), &ArbitrationRequest{
 		Version: MajorVersion, PoolOpeningProofCBOR: proofCBOR,
 		PaymentAuthorizationCBOR: authorization, UnsignedStateTxRaw: []byte{7}, SellerTransactionSignature: []byte{8},
 	})

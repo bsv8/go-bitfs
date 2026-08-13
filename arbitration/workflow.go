@@ -1,8 +1,7 @@
-// Package arbiter implements the v3 seller-arbitration signature workflow.
-// The arbiter validates the buyer's final authorization and the seller's
-// candidate transaction, then adds only the Arbiter signature. It never prices
-// content, constructs a transaction, or receives a 005 buyer signature.
-package arbiter
+// Package arbitration 实现 v3 卖方仲裁签名工作流。
+// 仲裁工作流验证买方的最终授权和卖方候选交易，然后仅添加 Arbiter 签名；
+// 不负责内容定价、交易构造或接收 005 买方签名。
+package arbitration
 
 import (
 	"bytes"
@@ -19,17 +18,17 @@ import (
 const MajorVersion uint64 = 3
 
 var (
-	arbiterEnc cbor.EncMode
-	arbiterDec cbor.DecMode
+	arbitrationEnc cbor.EncMode
+	arbitrationDec cbor.DecMode
 )
 
 func init() {
 	var err error
-	arbiterEnc, err = cbor.CoreDetEncOptions().EncMode()
+	arbitrationEnc, err = cbor.CoreDetEncOptions().EncMode()
 	if err != nil {
 		panic(err)
 	}
-	arbiterDec, err = cbor.DecOptions{
+	arbitrationDec, err = cbor.DecOptions{
 		IndefLength:      cbor.IndefLengthForbidden,
 		TagsMd:           cbor.TagsForbidden,
 		MaxNestedLevels:  16,
@@ -52,10 +51,6 @@ type ArbitrationRequest struct {
 	SellerTransactionSignature []byte
 }
 
-// PaymentSignatureRequest is retained as the public workflow name; it is
-// exactly the v3 arbitration request, not a second message model.
-type PaymentSignatureRequest = ArbitrationRequest
-
 type ArbitrationResponse struct {
 	Version                     uint64
 	PaymentAuthorizationHash    []byte
@@ -63,40 +58,37 @@ type ArbitrationResponse struct {
 	ArbiterTransactionSignature []byte
 }
 
-type PaymentSignatureResponse = ArbitrationResponse
-
-// PoolVerifier is the only transaction capability required by the arbiter.
-// Implementations must validate the transaction using MultisigPool and must
-// not mutate the candidate or construct a replacement transaction. The
-// arbiter contributes the Arbiter role signature after Seller verification.
-type PoolVerifier interface {
+// PoolPort 是仲裁工作流所需的唯一交易能力端口。
+// 实现必须使用 MultisigPool 验证交易，不得修改候选交易或构造替代交易；
+// Seller 验证通过后，由 Arbiter 提供 Arbiter 角色签名。
+type PoolPort interface {
 	VerifyOpening(*pool.OpeningProof) error
 	VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
 	SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
 }
 
-type ServiceConfig struct {
+type WorkflowConfig struct {
 	Signer                pool.Signer
-	Pool                  PoolVerifier
+	Pool                  PoolPort
 	AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
-type Service struct {
+type Workflow struct {
 	signer                pool.Signer
-	pool                  PoolVerifier
+	pool                  PoolPort
 	authorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
-func NewService(config ServiceConfig) (*Service, error) {
+func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.Pool == nil || config.AuthorizationVerifier == nil {
-		return nil, errors.New("arbiter service requires arbiter signer, authorization verifier and MultisigPool verifier")
+		return nil, errors.New("arbitration workflow requires an arbiter signer, an authorization verifier, and a pool verification and signing port")
 	}
-	return &Service{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
+	return &Workflow{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
 }
 
-func (service *Service) SignPayment(ctx context.Context, request *ArbitrationRequest) (*ArbitrationResponse, error) {
-	if service == nil {
-		return nil, errors.New("arbiter service is required")
+func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationRequest) (*ArbitrationResponse, error) {
+	if workflow == nil {
+		return nil, errors.New("arbitration workflow is required")
 	}
 	request = cloneRequest(request)
 	if err := ValidateRequest(request); err != nil {
@@ -106,24 +98,24 @@ func (service *Service) SignPayment(ctx context.Context, request *ArbitrationReq
 	if err != nil {
 		return nil, fmt.Errorf("decode opening proof: %w", err)
 	}
-	if err := service.pool.VerifyOpening(proof); err != nil {
+	if err := workflow.pool.VerifyOpening(proof); err != nil {
 		return nil, fmt.Errorf("verify opening proof: %w", err)
 	}
 	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("decode payment authorization: %w", err)
 	}
-	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, service.authorizationVerifier)
+	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, workflow.authorizationVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("verify payment authorization: %w", err)
 	}
 	if err := ensureAuthorizationPool(terms, proof); err != nil {
 		return nil, err
 	}
-	if _, err := service.pool.VerifyArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, terms, request.SellerTransactionSignature); err != nil {
+	if _, err := workflow.pool.VerifyArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, terms, request.SellerTransactionSignature); err != nil {
 		return nil, fmt.Errorf("verify arbitration candidate: %w", err)
 	}
-	arbiterSig, err := service.pool.SignArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, service.signer)
+	arbiterSig, err := workflow.pool.SignArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, workflow.signer)
 	if err != nil {
 		return nil, fmt.Errorf("sign arbitration candidate: %w", err)
 	}
@@ -139,7 +131,7 @@ func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 	if err := ValidateRequest(request); err != nil {
 		return nil, err
 	}
-	return arbiterEnc.Marshal([]any{MajorVersion, request.PoolOpeningProofCBOR, request.PaymentAuthorizationCBOR, request.UnsignedStateTxRaw, request.SellerTransactionSignature})
+	return arbitrationEnc.Marshal([]any{MajorVersion, request.PoolOpeningProofCBOR, request.PaymentAuthorizationCBOR, request.UnsignedStateTxRaw, request.SellerTransactionSignature})
 }
 
 func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
@@ -148,19 +140,19 @@ func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 		return nil, fmt.Errorf("%w: decode arbitration request: %v", pool.ErrInvalidEvidence, err)
 	}
 	request := new(ArbitrationRequest)
-	if err := arbiterDec.Unmarshal(values[0], &request.Version); err != nil || request.Version != MajorVersion {
+	if err := arbitrationDec.Unmarshal(values[0], &request.Version); err != nil || request.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported arbitration request version", pool.ErrInvalidEvidence)
 	}
-	if err := arbiterDec.Unmarshal(values[1], &request.PoolOpeningProofCBOR); err != nil {
+	if err := arbitrationDec.Unmarshal(values[1], &request.PoolOpeningProofCBOR); err != nil {
 		return nil, err
 	}
-	if err := arbiterDec.Unmarshal(values[2], &request.PaymentAuthorizationCBOR); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &request.PaymentAuthorizationCBOR); err != nil {
 		return nil, err
 	}
-	if err := arbiterDec.Unmarshal(values[3], &request.UnsignedStateTxRaw); err != nil {
+	if err := arbitrationDec.Unmarshal(values[3], &request.UnsignedStateTxRaw); err != nil {
 		return nil, err
 	}
-	if err := arbiterDec.Unmarshal(values[4], &request.SellerTransactionSignature); err != nil {
+	if err := arbitrationDec.Unmarshal(values[4], &request.SellerTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateRequest(request); err != nil {
@@ -180,7 +172,7 @@ func MarshalResponse(response *ArbitrationResponse) ([]byte, error) {
 	if err := ValidateResponse(response); err != nil {
 		return nil, err
 	}
-	return arbiterEnc.Marshal([]any{MajorVersion, response.PaymentAuthorizationHash, response.UnsignedStateTxHash, response.ArbiterTransactionSignature})
+	return arbitrationEnc.Marshal([]any{MajorVersion, response.PaymentAuthorizationHash, response.UnsignedStateTxHash, response.ArbiterTransactionSignature})
 }
 
 func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
@@ -189,16 +181,16 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 		return nil, fmt.Errorf("%w: decode arbitration response: %v", pool.ErrInvalidEvidence, err)
 	}
 	response := new(ArbitrationResponse)
-	if err := arbiterDec.Unmarshal(values[0], &response.Version); err != nil || response.Version != MajorVersion {
+	if err := arbitrationDec.Unmarshal(values[0], &response.Version); err != nil || response.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported arbitration response version", pool.ErrInvalidEvidence)
 	}
-	if err := arbiterDec.Unmarshal(values[1], &response.PaymentAuthorizationHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[1], &response.PaymentAuthorizationHash); err != nil {
 		return nil, err
 	}
-	if err := arbiterDec.Unmarshal(values[2], &response.UnsignedStateTxHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &response.UnsignedStateTxHash); err != nil {
 		return nil, err
 	}
-	if err := arbiterDec.Unmarshal(values[3], &response.ArbiterTransactionSignature); err != nil {
+	if err := arbitrationDec.Unmarshal(values[3], &response.ArbiterTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateResponse(response); err != nil {
@@ -249,7 +241,7 @@ func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.Openi
 
 func decodeArray(data []byte, length int) ([]cbor.RawMessage, error) {
 	var values []cbor.RawMessage
-	if err := arbiterDec.Unmarshal(data, &values); err != nil {
+	if err := arbitrationDec.Unmarshal(data, &values); err != nil {
 		return nil, err
 	}
 	if len(values) != length {

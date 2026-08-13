@@ -2,7 +2,7 @@
 
 返回 [SDK API 框架入口](SDK-API框架设计.md)。
 
-当前代码已落地本页的核心边界：`bitfs`、`pool`、`buyer.Client`、`seller.Service`、`arbiter.Service` 和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
+当前代码已落地本页的核心边界：`bitfs`、`pool`、`buyer.Workflow`、`seller.Workflow`、`arbitration.Workflow` 和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
 
 ## 设计目标
 
@@ -27,7 +27,7 @@ bitfs/       001、003、004 的凭证、CBOR、签名和内容校验
 pool/        002、005、006 的通用 2-of-3 费用池与 BSV 交易校验
 buyer/       买方工作流门面，只产生下一步应发送的凭证或交易
 seller/      卖方工作流门面，负责交付门闩、验收并推进远期交易
-arbiter/     007 仲裁证据校验和交易签名门面
+arbitration/     007 仲裁证据校验和交易签名门面
 wire/        所有新协议报文的 deterministic CBOR 编码、严格解码和类型分派
 transport/   可选的调用方适配层；SDK 核心不依赖它
 ```
@@ -124,10 +124,10 @@ func MarshalContentDelivery(message *bitfs.SignedContentDelivery) ([]byte, error
 func UnmarshalContentDelivery(rawCBOR []byte) (*bitfs.SignedContentDelivery, error)
 func MarshalPaymentUpdate(message *pool.PaymentUpdate) ([]byte, error)
 func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error)
-func MarshalArbitrationRequest(message *arbiter.PaymentSignatureRequest) ([]byte, error)
-func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbiter.PaymentSignatureRequest, error)
-func MarshalArbitrationResponse(message *arbiter.PaymentSignatureResponse) ([]byte, error)
-func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbiter.PaymentSignatureResponse, error)
+func MarshalArbitrationRequest(message *arbitration.ArbitrationRequest) ([]byte, error)
+func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbitration.ArbitrationRequest, error)
+func MarshalArbitrationResponse(message *arbitration.ArbitrationResponse) ([]byte, error)
+func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationResponse, error)
 ```
 
 006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。

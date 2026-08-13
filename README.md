@@ -18,7 +18,7 @@ BitFS v3 的 Go 协议真值库，覆盖文件交换、自动仲裁与 MultisigP
 
 001 的报价凭证保持独立版本；002/005/006/007 使用 v3 major，003/004 使用 v3 内容凭证。当前 CDDL 位于 `spec/v3/`，原始 BSV 交易字节仍按 Bitcoin 交易序列化规则编码。交易脚本、费用、签名和状态构造的唯一真值是发布版 `github.com/bsv8/MultisigPool/v4 v4.0.0`，节点/WoC 仍通过接口注入。
 
-面向应用开发者的公开 Go API 设计见 [`SDK API 框架设计`](docs/sdk/SDK-API框架设计.md)，对应代码已拆成 `buyer.Client`、`seller.Service`、`pool`、`arbiter` 和 `wire` 包。费用池交易语义由 MultisigPool 提供，数据库、钱包和非最终交易池仍通过接口注入。
+面向应用开发者的公开 Go API 设计见 [`SDK API 框架设计`](docs/sdk/SDK-API框架设计.md)，对应代码已拆成 `buyer.Workflow`、`seller.Workflow`、`pool`、`arbitration` 和 `wire` 包。费用池交易语义由 MultisigPool 提供，数据库、钱包和非最终交易池仍通过接口注入。
 
 执行测试：
 
@@ -31,4 +31,4 @@ go test ./...
 - `bitfs/`：报价、003/004 内容凭证、seed、哈希和证据校验；
 - `pool/`：独立的 002/005/006 费用池状态机、交易引擎、持久化端口和内存参考实现；
 - `buyer/`、`seller/`：v3 协议角色工作流；历史会话运行时已从当前构建删除；
-- `arbiter/`、`wire/`：007 仲裁证据签名服务和新协议报文分派。
+- `arbitration/`、`wire/`：007 仲裁证据签名工作流和新协议报文分派。

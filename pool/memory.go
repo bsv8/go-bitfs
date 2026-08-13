@@ -34,7 +34,9 @@ type MemoryStore struct {
 	uncertain         map[Hash32]Hash32
 }
 
-// NewMemoryStore requires a transaction ID calculator and returns a concurrency-safe in-memory pool store.
+// NewMemoryStore requires a non-nil transaction ID calculator and returns an
+// empty concurrency-safe store for opening proofs, payments, health markers,
+// and pending delivery leases.
 func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
 	if calculator == nil {
 		return nil, fmt.Errorf("%w: transaction ID calculator is required", ErrInvalidEvidence)
@@ -108,7 +110,9 @@ func (store *MemoryStore) LoadOpeningProofByFundingTxID(_ context.Context, fundi
 	return cloneOpeningProof(store.openingsByFunding[fundingTxID]), nil
 }
 
-// SaveAcceptedPayment stores a payment by spend transaction ID and rejects sequence rollback or conflicting same-sequence state.
+// SaveAcceptedPayment stores state by SpendTxID. It rejects lower payment
+// sequences and conflicting bytes at the same sequence, preserving monotonic
+// accepted state for retries.
 func (store *MemoryStore) SaveAcceptedPayment(_ context.Context, state *PaymentState) error {
 	if store == nil {
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)

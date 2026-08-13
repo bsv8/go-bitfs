@@ -71,22 +71,25 @@ type PoolPort interface {
 	SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
 }
 
-// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
+// WorkflowConfig supplies the arbiter signer, MultisigPool verification/signing
+// port, and verifier for the buyer's signed 003 authorization.
 type WorkflowConfig struct {
 	Signer                pool.Signer
 	Pool                  PoolPort
 	AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
-// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
+// Workflow verifies 007 evidence and adds only the arbiter signature. It never
+// prices content, replaces the seller candidate transaction, or submits a node
+// transaction on the arbiter's behalf.
 type Workflow struct {
 	signer                pool.Signer
 	pool                  PoolPort
 	authorizationVerifier bitfs.ContentTermsSignatureVerifier
 }
 
-// NewWorkflow creates an arbiter workflow and requires its signer, payment-pool
-// verifier, and buyer-authorization verifier.
+// NewWorkflow requires a non-nil arbiter Signer, PoolPort, and authorization
+// verifier. It returns an arbiter workflow with no storage or network side effects.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.Pool == nil || config.AuthorizationVerifier == nil {
 		return nil, errors.New("arbitration workflow requires an arbiter signer, an authorization verifier, and a pool verification and signing port")
@@ -94,8 +97,10 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	return &Workflow{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
 }
 
-// SignPayment verifies the opening proof, buyer authorization, candidate
-// transaction, and seller signature before returning an arbiter signature.
+// SignPayment decodes and verifies the opening proof, standalone 003 buyer
+// authorization, seller candidate transaction, and seller signature. On success
+// it returns a 007 response containing hashes of the authorized bytes and the
+// detached arbiter signature; it does not broadcast or mutate the candidate.
 func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationRequest) (*ArbitrationResponse, error) {
 	if workflow == nil {
 		return nil, errors.New("arbitration workflow is required")
@@ -220,7 +225,8 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	return cloneResponse(response), nil
 }
 
-// ValidateRequest checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateRequest checks the 007 version, required CBOR/transaction byte fields,
+// SHA-256 hash lengths, and detached seller signature before decoding evidence.
 func ValidateRequest(request *ArbitrationRequest) error {
 	if request == nil || request.Version != MajorVersion || len(request.PoolOpeningProofCBOR) == 0 || len(request.PaymentAuthorizationCBOR) == 0 || len(request.UnsignedStateTxRaw) == 0 || len(request.SellerTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration request is incomplete", pool.ErrInvalidEvidence)
@@ -228,7 +234,8 @@ func ValidateRequest(request *ArbitrationRequest) error {
 	return nil
 }
 
-// ValidateResponse checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateResponse checks the 007 response version, authorization/state hashes,
+// and detached arbiter signature lengths before a caller accepts the response.
 func ValidateResponse(response *ArbitrationResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.PaymentAuthorizationHash) != sha256.Size || len(response.UnsignedStateTxHash) != sha256.Size || len(response.ArbiterTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration response is incomplete", pool.ErrInvalidEvidence)

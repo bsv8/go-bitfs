@@ -26,6 +26,6 @@ Use Node.js 22 and Go 1.26.0. Set Pages environment variables `NODE_VERSION=22` 
 
 ## Translation workflow
 
-Edit English Markdown under `website/docs/` first. Use an AI translation pass to update the matching files under `website/i18n/zh-CN/docusaurus-plugin-content-docs/current/`, then review protocol terms, numbers, signatures, code blocks, and links before committing. The build never calls an AI service.
+Edit English Markdown under `website/docs/` first. Go English doc comments are the API reference source of truth. Chinese API prose is maintained as one-by-one entries in `website/api-translations.json`; generated `website/i18n/zh-CN/docusaurus-plugin-content-docs-api/current/*.md` files are build artifacts and must not be committed. Missing or stale catalog entries fail `npm run generate:api`, so review protocol terms, numbers, signatures, code blocks, anchors, and links before committing. The build never calls an AI service.
 
 Run `npm run write-translations` only to discover new Docusaurus translation IDs. The command writes source-language defaults, so review its diff and restore the maintained Chinese messages instead of accepting it as an automatic translation.

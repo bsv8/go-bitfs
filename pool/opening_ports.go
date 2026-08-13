@@ -5,9 +5,8 @@ import (
 	"fmt"
 )
 
-// BuyerOpeningPort composes the small external capabilities needed by the
-// buyer-side 002 workflow without forcing applications to create boilerplate
-// forwarding types.
+// BuyerOpeningPort adapts application stores, signature verification, and
+// transaction-ID calculation to the buyer-side 002 opening workflow.
 type BuyerOpeningPort struct {
 	Store      OpeningProofStore
 	Verifier   RefundTxSignatureVerifier
@@ -30,7 +29,10 @@ func (port BuyerOpeningPort) LoadOpeningProof(ctx context.Context, spendTxID Has
 	return port.Store.LoadOpeningProof(ctx, spendTxID)
 }
 
-// VerifySellerRefundSignature verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifySellerRefundSignature checks the seller's detached signature against
+// the buyer-signed 002 refund-presign request. The verifier also reconstructs
+// the unsigned refund state and confirms both buyer and seller role signatures
+// before the buyer records an OpeningProof.
 func (port BuyerOpeningPort) VerifySellerRefundSignature(ctx context.Context, request *RefundPresignRequest, signature []byte) error {
 	if port.Verifier == nil {
 		return fmt.Errorf("%w: seller refund verifier is required", ErrInvalidEvidence)
@@ -46,10 +48,9 @@ func (port BuyerOpeningPort) TransactionID(ctx context.Context, rawTx []byte) (H
 	return port.Calculator.TransactionID(ctx, rawTx)
 }
 
-// SellerOpeningPort composes the external capabilities required by the
-// seller-side 002 workflow. The submitter is deliberately separate from the
-// non-final payment node: funding submission and payment-pool replacement are
-// different state transitions.
+// SellerOpeningPort adapts seller-side 002 opening capabilities. Funding
+// submission remains separate from non-final payment replacement because they
+// are distinct external state transitions.
 type SellerOpeningPort struct {
 	Store            PendingOpeningProofStore
 	RefundSigner     RefundTxSigner
@@ -90,7 +91,9 @@ func (port SellerOpeningPort) TransactionID(ctx context.Context, rawTx []byte) (
 	return port.Calculator.TransactionID(ctx, rawTx)
 }
 
-// VerifyFundingTx verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyFundingTx delegates 002 funding acceptance to the configured verifier.
+// It checks that the delivered raw funding transaction has the proof's outpoint,
+// amount, and role-ordered pool lock; submission is performed separately.
 func (port SellerOpeningPort) VerifyFundingTx(ctx context.Context, fundingTx []byte, proof *OpeningProof) error {
 	if port.FundingVerifier == nil {
 		return fmt.Errorf("%w: funding transaction verifier is required", ErrInvalidEvidence)

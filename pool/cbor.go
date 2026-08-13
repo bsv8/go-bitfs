@@ -36,7 +36,9 @@ func init() {
 	}
 }
 
-// EncodePaymentUpdate encodes its input as the protocol-defined deterministic CBOR array.
+// EncodePaymentUpdate validates and encodes the 005 unsigned transaction plus
+// detached buyer signature as its four-field deterministic CBOR container. It
+// performs structural validation, not node acceptance or signature verification.
 func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	if err := ValidatePaymentUpdate(update); err != nil {
 		return nil, err
@@ -44,7 +46,9 @@ func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	return poolEnc.Marshal([]any{MajorVersion, update.PaymentAuthorizationHash, update.UnsignedStateTxRaw, update.BuyerTransactionSignature})
 }
 
-// DecodePaymentUpdate decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodePaymentUpdate decodes and canonicality-checks the 005 four-field payment
+// container, then validates its field shape. It does not prove pool ownership or
+// verify the buyer signature against an opening proof.
 func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	values, err := decodePoolArray(data, 4)
 	if err != nil {
@@ -76,7 +80,9 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	return clonePaymentUpdate(update), nil
 }
 
-// EncodeRefundPresignRequest encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeRefundPresignRequest validates and encodes the 002 buyer refund-presign
+// request, including protocol versions, refund bytes, pool output, role keys,
+// fee rate, and detached buyer signature.
 func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
@@ -89,7 +95,8 @@ func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	})
 }
 
-// DecodeRefundPresignRequest decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeRefundPresignRequest decodes and canonicality-checks the 002 request;
+// cryptographic and funding-transaction acceptance remains the opening workflow's job.
 func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	values, err := decodePoolArray(data, 13)
 	if err != nil {
@@ -148,7 +155,8 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	return cloneRefundPresignRequest(request), nil
 }
 
-// EncodeRefundPresignResponse encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeRefundPresignResponse validates and encodes the seller's 002 refund
+// signature response with the fixed protocol and MultisigPool version fields.
 func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error) {
 	if err := ValidateRefundPresignResponse(response); err != nil {
 		return nil, err
@@ -156,7 +164,8 @@ func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error
 	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignResponse, response.SellerRefundSignature})
 }
 
-// DecodeRefundPresignResponse decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeRefundPresignResponse decodes and canonicality-checks the 002 seller
+// response without deciding whether the signature matches a particular request.
 func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	values, err := decodePoolArray(data, 3)
 	if err != nil {
@@ -186,7 +195,9 @@ func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	return cloneRefundPresignResponse(response), nil
 }
 
-// EncodeFundingTxDelivery encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeFundingTxDelivery validates and encodes the 002 funding-transaction
+// delivery container. It does not verify that the funding transaction spends
+// the retained opening proof.
 func EncodeFundingTxDelivery(delivery *FundingTxDelivery) ([]byte, error) {
 	if err := ValidateFundingTxDelivery(delivery); err != nil {
 		return nil, err
@@ -194,7 +205,8 @@ func EncodeFundingTxDelivery(delivery *FundingTxDelivery) ([]byte, error) {
 	return poolEnc.Marshal([]any{MajorVersion, KindPoolFundingTxDelivery, delivery.FundingTx})
 }
 
-// DecodeFundingTxDelivery decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeFundingTxDelivery decodes and canonicality-checks the 002 funding
+// delivery; SellerAcceptFundingTx performs the proof and node checks.
 func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	values, err := decodePoolArray(data, 3)
 	if err != nil {
@@ -224,7 +236,8 @@ func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	return cloneFundingTxDelivery(delivery), nil
 }
 
-// EncodeOpeningProof encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeOpeningProof validates and encodes the complete 002 opening proof,
+// including refund/funding bytes, role keys, and pool parameters.
 func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	if err := ValidateOpeningProof(proof); err != nil {
 		return nil, err
@@ -240,7 +253,9 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	})
 }
 
-// DecodeOpeningProof decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeOpeningProof decodes and canonicality-checks a 002 opening proof, then
+// performs field validation; VerifyOpening is still required for signatures and
+// transaction relationships.
 func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	values, err := decodePoolArray(data, 16)
 	if err != nil {
@@ -308,7 +323,9 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	return cloneOpeningProof(proof), nil
 }
 
-// ValidatePaymentUpdate checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidatePaymentUpdate checks the 005 envelope version, 32-byte authorization
+// hash, and presence of the unsigned transaction and detached buyer signature.
+// It does not parse the transaction or establish that a node accepted it.
 func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update == nil {
 		return fmt.Errorf("%w: payment update is required", ErrInvalidEvidence)
@@ -328,7 +345,9 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	return nil
 }
 
-// ValidateRefundPresignRequest checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateRefundPresignRequest checks the 002 request discriminators, required
+// funding/refund evidence, role keys, fee rate, and buyer signature presence.
+// It does not verify the refund transaction or either signature cryptographically.
 func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request == nil || request.Version != MajorVersion {
 		return fmt.Errorf("%w: invalid refund presign request", ErrInvalidEvidence)
@@ -345,7 +364,8 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	return nil
 }
 
-// ValidateRefundPresignResponse checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateRefundPresignResponse checks the 002 response version and requires a
+// seller refund signature; matching it to a request is a workflow operation.
 func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: invalid refund presign response", ErrInvalidEvidence)
@@ -353,7 +373,8 @@ func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	return nil
 }
 
-// ValidateFundingTxDelivery checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateFundingTxDelivery checks the 002 delivery version and requires raw
+// funding transaction bytes; it does not prove the bytes spend the opening.
 func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	if delivery == nil || delivery.Version != MajorVersion || len(delivery.FundingTx) == 0 {
 		return fmt.Errorf("%w: invalid funding transaction delivery", ErrInvalidEvidence)
@@ -361,7 +382,9 @@ func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	return nil
 }
 
-// ValidateOpeningProof checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateOpeningProof checks the 002 proof discriminators and required hashes,
+// pool lock, role keys, refund signatures, and funding bytes. It is structural;
+// VerifyOpening performs transaction and signature relationship checks.
 func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof == nil {
 		return fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)

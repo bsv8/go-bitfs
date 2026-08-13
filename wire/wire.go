@@ -1,6 +1,7 @@
-// Package wire is the transport-facing dispatcher for the new protocol.
-// Kind is carried by the transport; it is intentionally not wrapped into the
-// signed CBOR documents defined by 001-007.
+// Package wire maps transport-level message kinds to the canonical encoders and
+// strict decoders for 001–007. It copies exact CBOR bytes and adds no envelope,
+// signature, storage, business validation, or network behavior; callers invoke
+// the owning bitfs, pool, or arbitration verifier after decoding.
 package wire
 
 import (
@@ -15,7 +16,8 @@ import (
 // ProtocolFamily is the wire protocol identifier carried by the transport layer.
 const ProtocolFamily = "bitfs.protocol.v3"
 
-// Kind is the CBOR kind tag for the corresponding pool-opening message.
+// Kind identifies the message type selected by the transport. The tag is not
+// inserted into the signed 001–007 CBOR document.
 type Kind uint16
 
 const (
@@ -39,14 +41,15 @@ const (
 	ArbitrationResponse Kind = 9
 )
 
-// Packet is the exact CBOR data item to pass to a transport adapter.
+// Packet carries a transport-selected Kind and the exact canonical CBOR bytes
+// produced by the corresponding protocol encoder. It adds no envelope.
 type Packet struct {
 	Kind Kind
 	CBOR []byte
 }
 
-// Marshal dispatches message to the canonical encoder selected by kind and
-// returns transport-ready CBOR without adding an envelope.
+// Marshal dispatches to the canonical encoder for kind, rejects a mismatched
+// Go value, and returns transport-ready CBOR without changing signed bytes.
 func Marshal(kind Kind, message any) (Packet, error) {
 	var (
 		raw []byte
@@ -116,7 +119,8 @@ func Marshal(kind Kind, message any) (Packet, error) {
 	return Packet{Kind: kind, CBOR: append([]byte(nil), raw...)}, nil
 }
 
-// Unmarshal dispatches rawCBOR to the strict decoder selected by kind.
+// Unmarshal dispatches rawCBOR to the strict decoder selected by kind. It checks
+// canonical encoding and shape; callers must still run the package verifier.
 func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 	if len(rawCBOR) == 0 {
 		return nil, errors.New("wire CBOR is required")

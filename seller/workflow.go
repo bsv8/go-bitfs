@@ -13,7 +13,8 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
-// QuoteStore defines storage operations used by the workflow.
+// QuoteStore stores seller-signed 001 quote credentials addressed by canonical
+// terms hash so later 003 requests can be independently verified.
 type QuoteStore interface {
 	SaveQuote(context.Context, *bitfs.SignedFileQuote) error
 	LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
@@ -24,7 +25,9 @@ type ContentSource interface {
 	LoadContent(context.Context, bitfs.Hash32) ([]byte, error)
 }
 
-// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
+// WorkflowConfig supplies every seller dependency: signing and verification,
+// quote/pool/pending stores, content source, opening and transaction ports,
+// participant checks, node submission, and an optional test Clock.
 type WorkflowConfig struct {
 	Signer            pool.Signer
 	SignatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -40,7 +43,9 @@ type WorkflowConfig struct {
 	Node              pool.NonFinalPoolNode
 }
 
-// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
+// Workflow implements the seller side of 001–007. It creates quotes, completes
+// pool opening, serializes content delivery, verifies buyer payments, and
+// prepares or submits arbiter-authorized states through injected ports.
 type Workflow struct {
 	signer            pool.Signer
 	signatureVerifier bitfs.ContentTermsSignatureVerifier
@@ -56,8 +61,9 @@ type Workflow struct {
 	node              pool.NonFinalPoolNode
 }
 
-// NewWorkflow creates a seller workflow, requires every signing, storage,
-// transaction, and node port, and defaults Clock to time.Now.
+// NewWorkflow validates all mandatory seller dependencies and returns a workflow.
+// A nil Clock is replaced by time.Now; missing signing, storage, content,
+// transaction, participant, or node ports are rejected before any side effect.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.SignatureVerifier == nil || config.QuoteVerifier == nil {
 		return nil, errors.New("seller workflow requires signer and signature verifiers")
@@ -84,8 +90,9 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	}, nil
 }
 
-// CreateQuote signs the seller's deterministic quote terms and persists the
-// resulting credential before returning it.
+// CreateQuote signs deterministic 001 quote terms with the seller key, persists
+// the complete credential by its terms hash, and returns an owned copy. The
+// recommended filename is display metadata and is not part of the signature.
 func (workflow *Workflow) CreateQuote(ctx context.Context, draft bitfs.FileQuoteTerms, recommendedFilename string) (*bitfs.SignedFileQuote, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -142,7 +149,9 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, delivery *pool.
 	return proof, nil
 }
 
-// DeliverRequestedContent reads and signs the content selected by the validated request.
+// DeliverRequestedContent verifies the buyer's 003 request and its quote, reads
+// the requested seed or block from ContentSource, and signs a 004 delivery. A
+// pending-request lease prevents concurrent deliveries for the same pool.
 func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *bitfs.SignedContentRequest) (delivery *bitfs.SignedContentDelivery, err error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -272,8 +281,9 @@ func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *
 	return delivery, nil
 }
 
-// AcceptPayment verifies the buyer-authorized cumulative state, adds the seller
-// signature, submits it, and advances storage only after node acceptance.
+// AcceptPayment verifies the buyer's 005 update against the accepted pool state,
+// adds the seller signature, submits the exact transaction, and advances stored
+// state only after the node confirms the expected transaction and sequence.
 func (workflow *Workflow) AcceptPayment(ctx context.Context, update *pool.PaymentUpdate) (*pool.PaymentState, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -472,7 +482,9 @@ func (workflow *Workflow) BuildArbitrationRequest(context.Context, *pool.Opening
 	return nil, fmt.Errorf("%w: use BuildArbitrationRequestFromAuthorization", pool.ErrInvalidEvidence)
 }
 
-// BuildArbitrationRequestFromAuthorization packages the seller evidence and buyer authorization for arbiter review.
+// BuildArbitrationRequestFromAuthorization packages the retained opening proof,
+// signed 003 authorization, latest payment state, and seller signature into the
+// 007 evidence request. It never constructs a replacement candidate transaction.
 func (workflow *Workflow) BuildArbitrationRequestFromAuthorization(ctx context.Context, proof *pool.OpeningProof, authorization *bitfs.SignedContentRequest, latest *pool.PaymentState) (*arbitration.ArbitrationRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -512,8 +524,9 @@ func (workflow *Workflow) BuildArbitrationRequestFromAuthorization(ctx context.C
 	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, PoolOpeningProofCBOR: openingCBOR, PaymentAuthorizationCBOR: authCBOR, UnsignedStateTxRaw: append([]byte(nil), unsigned.RawTx...), SellerTransactionSignature: sellerSig}, nil
 }
 
-// SubmitArbitratedPayment verifies the arbiter response, merges seller and
-// arbiter signatures, and submits the exact authorized cumulative state.
+// SubmitArbitratedPayment verifies the 007 response hashes and arbiter signature,
+// merges the seller and arbiter signatures over the authorized unsigned state,
+// submits that exact transaction, and persists it only after node acceptance.
 func (workflow *Workflow) SubmitArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse) (*pool.PaymentState, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")

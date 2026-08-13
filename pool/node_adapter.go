@@ -34,8 +34,9 @@ type VerifiedNonFinalPoolNode struct {
 	backend  NonFinalPoolBackend
 }
 
-// NewVerifiedNonFinalPoolNode creates a validating node adapter and rejects a
-// missing transaction engine, opening store, or backend.
+// NewVerifiedNonFinalPoolNode requires a pool verifier, funding-indexed opening
+// store, and backend. It returns an adapter that validates bytes and backend
+// responses before exposing node acceptance to a workflow.
 func NewVerifiedNonFinalPoolNode(engine PoolNodeVerifierPort, openings OpeningByFundingStore, backend NonFinalPoolBackend) (*VerifiedNonFinalPoolNode, error) {
 	if engine == nil || openings == nil || backend == nil {
 		return nil, fmt.Errorf("%w: node adapter requires transaction engine, opening store and backend", ErrInvalidEvidence)

@@ -33,7 +33,9 @@ type MultisigPoolAdapter struct {
 	ArbiterKey PrivateKeyProvider
 }
 
-// VerifyOpening verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyOpening validates the complete 002 OpeningProof through MultisigPool v4:
+// role keys, funding output, unsigned refund state, and buyer/seller refund
+// signatures must all agree before a workflow may accept the pool.
 func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 	if adapter == nil || adapter.Engine == nil {
 		return invalid("MultisigPool adapter requires an engine")
@@ -41,7 +43,10 @@ func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 	return adapter.Engine.VerifyOpening(proof)
 }
 
-// VerifyArbitrationCandidate verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyArbitrationCandidate validates the seller's 007 candidate against the
+// standalone 003 authorization. It checks the opening proof, fee rate and next
+// sequence, matches seller amount and sequence in the unsigned transaction, and
+// verifies the seller's detached signature without constructing a replacement.
 func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context, raw []byte, proof *OpeningProof, terms *bitfs.ContentRequestTerms, sellerSig []byte) (*UnsignedPayment, error) {
 	if adapter == nil || adapter.Engine == nil || terms == nil {
 		return nil, invalid("arbitration candidate inputs are incomplete")

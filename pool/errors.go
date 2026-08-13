@@ -1,5 +1,7 @@
-// Package pool contains the generic 2-of-3 settlement primitives. It does
-// not import BitFS quote or content types.
+// Package pool contains the protocol-independent 2-of-3 settlement primitives
+// used by 002, 005, and 006. It validates role-ordered MultisigPool v4 bytes,
+// tracks monotonic payment state, and exposes storage/node ports; it deliberately
+// does not import BitFS quote or content types.
 package pool
 
 import (

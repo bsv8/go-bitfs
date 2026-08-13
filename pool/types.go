@@ -147,13 +147,15 @@ type UpdateAcceptance struct {
 	PaymentSequence uint32
 }
 
-// OpeningProofStore persists and retrieves OpeningProof values keyed by spend transaction ID.
+// OpeningProofStore persists and retrieves the verified 002 opening proof keyed
+// by SpendTxID, the canonical ID of the presigned refund evidence.
 type OpeningProofStore interface {
 	SaveOpeningProof(context.Context, *OpeningProof) error
 	LoadOpeningProof(context.Context, Hash32) (*OpeningProof, error)
 }
 
-// PendingOpeningProofStore persists and retrieves opening proofs keyed by funding transaction ID.
+// PendingOpeningProofStore persists an opening proof before funding is accepted
+// and retrieves it by the revealed funding transaction ID.
 type PendingOpeningProofStore interface {
 	SaveOpeningProof(context.Context, *OpeningProof) error
 	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
@@ -200,7 +202,8 @@ type SellerPoolOpeningHooks interface {
 	TransactionSubmitter
 }
 
-// PoolStore persists opening proofs, accepted payments, and pool health state.
+// PoolStore combines opening-proof and accepted-payment persistence with health
+// reconciliation and the seller delivery lease used by the role workflows.
 type PoolStore interface {
 	OpeningProofStore
 	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
@@ -238,13 +241,15 @@ type PendingRequestStore interface {
 	Release(context.Context, Hash32, Hash32) error
 }
 
-// Signer provides a public key and produces detached signatures.
+// Signer exposes the public key and detached signatures used by credentials and
+// pool transactions. Implementations retain private-key custody outside the SDK.
 type Signer interface {
 	PublicKey(context.Context) ([]byte, error)
 	Sign(context.Context, []byte) ([]byte, error)
 }
 
-// SignatureVerifier validates a detached signature against a public key and payload.
+// SignatureVerifier validates a detached signature over the exact supplied bytes
+// and public key; it must not normalize or re-encode the payload.
 type SignatureVerifier interface {
 	Verify(pubkey, payload, signature []byte) error
 }

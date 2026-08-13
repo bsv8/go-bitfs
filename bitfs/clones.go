@@ -6,12 +6,14 @@ func CloneSignedFileQuote(quote *SignedFileQuote) *SignedFileQuote {
 	return cloneSignedFileQuote(quote)
 }
 
-// CloneSignedContentRequest returns an independent copy of SignedContentRequest, including copies of mutable byte slices.
+// CloneSignedContentRequest returns a deep copy of a 003 credential, including
+// independent terms, public-key, and signature byte slices.
 func CloneSignedContentRequest(request *SignedContentRequest) *SignedContentRequest {
 	return cloneSignedContentRequest(request)
 }
 
-// CloneSignedContentDelivery returns an independent copy of SignedContentDelivery, including copies of mutable byte slices.
+// CloneSignedContentDelivery returns a deep copy of a 004 credential, including
+// independent terms, public-key, payload, and signature byte slices.
 func CloneSignedContentDelivery(delivery *SignedContentDelivery) *SignedContentDelivery {
 	return cloneSignedContentDelivery(delivery)
 }

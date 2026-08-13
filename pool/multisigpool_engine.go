@@ -23,7 +23,9 @@ const finalPoolSequence = ^uint32(0)
 // one of those clocks, never both.
 const lockTimeTimestampThreshold uint32 = 500_000_000
 
-// MultisigPoolEngineConfig provides the keys, fee policy, and transaction dependencies used by the engine.
+// MultisigPoolEngineConfig supplies compressed Buyer, Seller, and Arbiter public
+// keys in role order. BlockHeight is optional and is used only for block-height
+// refund expiry checks; fee and transaction rules come from MultisigPool v4.
 type MultisigPoolEngineConfig struct {
 	BuyerPubKey   []byte
 	SellerPubKey  []byte
@@ -31,7 +33,9 @@ type MultisigPoolEngineConfig struct {
 	BlockHeight   func() uint32
 }
 
-// MultisigPoolEngine validates and constructs the role-ordered MultisigPool v4 transaction states.
+// MultisigPoolEngine is the adapter boundary to MultisigPool v4. It preserves
+// Buyer/Seller/Arbiter role ordering while delegating scripts, fees, sighash,
+// state construction, and signature ordering to that dependency.
 type MultisigPoolEngine struct {
 	buyer, seller, arbiter *ec.PublicKey
 	blockHeight            func() uint32
@@ -55,23 +59,27 @@ type ArbiterPoolAdapter struct {
 	Key PrivateKeyProvider
 }
 
-// NewBuyerPoolAdapter returns a BuyerPoolAdapter that delegates signing to the given private-key provider.
+// NewBuyerPoolAdapter binds an engine to the buyer private-key provider used for
+// detached payment and refund signatures. It performs no signing at construction.
 func NewBuyerPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *BuyerPoolAdapter {
 	return &BuyerPoolAdapter{MultisigPoolEngine: engine, Key: key}
 }
 
-// NewSellerPoolAdapter returns a SellerPoolAdapter that delegates signing to the given private-key provider.
+// NewSellerPoolAdapter binds an engine to the seller private-key provider used
+// for detached payment, refund, and arbitration-candidate signatures.
 func NewSellerPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *SellerPoolAdapter {
 	return &SellerPoolAdapter{MultisigPoolEngine: engine, Key: key}
 }
 
-// NewArbiterPoolAdapter returns an ArbiterPoolAdapter that delegates signing to the given private-key provider.
+// NewArbiterPoolAdapter binds an engine to the arbiter private-key provider used
+// to sign the candidate state selected by the 007 workflow.
 func NewArbiterPoolAdapter(engine *MultisigPoolEngine, key PrivateKeyProvider) *ArbiterPoolAdapter {
 	return &ArbiterPoolAdapter{MultisigPoolEngine: engine, Key: key}
 }
 
-// NewMultisigPoolEngine creates a MultisigPoolEngine from three distinct participant public keys.
-// Returns an error if any key is malformed or if two roles share the same key.
+// NewMultisigPoolEngine parses and validates three distinct role keys, preserving
+// Buyer/Seller/Arbiter identity for every later transaction check. It returns an
+// error for malformed or duplicate keys and performs no network or storage I/O.
 func NewMultisigPoolEngine(config MultisigPoolEngineConfig) (*MultisigPoolEngine, error) {
 	buyer, err := parsePoolKey(config.BuyerPubKey)
 	if err != nil {
@@ -95,7 +103,8 @@ func (engine *MultisigPoolEngine) roles() mp.ArbitratedPoolRoles {
 	return mp.ArbitratedPoolRoles{Buyer: engine.buyer, Seller: engine.seller, Arbiter: engine.arbiter}
 }
 
-// Build2of3LockingScript builds a 2-of-3 MultisigPool locking script from three compressed public keys.
+// Build2of3LockingScript delegates construction of the role-ordered 2-of-3
+// MultisigPool locking script. pubkeys must be exactly Buyer, Seller, Arbiter.
 func Build2of3LockingScript(pubkeys [][]byte) ([]byte, error) {
 	if len(pubkeys) != 3 {
 		return nil, invalid("exactly three pool public keys are required")
@@ -165,7 +174,9 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 	return &RefundPresignRequest{Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion, RefundTx: state.Bytes(), FundingTxID: funding.TxID().CloneBytes(), PoolOutputIndex: input.PoolOutputIndex, PoolOutputSatoshis: output.Satoshis, PoolLockingScript: append([]byte(nil), lock.Bytes()...), BuyerPubKey: engine.buyer.Compressed(), SellerPubKey: engine.seller.Compressed(), ArbiterPubKey: engine.arbiter.Compressed(), MinerFeeRateSatPerKB: input.MinerFeeRateSatPerKB, BuyerRefundSignature: append([]byte(nil), sig...)}, nil
 }
 
-// VerifySellerRefundSignature validates both the buyer and seller detached signatures over the presigned refund transaction in request.
+// VerifySellerRefundSignature validates the 002 presigned refund state named by
+// request, including its funding outpoint, role keys, buyer signature, and the
+// supplied seller detached signature. It does not submit either transaction.
 func (engine *MultisigPoolEngine) VerifySellerRefundSignature(_ context.Context, request *RefundPresignRequest, signature []byte) error {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return err
@@ -262,8 +273,10 @@ func (engine *MultisigPoolEngine) FundingTxID(rawTx []byte) (Hash32, error) {
 	return hash32FromBytes(value.Inputs[0].SourceTXID.CloneBytes()), nil
 }
 
-// VerifyOpening validates an OpeningProof: checks version and protocol fields, verifies participant keys,
-// confirms the funding and refund transactions match the proof, and validates both buyer and seller refund signatures.
+// VerifyOpening validates a complete 002 OpeningProof against this engine's
+// Buyer/Seller/Arbiter roles. It matches the proof to the funding output and
+// unsigned refund state, then verifies the buyer and seller refund signatures;
+// it performs no persistence or node submission.
 func (engine *MultisigPoolEngine) VerifyOpening(proof *OpeningProof) error {
 	if engine == nil {
 		return invalid("MultisigPool engine is required")
@@ -361,8 +374,9 @@ func (engine *MultisigPoolEngine) BuildRefundSubmission(proof *OpeningProof) ([]
 	return merged.Bytes(), nil
 }
 
-// VerifyFundingTx confirms that rawTx matches the opening proof's funding outpoint and pool output,
-// and that the output uses the correct pool locking script.
+// VerifyFundingTx parses the delivered 002 funding transaction and matches its txid, pool
+// output index, satoshis, and role-ordered MultisigPool v4 locking script to
+// proof. It is an evidence check only and does not submit the transaction.
 func (engine *MultisigPoolEngine) VerifyFundingTx(_ context.Context, rawTx []byte, proof *OpeningProof) error {
 	if proof == nil {
 		return invalid("funding transaction and opening proof are required")
@@ -657,22 +671,30 @@ func (adapter *SellerPoolAdapter) unsignedTx(unsigned *UnsignedPayment) (*tx.Tra
 	return state, nil
 }
 
-// VerifyBuyerPayment validates the buyer's detached signature against the unsigned payment and opening proof.
+// VerifyBuyerPayment checks the buyer role's detached signature over the exact
+// unsigned 005 payment state, after validating its canonical outputs against the
+// 002 opening proof. It does not merge the seller signature or submit the state.
 func (adapter *SellerPoolAdapter) VerifyBuyerPayment(unsigned *UnsignedPayment, sig []byte, proof *OpeningProof) error {
 	return adapter.MultisigPoolEngine.verifyDetached(unsigned, sig, proof, "buyer")
 }
 
-// VerifySellerPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifySellerPayment checks the seller role's detached signature over the exact
+// unsigned 005 payment state and its canonical relation to the 002 opening
+// proof. It does not merge the buyer signature or submit the update.
 func (adapter *SellerPoolAdapter) VerifySellerPayment(unsigned *UnsignedPayment, sig []byte, proof *OpeningProof) error {
 	return adapter.MultisigPoolEngine.verifyDetached(unsigned, sig, proof, "seller")
 }
 
-// VerifySellerPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifySellerPayment checks the seller role's detached signature over the exact
+// unsigned 005 payment state and its canonical relation to the 002 opening
+// proof. It does not merge signatures or submit the update.
 func (engine *MultisigPoolEngine) VerifySellerPayment(unsigned *UnsignedPayment, sig []byte, proof *OpeningProof) error {
 	return engine.verifyDetached(unsigned, sig, proof, "seller")
 }
 
-// VerifyBuyerPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyBuyerPayment checks the buyer role's detached signature over the exact
+// unsigned 005 payment state and its canonical relation to the 002 opening
+// proof. It does not merge signatures or submit the update.
 func (engine *MultisigPoolEngine) VerifyBuyerPayment(unsigned *UnsignedPayment, sig []byte, proof *OpeningProof) error {
 	return engine.verifyDetached(unsigned, sig, proof, "buyer")
 }
@@ -791,7 +813,10 @@ func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, 
 	return engine.signedFromTx(merged, unsigned, nil, sellerSig, arbiterSig), nil
 }
 
-// BuildImmediateClose constructs the immediate-close transaction from the current payment state and role signatures.
+// BuildImmediateClose constructs the unsigned final close state and buyer
+// detached signature from the accepted payment and CloseInput. The seller adds
+// its signature with SignImmediateClose before the buyer submits the merged
+// SignedPayment through its workflow.
 func (engine *MultisigPoolEngine) BuildImmediateClose(_ context.Context, input CloseInput) (*UnsignedPayment, []byte, error) {
 	if engine == nil || input.Opening == nil || input.Latest == nil {
 		return nil, nil, invalid("opening proof and latest state are required")
@@ -810,7 +835,8 @@ func (engine *MultisigPoolEngine) BuildImmediateClose(_ context.Context, input C
 	return unsigned, nil, nil
 }
 
-// VerifyFinalPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyFinalPayment checks a fully signed final transaction against the opening
+// proof, final sequence, role signatures, outputs, and canonical transaction bytes.
 func (engine *MultisigPoolEngine) VerifyFinalPayment(state *PaymentState, proof *OpeningProof) error {
 	if state == nil || state.PaymentSequence != finalPoolSequence {
 		return invalid("final payment state is invalid")
@@ -818,17 +844,20 @@ func (engine *MultisigPoolEngine) VerifyFinalPayment(state *PaymentState, proof 
 	return engine.verifyComplete(state, proof, false)
 }
 
-// VerifyAcceptedPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyAcceptedPayment checks the initial or previously accepted non-arbitrated
+// payment state against the opening proof and its complete role signatures.
 func (engine *MultisigPoolEngine) VerifyAcceptedPayment(state *PaymentState, proof *OpeningProof) error {
 	return engine.verifyComplete(state, proof, false)
 }
 
-// VerifyArbitratedPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyArbitratedPayment checks a final state carrying the seller and arbiter
+// signatures required by the 007 arbitration path.
 func (engine *MultisigPoolEngine) VerifyArbitratedPayment(state *PaymentState, proof *OpeningProof) error {
 	return engine.verifyComplete(state, proof, true)
 }
 
-// VerifyCompletedFinalPayment verifies the referenced credentials, signatures, and transaction invariants before acceptance.
+// VerifyCompletedFinalPayment validates the merged SignedPayment and identifies
+// whether its detached signatures form a valid final settlement state.
 func (engine *MultisigPoolEngine) VerifyCompletedFinalPayment(payment *SignedPayment, proof *OpeningProof) error {
 	if payment == nil {
 		return invalid("signed payment is required")

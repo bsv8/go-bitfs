@@ -134,7 +134,8 @@ func FileQuoteTermsHash(termsCBOR []byte) ([sha256.Size]byte, error) {
 	return sha256.Sum256(termsCBOR), nil
 }
 
-// NewSignedFileQuote creates a portable seller quote credential.
+// NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
+// signs those exact bytes with signTerms, and returns a portable 001 credential.
 func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedFilename string, signer QuoteTermsSigner) (*SignedFileQuote, error) {
 	if len(sellerPubkey) == 0 {
 		return nil, errors.New("seller pubkey is required")
@@ -167,7 +168,8 @@ func VerifySignedFileQuote(quote *SignedFileQuote, verifier QuoteTermsSignatureV
 	return VerifySignedFileQuoteAt(quote, time.Now(), verifier)
 }
 
-// VerifySignedFileQuoteAt is VerifySignedFileQuote with an injected clock.
+// VerifySignedFileQuoteAt performs structural, expiry, and seller-signature
+// verification using now, allowing callers to test expiry without wall-clock time.
 func VerifySignedFileQuoteAt(quote *SignedFileQuote, now time.Time, verifier QuoteTermsSignatureVerifier) (*FileQuoteTerms, error) {
 	if quote == nil {
 		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)

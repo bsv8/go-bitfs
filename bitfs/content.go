@@ -75,7 +75,8 @@ type ContentTermsSigner func(termsCBOR []byte) ([]byte, error)
 // ContentTermsSignatureVerifier verifies a signature over exact bytes.
 type ContentTermsSignatureVerifier func(pubkey, termsCBOR, signature []byte) error
 
-// EncodeContentRequestTerms encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeContentRequestTerms returns the exact deterministic CBOR array signed by
+// the buyer for a 003 request. It rejects nil terms and invalid field lengths.
 func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	if err := ValidateContentRequestTerms(terms); err != nil {
 		return nil, fmt.Errorf("%w: content request terms: %v", ErrInvalidEvidence, err)
@@ -97,7 +98,8 @@ func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	})
 }
 
-// DecodeContentRequestTerms decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeContentRequestTerms accepts only canonical 003 terms CBOR, checks the
+// fixed array shape and field encodings, and returns an independently owned value.
 func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	values, err := decodeArray(data, 13)
 	if err != nil {
@@ -188,7 +190,8 @@ func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSign
 	}, nil
 }
 
-// EncodeSignedContentRequest encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeSignedContentRequest encodes the complete 003 credential, including the
+// original terms bytes, buyer key, and signature, without re-signing it.
 func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
 		return nil, errors.New("signed content request and buyer signature are required")
@@ -203,7 +206,8 @@ func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 	})
 }
 
-// DecodeSignedContentRequest decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeSignedContentRequest decodes a canonical 003 credential and rejects
+// malformed array shape, versions, and byte fields before returning a copy.
 func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -230,7 +234,8 @@ func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	return cloneSignedContentRequest(request), nil
 }
 
-// EncodeContentDeliveryTerms encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeContentDeliveryTerms returns the deterministic 004 terms bytes that bind
+// delivery content to a previously authorized request and seller identity.
 func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	if err := ValidateContentDeliveryTerms(terms); err != nil {
 		return nil, fmt.Errorf("%w: content delivery terms: %v", ErrInvalidEvidence, err)
@@ -242,7 +247,8 @@ func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	})
 }
 
-// DecodeContentDeliveryTerms decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeContentDeliveryTerms decodes canonical 004 terms and validates its fixed
+// array shape and byte-field lengths.
 func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -310,7 +316,8 @@ func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sig
 	return &SignedContentDelivery{TermsCBOR: terms, SellerSignature: append([]byte(nil), signature...)}, nil
 }
 
-// EncodeSignedContentDelivery encodes its input as the protocol-defined deterministic CBOR array.
+// EncodeSignedContentDelivery encodes the complete seller-signed 004 credential;
+// it preserves the supplied terms bytes and detached seller signature exactly.
 func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error) {
 	if delivery == nil || len(delivery.SellerSignature) == 0 {
 		return nil, errors.New("signed content delivery and seller signature are required")
@@ -325,7 +332,8 @@ func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error
 	})
 }
 
-// DecodeSignedContentDelivery decodes deterministic CBOR and rejects malformed array lengths or field encodings.
+// DecodeSignedContentDelivery decodes canonical 004 credential bytes and rejects
+// malformed shape or fields before returning an independently owned value.
 func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -352,7 +360,8 @@ func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	return cloneSignedContentDelivery(delivery), nil
 }
 
-// ValidateContentRequestTerms checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateContentRequestTerms checks the 003 version, quote hash, pool reference,
+// content selector, arbiter key, size, and delivery deadline before signing.
 func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if terms == nil {
 		return errors.New("content request terms are required")
@@ -384,7 +393,8 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	return nil
 }
 
-// ValidateContentDeliveryTerms checks field lengths, versions, hashes, signatures, and transaction relationships.
+// ValidateContentDeliveryTerms checks the 004 version, authorization hash, seller
+// key, content hash, and declared payload length before delivery is accepted.
 func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 	if terms == nil {
 		return errors.New("content delivery terms are required")

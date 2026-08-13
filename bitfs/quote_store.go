@@ -33,7 +33,9 @@ type quoteStoreEntry struct {
 	Quote     *SignedFileQuote `json:"quote"`
 }
 
-// NewFileQuoteStore opens or creates a lock-protected quote snapshot at path.
+// NewFileQuoteStore opens or creates the quote snapshot at path. It creates the
+// parent directory as needed and uses an advisory process lock for cooperating
+// writers; calculator is retained for canonical terms-hash indexing.
 func NewFileQuoteStore(path string) (*FileQuoteStore, error) {
 	if path == "" {
 		return nil, fmt.Errorf("quote store path is required")
@@ -45,7 +47,8 @@ func NewFileQuoteStore(path string) (*FileQuoteStore, error) {
 	return store, nil
 }
 
-// SaveQuote validates and atomically persists a defensive copy keyed by its terms hash.
+// SaveQuote validates a complete signed quote, copies its mutable bytes, and
+// atomically stores it under FileQuoteTermsHash.
 func (store *FileQuoteStore) SaveQuote(_ context.Context, quote *SignedFileQuote) error {
 	if store == nil {
 		return fmt.Errorf("quote store is required")
@@ -79,7 +82,8 @@ func (store *FileQuoteStore) SaveQuote(_ context.Context, quote *SignedFileQuote
 	})
 }
 
-// LoadQuote reloads the snapshot under its process lock and returns a defensive copy.
+// LoadQuote reloads the snapshot under the process lock, looks up termsHash, and
+// returns a defensive copy so callers cannot mutate persisted bytes.
 func (store *FileQuoteStore) LoadQuote(_ context.Context, termsHash Hash32) (*SignedFileQuote, error) {
 	if store == nil {
 		return nil, fmt.Errorf("quote store is required")

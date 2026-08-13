@@ -12,7 +12,8 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
-// QuoteStore defines storage operations used by the workflow.
+// QuoteStore stores complete seller-signed 001 quote credentials. Implementations
+// must return the credential addressed by its canonical terms hash.
 type QuoteStore interface {
 	SaveQuote(context.Context, *bitfs.SignedFileQuote) error
 	LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
@@ -29,7 +30,9 @@ type SeedSource interface {
 	LoadSeed(context.Context, bitfs.Hash32) ([]byte, error)
 }
 
-// WorkflowConfig groups the stores, signers, verifiers, and node ports required by a workflow.
+// WorkflowConfig supplies the buyer workflow's signer, quote/content verifiers,
+// quote and pool stores, opening and transaction ports, and optional content and
+// seed adapters. All required ports must be non-nil; Clock defaults to time.Now.
 type WorkflowConfig struct {
 	Signer            pool.Signer
 	QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
@@ -45,7 +48,9 @@ type WorkflowConfig struct {
 	SeedSource        SeedSource
 }
 
-// Workflow coordinates role-specific protocol state transitions while keeping infrastructure in injected ports.
+// Workflow implements the buyer side of 001–006. It validates seller credentials,
+// persists accepted pool/payment state, signs requests and payment updates, and
+// delegates storage, transaction construction, and node submission to its ports.
 type Workflow struct {
 	signer            pool.Signer
 	quoteVerifier     bitfs.QuoteTermsSignatureVerifier
@@ -61,8 +66,9 @@ type Workflow struct {
 	seedSource        SeedSource
 }
 
-// NewWorkflow creates a buyer workflow, requires every protocol port, and
-// defaults Clock to time.Now when it is omitted.
+// NewWorkflow validates the buyer dependencies and returns a workflow. Signer,
+// verifiers, stores, opening, participant, and transaction ports are mandatory;
+// an omitted Clock uses time.Now so expiry checks remain injectable in tests.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
 	if config.Signer == nil || config.QuoteVerifier == nil || config.SignatureVerifier == nil || config.Quotes == nil || config.Pools == nil || config.Opening == nil || config.Participants == nil || config.Transactions == nil {
 		return nil, errors.New("buyer workflow requires signer, verifiers, quote, opening, participant, pool and transaction ports")
@@ -146,7 +152,9 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.Ope
 	return workflow.transactions.BuildRefundPresignRequest(ctx, pool.CloneOpeningInput(input), workflow.signer)
 }
 
-// BuildFundingTxDelivery verifies the opening proof and returns the buyer funding transaction for seller submission.
+// BuildFundingTxDelivery copies and validates fundingTx into the 002 delivery
+// container. It does not submit or persist the transaction; the seller receives
+// it only after AcceptRefundPresign has durably recorded the refund proof.
 func (workflow *Workflow) BuildFundingTxDelivery(fundingTx []byte) (*pool.FundingTxDelivery, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -215,7 +223,11 @@ func (workflow *Workflow) RefundAfterExpiry(ctx context.Context, spendTxID pool.
 	return submittedTxID, nil
 }
 
-// BuildImmediateClose constructs the buyer-authorized immediate-close transaction from the accepted payment state.
+// BuildImmediateClose constructs the unsigned immediate-close transaction and
+// buyer detached signature from the accepted pool state. The caller passes the
+// result to the seller, who adds the seller signature; then the caller invokes
+// SubmitImmediateClose to submit the merged transaction. That method persists
+// the state only after the node accepts the final transaction.
 func (workflow *Workflow) BuildImmediateClose(ctx context.Context, input pool.CloseInput) (*pool.UnsignedPayment, []byte, error) {
 	if workflow == nil {
 		return nil, nil, errors.New("buyer workflow is required")
@@ -291,7 +303,9 @@ type ContentRequestInput struct {
 	DeliveryDeadline      bitfs.UnixSeconds
 }
 
-// RequestContent creates the signed protocol request for the selected content or workflow step.
+// RequestContent validates the quote hash, selected arbiter, content reference,
+// size, and deadline, then signs the 003 request. It does not read content or
+// change pool state; the seller validates and fulfills the returned credential.
 func (workflow *Workflow) RequestContent(ctx context.Context, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -398,8 +412,9 @@ func (workflow *Workflow) RequestContent(ctx context.Context, input ContentReque
 	return &bitfs.SignedContentRequest{TermsCBOR: raw, BuyerSignature: append([]byte(nil), signature...)}, nil
 }
 
-// AcceptDelivery verifies 004 and its content, optionally stores the payload,
-// then constructs and buyer-signs the corresponding cumulative payment update.
+// AcceptDelivery verifies the request linkage, seller signature, content hash,
+// and size in the 004 delivery. After optional ContentSink persistence succeeds,
+// it builds and signs the next 005 cumulative payment update.
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery) (*pool.PaymentUpdate, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")

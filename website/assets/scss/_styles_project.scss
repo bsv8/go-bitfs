@@ -1,0 +1,20 @@
+.td-navbar {
+  border-bottom: 1px solid rgba(201, 135, 42, 0.28);
+}
+
+.td-content > h1:first-child {
+  letter-spacing: -0.035em;
+}
+
+.td-content code {
+  font-variant-ligatures: none;
+}
+
+.td-content table:not(.highlight) {
+  width: 100%;
+}
+
+.td-content .Documentation-declarationLink {
+  text-decoration-color: rgba(201, 135, 42, 0.45);
+  text-underline-offset: 0.2em;
+}

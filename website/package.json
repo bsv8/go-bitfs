@@ -1,0 +1,23 @@
+{
+  "name": "go-bitfs-docs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source-driven documentation site for go-bitfs",
+  "scripts": {
+    "clean": "rm -rf public resources content/reference",
+    "generate:api": "rm -rf content/reference && GOFLAGS=-mod=mod GOWORK=off go run go.abhg.dev/doc2go@v0.12.2 -C .. -embed -basename _index.html -frontmatter website/doc2go-frontmatter.tmpl -home github.com/bsv8/go-bitfs -out website/content/reference ./...",
+    "build": "npm run clean && npm run generate:api && hugo --minify",
+    "serve": "npm run generate:api && hugo server --disableFastRender",
+    "check": "npm run build"
+  },
+  "devDependencies": {
+    "@docsy/theme": "0.16.0",
+    "autoprefixer": "10.5.4",
+    "hugo-extended": "0.164.0",
+    "postcss": "8.5.26",
+    "postcss-cli": "11.0.1"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
+  }
+}

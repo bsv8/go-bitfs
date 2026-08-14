@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
@@ -20,9 +21,11 @@ type QuoteStore interface {
 	LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
 }
 
-// ContentSource reads seed or block bytes selected by a validated content request.
+// ContentSource reads raw seed or block bytes selected by a validated content
+// request. The workflow re-verifies every loaded result before use.
 type ContentSource interface {
-	LoadContent(context.Context, bitfs.Hash32) ([]byte, error)
+	LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
+	LoadBlock(context.Context, masterseed.Digest) ([]byte, error)
 }
 
 // WorkflowConfig supplies every seller dependency: signing and verification,
@@ -174,18 +177,27 @@ func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *
 	if err != nil {
 		return nil, err
 	}
+	// Authenticate the signed 003 request before touching ContentSource. This
+	// prevents unauthenticated requests from causing seed/block storage I/O.
+	if _, err = bitfs.VerifySignedContentRequestAt(request, quote, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier); err != nil {
+		return nil, err
+	}
 	var seed []byte
+	var blockMatches masterseed.BlockMatches
 	if requestTerms.ContentType == bitfs.ContentBlock {
-		seedHash := sellerHash32(quoteTerms.SeedHash)
-		seed, err = workflow.content.LoadContent(ctx, seedHash)
+		seedHash, hashErr := masterseed.DigestFromBytes(quoteTerms.SeedHash)
+		if hashErr != nil {
+			return nil, fmt.Errorf("%w: quote seed hash: %v", bitfs.ErrInvalidEvidence, hashErr)
+		}
+		seed, err = workflow.content.LoadSeed(ctx, seedHash)
 		if err != nil {
-			return nil, fmt.Errorf("load seed for block membership: %w", err)
+			return nil, fmt.Errorf("load seed: %w", err)
 		}
 		seed = append([]byte(nil), seed...)
-	}
-	_, err = bitfs.VerifySignedContentRequestWithSeedAt(request, quote, seed, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier)
-	if err != nil {
-		return nil, err
+		blockMatches, err = bitfs.VerifyBlockReference(ctx, quoteTerms, requestTerms.ContentHash, seed)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sellerPubkey, err := workflow.signer.PublicKey(ctx)
 	if err != nil {
@@ -217,13 +229,25 @@ func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *
 	if err := workflow.transactions.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	payload, err := workflow.content.LoadContent(ctx, sellerHash32(requestTerms.ContentHash))
+	contentHash, hashErr := masterseed.DigestFromBytes(requestTerms.ContentHash)
+	if hashErr != nil {
+		return nil, fmt.Errorf("%w: content hash: %v", bitfs.ErrInvalidEvidence, hashErr)
+	}
+	var payload []byte
+	if requestTerms.ContentType == bitfs.ContentSeed {
+		payload, err = workflow.content.LoadSeed(ctx, contentHash)
+	} else {
+		payload, err = workflow.content.LoadBlock(ctx, contentHash)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load content: %w", err)
 	}
 	payload = append([]byte(nil), payload...)
-	if err := bitfs.VerifyContentPayload(quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, payload, seed, true); err != nil {
+	if err := bitfs.VerifyContentPayloadContext(ctx, quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, payload, seed, requestTerms.ContentType == bitfs.ContentSeed); err != nil {
 		return nil, err
+	}
+	if requestTerms.ContentType == bitfs.ContentBlock && !sellerBlockSizeMatches(quoteTerms.FileSize, uint64(len(payload)), blockMatches) {
+		return nil, fmt.Errorf("%w: block payload size does not match a committed block position", bitfs.ErrInvalidEvidence)
 	}
 	price, err := bitfs.ContentPriceSat(quoteTerms, requestTerms.ContentType, uint64(len(payload)))
 	if err != nil {
@@ -274,7 +298,7 @@ func (workflow *Workflow) DeliverRequestedContent(ctx context.Context, request *
 	if err != nil {
 		return nil, err
 	}
-	if _, err := bitfs.VerifySignedContentDeliveryWithSeedAt(request, delivery, quote, seed, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier, workflow.signatureVerifier); err != nil {
+	if _, err := bitfs.VerifySignedContentDeliveryAt(request, delivery, quote, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier, workflow.signatureVerifier); err != nil {
 		return nil, err
 	}
 	keepPending = true
@@ -459,6 +483,19 @@ func sellerHash32(raw []byte) bitfs.Hash32 {
 	return result
 }
 
+func sellerBlockSizeMatches(fileSize, contentSize uint64, matches masterseed.BlockMatches) bool {
+	if matches.MatchCount == 0 {
+		return false
+	}
+	for _, index := range []uint64{matches.FirstIndex, matches.LastIndex} {
+		expected, err := masterseed.ExpectedBlockSize(fileSize, index)
+		if err == nil && expected == contentSize {
+			return true
+		}
+	}
+	return false
+}
+
 func poolHash32Seller(raw []byte) pool.Hash32 {
 	var result pool.Hash32
 	copy(result[:], raw)
@@ -614,6 +651,9 @@ func (workflow *Workflow) SubmitArbitratedPayment(ctx context.Context, request *
 			return nil, errors.Join(uncertain, err, markErr)
 		}
 		return nil, errors.Join(uncertain, err)
+	}
+	if err := workflow.pending.Release(ctx, unsigned.SpendTxID, poolHash32Seller(requestHash[:])); err != nil {
+		return nil, fmt.Errorf("release pending request after arbitration: %w", err)
 	}
 	return clonePaymentStateSeller(&signed.State), nil
 }

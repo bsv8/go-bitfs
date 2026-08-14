@@ -42,9 +42,11 @@ transport/   可选的调用方适配层；SDK 核心不依赖它
 ## 通用约定
 
 ```go
-// Hash32 表示 SHA-256 结果。公开 API 不接受长度不明的“哈希字符串”。
+// package bitfs；package pool
+// 两个包都使用固定 32 字节的 SHA-256 引用，但属于各自包的 API 类型。
 type Hash32 [32]byte
 
+// package bitfs
 // UnixSeconds 使用 UTC Unix 秒，与 001、003 的 CBOR 字段一致。
 type UnixSeconds int64
 ```
@@ -86,15 +88,41 @@ CBOR 的打包与解包属于 SDK，不属于 HTTP、WebSocket、队列或应用
 type Kind uint16
 
 const (
-    Quote                     Kind = 1 // 001 SignedFileQuote。
-    PoolRefundPresignRequest  Kind = 2 // 002 买方 -> 卖方。
-    PoolRefundPresignResponse Kind = 3 // 002 卖方 -> 买方。
-    PoolFundingTxDelivery     Kind = 4 // 002 买方 -> 卖方。
-    ContentRequest            Kind = 5 // 003 买方 -> 卖方。
-    ContentDelivery           Kind = 6 // 004 卖方 -> 买方。
-    CumulativePayment         Kind = 7 // 005 买方 -> 卖方。
-    ArbitrationRequest        Kind = 8 // 007 卖方 -> 仲裁者。
-    ArbitrationResponse       Kind = 9 // 007 仲裁者 -> 卖方。
+    // Quote 是签名文件报价。
+    // Direction: 卖方 -> 买方。
+    Quote Kind = 1
+
+    // PoolRefundPresignRequest 请求卖方签署退款交易。
+    // Direction: 买方 -> 卖方。
+    PoolRefundPresignRequest Kind = 2
+
+    // PoolRefundPresignResponse 携带卖方的退款交易签名。
+    // Direction: 卖方 -> 买方。
+    PoolRefundPresignResponse Kind = 3
+
+    // PoolFundingTxDelivery 携带已签名的资金交易。
+    // Direction: 买方 -> 卖方。
+    PoolFundingTxDelivery Kind = 4
+
+    // ContentRequest 携带签名内容请求和付款授权。
+    // Direction: 买方 -> 卖方。
+    ContentRequest Kind = 5
+
+    // ContentDelivery 携带签名内容交付。
+    // Direction: 卖方 -> 买方。
+    ContentDelivery Kind = 6
+
+    // CumulativePayment 携带累计付款更新。
+    // Direction: 买方 -> 卖方。
+    CumulativePayment Kind = 7
+
+    // ArbitrationRequest 携带仲裁证据。
+    // Direction: 卖方 -> 仲裁者。
+    ArbitrationRequest Kind = 8
+
+    // ArbitrationResponse 携带仲裁者的签名结果。
+    // Direction: 仲裁者 -> 卖方。
+    ArbitrationResponse Kind = 9
 )
 
 // Packet 是应用可以直接投递的统一报文表示。
@@ -137,52 +165,61 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。
 
-`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由 `VerifyQuote`、`VerifyContentDelivery`、`MultisigPoolPort.Verify…` 等校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
+`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由配置的签名验证回调和角色工作流校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
 ## 纯协议 API
 
 这些函数没有存储、网络和时间以外的副作用，适合钱包、服务端、CLI 和测试直接使用。
 
 ```go
-// CreateQuote 对 FileQuoteTerms 的 deterministic CBOR 进行签名，生成 001 报价凭证。
-// draft 包含 seed 哈希、种子价、块价、文件大小、买方公钥、失效时间和可选仲裁公钥。
+// package bitfs
+// NewSignedFileQuote 对 FileQuoteTerms 的 deterministic CBOR 进行签名，生成 001 报价凭证。
 // recommendedFilename 仅为展示信息，不进入签名条款。
-func CreateQuote(
-    ctx context.Context,
-    draft bitfs.FileQuoteTerms,
+func NewSignedFileQuote(
+    terms *FileQuoteTerms,
+    sellerPubkey []byte,
     recommendedFilename string,
-    seller Signer,
-) (*bitfs.SignedFileQuote, error)
+    signer QuoteTermsSigner,
+) (*SignedFileQuote, error)
 
-// VerifyQuote 验证卖方签名、字段约束和 expires_at；成功时返回已解析的不可变条款。
-func VerifyQuote(
-    quote *bitfs.SignedFileQuote,
-    now UnixSeconds,
-    verifier SignatureVerifier,
-) (*bitfs.FileQuoteTerms, error)
+// VerifySignedFileQuoteAt 在指定时间验证卖方签名、字段约束和 expires_at。
+func VerifySignedFileQuoteAt(
+    quote *SignedFileQuote,
+    now time.Time,
+    verifier QuoteTermsSignatureVerifier,
+) (*FileQuoteTerms, error)
 
-// CreateContentRequest 构造并由买方签署 003。
-// poolRef 指定 SpendTxID 与当前 BasePaymentSequence；content 只接受 Seed 或 Block + 内容哈希。
-// 它不锁池、不下载内容、不创建付款交易。
-func CreateContentRequest(
-    ctx context.Context,
-    quote *bitfs.SignedFileQuote,
-    poolRef pool.Reference,
-    selectedArbiterPubKey []byte,
-    content bitfs.ContentRef,
-    deliveryDeadline UnixSeconds,
-    buyer Signer,
-) (*bitfs.SignedContentRequest, error)
+// NewSignedContentRequest 对 003 条款做确定性编码并签名。
+func NewSignedContentRequest(
+    terms *ContentRequestTerms,
+    signer ContentTermsSigner,
+) (*SignedContentRequest, error)
 
-// VerifyContentDelivery 验证 004 引用的 003、卖方签名、内容哈希和实际长度。
-// 可选 sink 非 nil 时，仅在全部验证成功后保存内容。
-func VerifyContentDelivery(
-    ctx context.Context,
-    request *bitfs.SignedContentRequest,
-    delivery *bitfs.SignedContentDelivery,
-    quote *bitfs.SignedFileQuote,
-    now UnixSeconds,
-    verifier SignatureVerifier,
-    sink ContentSink,
+// VerifySignedContentRequestAt 验证报价绑定、买方签名、仲裁者选择和交付期限。
+func VerifySignedContentRequestAt(
+    request *SignedContentRequest,
+    quote *SignedFileQuote,
+    now time.Time,
+    quoteVerifier QuoteTermsSignatureVerifier,
+    buyerVerifier ContentTermsSignatureVerifier,
+) (*ContentRequestTerms, error)
+
+// NewSignedContentDelivery 将 payload 绑定到 003 并签名 004 条款。
+func NewSignedContentDelivery(
+    request *SignedContentRequest,
+    payload []byte,
+    signer ContentTermsSigner,
+) (*SignedContentDelivery, error)
+
+// VerifySignedContentDeliveryWithSeedAt 使用已验证的 seed 额外检查块归属和块长度。
+func VerifySignedContentDeliveryWithSeedAt(
+    request *SignedContentRequest,
+    delivery *SignedContentDelivery,
+    quote *SignedFileQuote,
+    seed []byte,
+    now time.Time,
+    quoteVerifier QuoteTermsSignatureVerifier,
+    buyerVerifier ContentTermsSignatureVerifier,
+    sellerVerifier ContentTermsSignatureVerifier,
 ) ([]byte, error)
 ```

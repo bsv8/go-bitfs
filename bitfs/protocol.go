@@ -4,7 +4,12 @@
 // transactions; buyer and seller workflows inject those capabilities.
 package bitfs
 
+import masterseed "github.com/bsv8/MasterSeed"
+
 const (
-	// BlockSize is the fixed block size limit in bytes.
-	BlockSize uint64 = 256 * 1024
+	// BlockSize is retained as a compatibility alias. MasterSeed is the
+	// authoritative owner of seed protocol constants.
+	BlockSize uint64 = masterseed.BlockSize
+	// DigestSize is the byte width of a seed digest.
+	DigestSize = masterseed.DigestSize
 )

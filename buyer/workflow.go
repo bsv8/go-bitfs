@@ -3,11 +3,11 @@ package buyer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
 
+	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
 )
@@ -24,10 +24,10 @@ type ContentSink interface {
 	SaveVerifiedContent(context.Context, bitfs.Hash32, []byte) error
 }
 
-// SeedSource supplies a previously verified seed so block requests can be
-// checked against the seed's committed block-hash list.
+// SeedSource supplies raw seed bytes. The workflow re-verifies the seed hash,
+// structure, source-size binding, and block membership before use.
 type SeedSource interface {
-	LoadSeed(context.Context, bitfs.Hash32) ([]byte, error)
+	LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
 }
 
 // WorkflowConfig supplies the buyer workflow's signer, quote/content verifiers,
@@ -334,7 +334,7 @@ func (workflow *Workflow) RequestContent(ctx context.Context, input ContentReque
 	if len(selectedArbiter) == 0 || !quoteAllowsArbiter(terms, selectedArbiter) {
 		return nil, fmt.Errorf("%w: selected arbiter is not allowed by quote", bitfs.ErrInvalidEvidence)
 	}
-	if len(contentHash) != sha256.Size {
+	if len(contentHash) != masterseed.DigestSize {
 		return nil, fmt.Errorf("%w: content hash must be 32 bytes", bitfs.ErrInvalidEvidence)
 	}
 	if input.DeliveryDeadline <= bitfs.UnixSeconds(workflow.clock().Unix()) {
@@ -366,8 +366,17 @@ func (workflow *Workflow) RequestContent(ctx context.Context, input ContentReque
 	if err != nil {
 		return nil, err
 	}
-	if err := bitfs.VerifyContentReference(terms, input.Content.Type, contentHash, seed, input.Content.Type == bitfs.ContentBlock); err != nil {
+	if err := bitfs.VerifyContentReferenceContext(ctx, terms, input.Content.Type, contentHash, seed, false); err != nil {
 		return nil, err
+	}
+	if input.Content.Type == bitfs.ContentBlock {
+		matches, err := bitfs.VerifyBlockReference(ctx, terms, contentHash, seed)
+		if err != nil {
+			return nil, err
+		}
+		if !contentSizeMatchesBlock(terms.FileSize, input.ContentSize, matches) {
+			return nil, fmt.Errorf("%w: content size %d does not match any committed block position", bitfs.ErrInvalidEvidence, input.ContentSize)
+		}
 	}
 	contentSize := input.ContentSize
 	if input.Content.Type == bitfs.ContentSeed {
@@ -412,6 +421,22 @@ func (workflow *Workflow) RequestContent(ctx context.Context, input ContentReque
 	return &bitfs.SignedContentRequest{TermsCBOR: raw, BuyerSignature: append([]byte(nil), signature...)}, nil
 }
 
+// contentSizeMatchesBlock checks only real match endpoints returned by
+// MasterSeed. It intentionally never treats an index between FirstIndex and
+// LastIndex as a match when duplicate hashes are non-contiguous.
+func contentSizeMatchesBlock(fileSize, contentSize uint64, matches masterseed.BlockMatches) bool {
+	if matches.MatchCount == 0 {
+		return false
+	}
+	for _, index := range []uint64{matches.FirstIndex, matches.LastIndex} {
+		expected, err := masterseed.ExpectedBlockSize(fileSize, index)
+		if err == nil && expected == contentSize {
+			return true
+		}
+	}
+	return false
+}
+
 // AcceptDelivery verifies the request linkage, seller signature, content hash,
 // and size in the 004 delivery. After optional ContentSink persistence succeeds,
 // it builds and signs the next 005 cumulative payment update.
@@ -442,7 +467,7 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, request *bitfs.Sig
 	if err != nil {
 		return nil, err
 	}
-	payload, err := bitfs.VerifySignedContentDeliveryWithSeedAt(localRequest, localDelivery, quote, seed, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier, workflow.signatureVerifier)
+	payload, err := bitfs.VerifySignedContentDeliveryWithSeedAtContext(ctx, localRequest, localDelivery, quote, seed, workflow.clock(), workflow.quoteVerifier, workflow.signatureVerifier, workflow.signatureVerifier)
 	if err != nil {
 		return nil, err
 	}
@@ -550,10 +575,13 @@ func (workflow *Workflow) seedForContent(ctx context.Context, quoteTerms *bitfs.
 	if workflow.seedSource == nil {
 		return nil, fmt.Errorf("%w: a verified seed is required before requesting a block", bitfs.ErrContentNotInSeed)
 	}
-	seedHash := hash32(quoteTerms.SeedHash)
+	seedHash, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: quote seed hash: %v", bitfs.ErrInvalidEvidence, err)
+	}
 	seed, err := workflow.seedSource.LoadSeed(ctx, seedHash)
 	if err != nil {
-		return nil, fmt.Errorf("load verified seed: %w", err)
+		return nil, fmt.Errorf("load seed: %w", err)
 	}
 	return append([]byte(nil), seed...), nil
 }

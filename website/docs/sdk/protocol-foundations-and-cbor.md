@@ -42,9 +42,11 @@ transport/   Optional application adapter layer; the SDK core does not depend on
 ## Common conventions
 
 ```go
-// Hash32 is a SHA-256 result. Public APIs do not accept ambiguous hash strings.
+// package bitfs; package pool
+// Both packages use a fixed-width SHA-256 reference for their own API types.
 type Hash32 [32]byte
 
+// package bitfs
 // UnixSeconds is UTC Unix time in seconds, matching the fields in 001 and 003.
 type UnixSeconds int64
 ```
@@ -87,15 +89,41 @@ CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or 
 type Kind uint16
 
 const (
-    Quote                     Kind = 1 // 001 SignedFileQuote.
-    PoolRefundPresignRequest  Kind = 2 // 002 buyer -> seller.
-    PoolRefundPresignResponse Kind = 3 // 002 seller -> buyer.
-    PoolFundingTxDelivery     Kind = 4 // 002 buyer -> seller.
-    ContentRequest            Kind = 5 // 003 buyer -> seller.
-    ContentDelivery           Kind = 6 // 004 seller -> buyer.
-    CumulativePayment         Kind = 7 // 005 buyer -> seller.
-    ArbitrationRequest        Kind = 8 // 007 seller -> arbiter.
-    ArbitrationResponse       Kind = 9 // 007 arbiter -> seller.
+    // Quote is a signed file quote.
+    // Direction: seller -> buyer.
+    Quote Kind = 1
+
+    // PoolRefundPresignRequest requests the seller's refund signature.
+    // Direction: buyer -> seller.
+    PoolRefundPresignRequest Kind = 2
+
+    // PoolRefundPresignResponse carries the seller's refund signature.
+    // Direction: seller -> buyer.
+    PoolRefundPresignResponse Kind = 3
+
+    // PoolFundingTxDelivery carries the signed funding transaction.
+    // Direction: buyer -> seller.
+    PoolFundingTxDelivery Kind = 4
+
+    // ContentRequest carries the signed content request and payment authorization.
+    // Direction: buyer -> seller.
+    ContentRequest Kind = 5
+
+    // ContentDelivery carries the signed content payload.
+    // Direction: seller -> buyer.
+    ContentDelivery Kind = 6
+
+    // CumulativePayment carries a cumulative payment update.
+    // Direction: buyer -> seller.
+    CumulativePayment Kind = 7
+
+    // ArbitrationRequest carries evidence for arbitration.
+    // Direction: seller -> arbiter.
+    ArbitrationRequest Kind = 8
+
+    // ArbitrationResponse carries the arbiter's signature result.
+    // Direction: arbiter -> seller.
+    ArbitrationResponse Kind = 9
 )
 
 // Packet is a transport-ready representation. Kind belongs in the outer
@@ -138,52 +166,64 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 006 introduces no application-level close message. Closing uses raw transactions already retained from 002 and 005; applications should not invent a CBOR `CloseRequest`.
 
-`Unmarshal` answers only whether bytes conform to a message schema. `VerifyQuote`, `VerifyContentDelivery`, and `MultisigPoolPort.Verify…` subsequently validate signatures, quote expiry, payment-pool inputs, and amounts. A decoder MUST NOT expose “decoded” as “verified” or “paid.”
+`Unmarshal` answers only whether bytes conform to a message schema. The configured signature-verifier callbacks and the role workflow subsequently validate signatures, quote expiry, payment-pool inputs, and amounts. A decoder MUST NOT expose “decoded” as “verified” or “paid.”
 
 ## Pure protocol API
 
 These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests.
 
 ```go
-// CreateQuote signs deterministic FileQuoteTerms CBOR and creates a 001
+// package bitfs
+// NewSignedFileQuote signs deterministic FileQuoteTerms CBOR and creates a 001
 // credential. recommendedFilename is display-only and is not signed.
-func CreateQuote(
-    ctx context.Context,
-    draft bitfs.FileQuoteTerms,
+func NewSignedFileQuote(
+    terms *FileQuoteTerms,
+    sellerPubkey []byte,
     recommendedFilename string,
-    seller Signer,
-) (*bitfs.SignedFileQuote, error)
+    signer QuoteTermsSigner,
+) (*SignedFileQuote, error)
 
-// VerifyQuote checks the seller signature, field constraints, and expiry and
-// returns independently parsed terms.
-func VerifyQuote(
-    quote *bitfs.SignedFileQuote,
-    now UnixSeconds,
-    verifier SignatureVerifier,
-) (*bitfs.FileQuoteTerms, error)
+// VerifySignedFileQuoteAt checks the seller signature, field constraints, and
+// expiry at the supplied wall-clock time.
+func VerifySignedFileQuoteAt(
+    quote *SignedFileQuote,
+    now time.Time,
+    verifier QuoteTermsSignatureVerifier,
+) (*FileQuoteTerms, error)
 
-// CreateContentRequest creates buyer-signed 003. poolRef identifies SpendTxID
-// and the current BasePaymentSequence; content is a Seed or Block plus hash.
-// It does not lock a pool, download content, or create a payment transaction.
-func CreateContentRequest(
-    ctx context.Context,
-    quote *bitfs.SignedFileQuote,
-    poolRef pool.Reference,
-    selectedArbiterPubKey []byte,
-    content bitfs.ContentRef,
-    deliveryDeadline UnixSeconds,
-    buyer Signer,
-) (*bitfs.SignedContentRequest, error)
+// NewSignedContentRequest deterministically encodes 003 terms and signs them.
+func NewSignedContentRequest(
+    terms *ContentRequestTerms,
+    signer ContentTermsSigner,
+) (*SignedContentRequest, error)
 
-// VerifyContentDelivery checks the 004 reference to 003, seller signature,
-// content hash, and exact length. It writes to sink only after every check.
-func VerifyContentDelivery(
-    ctx context.Context,
-    request *bitfs.SignedContentRequest,
-    delivery *bitfs.SignedContentDelivery,
-    quote *bitfs.SignedFileQuote,
-    now UnixSeconds,
-    verifier SignatureVerifier,
-    sink ContentSink,
+// VerifySignedContentRequestAt checks quote binding, the buyer signature,
+// arbiter selection, and the delivery deadline.
+func VerifySignedContentRequestAt(
+    request *SignedContentRequest,
+    quote *SignedFileQuote,
+    now time.Time,
+    quoteVerifier QuoteTermsSignatureVerifier,
+    buyerVerifier ContentTermsSignatureVerifier,
+) (*ContentRequestTerms, error)
+
+// NewSignedContentDelivery binds payload bytes to 003 and signs 004 terms.
+func NewSignedContentDelivery(
+    request *SignedContentRequest,
+    payload []byte,
+    signer ContentTermsSigner,
+) (*SignedContentDelivery, error)
+
+// VerifySignedContentDeliveryWithSeedAt additionally checks block membership
+// and block length using the previously verified seed.
+func VerifySignedContentDeliveryWithSeedAt(
+    request *SignedContentRequest,
+    delivery *SignedContentDelivery,
+    quote *SignedFileQuote,
+    seed []byte,
+    now time.Time,
+    quoteVerifier QuoteTermsSignatureVerifier,
+    buyerVerifier ContentTermsSignatureVerifier,
+    sellerVerifier ContentTermsSignatureVerifier,
 ) ([]byte, error)
 ```

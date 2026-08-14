@@ -21,23 +21,32 @@ const ProtocolFamily = "bitfs.protocol.v3"
 type Kind uint16
 
 const (
-	// Quote identifies a signed file quote message.
+	// Quote is a signed file quote.
+	// Direction: seller -> buyer.
 	Quote Kind = 1
-	// PoolRefundPresignRequest identifies a pool opening request.
+	// PoolRefundPresignRequest requests the seller's refund signature.
+	// Direction: buyer -> seller.
 	PoolRefundPresignRequest Kind = 2
-	// PoolRefundPresignResponse identifies a pool opening response.
+	// PoolRefundPresignResponse carries the seller's refund signature.
+	// Direction: seller -> buyer.
 	PoolRefundPresignResponse Kind = 3
-	// PoolFundingTxDelivery identifies delivery of the pool funding transaction.
+	// PoolFundingTxDelivery carries the signed funding transaction.
+	// Direction: buyer -> seller.
 	PoolFundingTxDelivery Kind = 4
-	// ContentRequest identifies a buyer's signed content request.
+	// ContentRequest carries the signed content request and payment authorization.
+	// Direction: buyer -> seller.
 	ContentRequest Kind = 5
-	// ContentDelivery identifies a seller's signed content delivery.
+	// ContentDelivery carries the signed content payload.
+	// Direction: seller -> buyer.
 	ContentDelivery Kind = 6
-	// CumulativePayment identifies a buyer-authorized payment update.
+	// CumulativePayment carries a cumulative payment update.
+	// Direction: buyer -> seller.
 	CumulativePayment Kind = 7
-	// ArbitrationRequest identifies evidence sent from a seller to an arbiter.
+	// ArbitrationRequest carries evidence for arbitration.
+	// Direction: seller -> arbiter.
 	ArbitrationRequest Kind = 8
-	// ArbitrationResponse identifies the arbiter signature returned to a seller.
+	// ArbitrationResponse carries the arbiter's signature result.
+	// Direction: arbiter -> seller.
 	ArbitrationResponse Kind = 9
 )
 

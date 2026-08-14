@@ -1,8 +1,8 @@
 package integration
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -13,6 +13,7 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
+	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
@@ -79,18 +80,42 @@ func (s *integrationQuoteStore) LoadQuote(_ context.Context, hash bitfs.Hash32) 
 	return cloneIntegrationQuote(quote), nil
 }
 
-type integrationContent struct{ payloads map[bitfs.Hash32][]byte }
+type integrationContent struct {
+	payloads   map[masterseed.Digest][]byte
+	seedLoads  *int
+	blockLoads *int
+}
 
-func (s integrationContent) LoadContent(_ context.Context, hash bitfs.Hash32) ([]byte, error) {
-	payload := s.payloads[hash]
-	if payload == nil {
+func (s integrationContent) load(_ context.Context, hash masterseed.Digest) ([]byte, error) {
+	payload, ok := s.payloads[hash]
+	if !ok {
 		return nil, fmt.Errorf("content not found")
 	}
 	return append([]byte(nil), payload...), nil
 }
 
-func (s integrationContent) LoadSeed(ctx context.Context, hash bitfs.Hash32) ([]byte, error) {
-	return s.LoadContent(ctx, hash)
+func (s integrationContent) LoadSeed(ctx context.Context, hash masterseed.Digest) ([]byte, error) {
+	if s.seedLoads != nil {
+		*s.seedLoads = *s.seedLoads + 1
+	}
+	return s.load(ctx, hash)
+}
+
+func (s integrationContent) LoadBlock(ctx context.Context, hash masterseed.Digest) ([]byte, error) {
+	if s.blockLoads != nil {
+		*s.blockLoads = *s.blockLoads + 1
+	}
+	return s.load(ctx, hash)
+}
+
+type badSeedSource struct{ raw []byte }
+
+func (s badSeedSource) LoadSeed(context.Context, masterseed.Digest) ([]byte, error) {
+	bad := append([]byte(nil), s.raw...)
+	if len(bad) > 0 {
+		bad[0] ^= 0xff
+	}
+	return bad, nil
 }
 
 type integrationNode struct {
@@ -172,13 +197,16 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	sellerOpeningPort := pool.SellerOpeningPort{Store: store, RefundSigner: pool.PoolRefundSigner{Adapter: sellerPool}, Calculator: calculator, FundingVerifier: engine, FundingSubmitter: node}
 	quotes := &integrationQuoteStore{}
 	payload := []byte("abc")
-	payloadHash := sha256.Sum256(payload)
-	seed, err := bitfs.BuildSeedBytes([][]byte{payloadHash[:]})
-	if err != nil {
+	payloadHash := masterseed.Sum256(payload)
+	var seedBytes []byte
+	var seedOutput bytes.Buffer
+	if _, err := masterseed.CreateSeed(ctx, bytes.NewReader(payload), &seedOutput); err != nil {
 		t.Fatal(err)
 	}
-	seedHash := bitfs.SeedHash(seed)
-	content := integrationContent{payloads: map[bitfs.Hash32][]byte{bitfs.Hash32(payloadHash): payload, bitfs.Hash32(seedHash): seed}}
+	seedBytes = seedOutput.Bytes()
+	seedHash := masterseed.Sum256(seedBytes)
+	seedLoads, blockLoads := 0, 0
+	content := integrationContent{payloads: map[masterseed.Digest][]byte{payloadHash: payload, seedHash: seedBytes}, seedLoads: &seedLoads, blockLoads: &blockLoads}
 	arbiters, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +225,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	quote, err := sellerWorkflow.CreateQuote(ctx, bitfs.FileQuoteTerms{SeedHash: seedHash[:], BuyerPubkey: buyerKey.PubKey().Compressed(), SeedPriceSat: 5, FullBlockPriceSat: 100, FileSize: uint64(len(payload)), QuoteExpiresAtUnix: now.Unix() + 1000, SupportedArbiterPubkeysCBOR: arbiters}, "file")
+	quote, err := sellerWorkflow.CreateQuote(ctx, bitfs.FileQuoteTerms{SeedHash: seedHash.Bytes(), BuyerPubkey: buyerKey.PubKey().Compressed(), SeedPriceSat: 5, FullBlockPriceSat: 100, FileSize: uint64(len(payload)), QuoteExpiresAtUnix: now.Unix() + 1000, SupportedArbiterPubkeysCBOR: arbiters}, "file")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,9 +265,80 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: *reference, SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(), Content: bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash[:]}, ContentSize: uint64(len(payload)), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100)})
+	beforeSizeCheck, err := store.LoadAcceptedPayment(ctx, reference.SpendTxID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	_, err = buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
+		QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: *reference,
+		SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(),
+		Content:               bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash.Bytes()},
+		ContentSize:           uint64(len(payload) + 1), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100),
+	})
+	if err == nil || !errors.Is(err, bitfs.ErrInvalidEvidence) {
+		t.Fatalf("buyer accepted an invalid content size: %v", err)
+	}
+	afterSizeCheck, err := store.LoadAcceptedPayment(ctx, reference.SpendTxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeSizeCheck == nil || afterSizeCheck == nil || beforeSizeCheck.PaymentSequence != afterSizeCheck.PaymentSequence || beforeSizeCheck.SellerAmountSat != afterSizeCheck.SellerAmountSat {
+		t.Fatalf("invalid content-size request changed pool state: before=%+v after=%+v", beforeSizeCheck, afterSizeCheck)
+	}
+	badSeedWorkflow, err := buyer.NewWorkflow(buyer.WorkflowConfig{
+		Signer: buyerSigner, QuoteVerifier: verifyIntegrationSignature, SignatureVerifier: verifyIntegrationSignature, Clock: clock,
+		Quotes: quotes, Pools: store, Opening: openingPort, Participants: engine, Node: verifiedNode, Transactions: buyerPool,
+		SeedSource: badSeedSource{raw: seedBytes},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = badSeedWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
+		QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: *reference,
+		SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(),
+		Content:               bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash.Bytes()},
+		ContentSize:           uint64(len(payload)), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100),
+	})
+	if err == nil || masterseed.CodeOf(err) != masterseed.SeedHashMismatch || !errors.Is(err, bitfs.ErrInvalidEvidence) {
+		t.Fatalf("buyer trusted an invalid loaded seed: code=%q err=%v", masterseed.CodeOf(err), err)
+	}
+	request, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: *reference, SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(), Content: bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash.Bytes()}, ContentSize: uint64(len(payload)), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLoadsBeforeInvalid, blockLoadsBeforeInvalid := seedLoads, blockLoads
+	invalidRequest := bitfs.CloneSignedContentRequest(request)
+	invalidRequest.BuyerSignature = []byte{0x00}
+	if _, err := sellerWorkflow.DeliverRequestedContent(ctx, invalidRequest); err == nil || !errors.Is(err, bitfs.ErrInvalidEvidence) {
+		t.Fatalf("seller accepted invalidly signed request: %v", err)
+	}
+	if seedLoads != seedLoadsBeforeInvalid || blockLoads != blockLoadsBeforeInvalid {
+		t.Fatalf("invalid request caused content I/O: seed=%d->%d block=%d->%d", seedLoadsBeforeInvalid, seedLoads, blockLoadsBeforeInvalid, blockLoads)
+	}
+	seedRequest, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
+		QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: *reference,
+		SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(),
+		Content:               bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: seedHash.Bytes()},
+		ContentSize:           1, DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100),
+	})
+	if err != nil {
+		t.Fatalf("build seed request: %v", err)
+	}
+	seedLoadsBeforeDelivery, blockLoadsBeforeDelivery := seedLoads, blockLoads
+	if _, err := sellerWorkflow.DeliverRequestedContent(ctx, seedRequest); err != nil {
+		t.Fatalf("deliver seed request: %v", err)
+	}
+	if seedLoads != seedLoadsBeforeDelivery+1 || blockLoads != blockLoadsBeforeDelivery {
+		t.Fatalf("seed request routed to wrong content loader: seed=%d->%d block=%d->%d", seedLoadsBeforeDelivery, seedLoads, blockLoadsBeforeDelivery, blockLoads)
+	}
+	authorizationHash, err := bitfs.PaymentAuthorizationHash(seedRequest.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pendingHash pool.Hash32
+	copy(pendingHash[:], authorizationHash[:])
+	if err := store.Release(ctx, reference.SpendTxID, pendingHash); err != nil {
+		t.Fatalf("release seed test pending request: %v", err)
 	}
 	delivery, err := sellerWorkflow.DeliverRequestedContent(ctx, request)
 	if err != nil {
@@ -274,7 +373,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request2, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: pool.Reference{SpendTxID: reference.SpendTxID, BasePaymentSequence: latest.PaymentSequence}, SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(), Content: bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash[:]}, ContentSize: uint64(len(payload)), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100)})
+	request2, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{QuoteTermsHash: bitfs.Hash32(quoteHash), Pool: pool.Reference{SpendTxID: reference.SpendTxID, BasePaymentSequence: latest.PaymentSequence}, SelectedArbiterPubKey: arbiterKey.PubKey().Compressed(), Content: bitfs.ContentRef{Type: bitfs.ContentBlock, Hash: payloadHash.Bytes()}, ContentSize: uint64(len(payload)), DeliveryDeadline: bitfs.UnixSeconds(now.Unix() + 100)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +398,11 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	}
 	if arbitrated.PaymentSequence != latest.PaymentSequence+1 || node.updates != 2 {
 		t.Fatalf("arbitrated payment = %+v, updates=%d", arbitrated, node.updates)
+	}
+	if pending, err := store.Load(ctx, reference.SpendTxID); err != nil {
+		t.Fatalf("load pending request after arbitration: %v", err)
+	} else if pending != nil {
+		t.Fatalf("pending request remained after arbitration: %+v", pending)
 	}
 	closeUnsigned, closeBuyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, pool.CloseInput{Opening: opening, Latest: arbitrated, SellerAmountAfterSat: arbitrated.SellerAmountSat})
 	if err != nil {

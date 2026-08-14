@@ -10,13 +10,15 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	masterseed "github.com/bsv8/MasterSeed"
 )
 
 const quoteTermsVersion uint64 = 1
 
 // MaxQuoteSeedBlocks is the greatest block count whose seed fits the BitFS
 // payload limit. A seed contains one 32-byte hash for each block.
-const MaxQuoteSeedBlocks uint64 = BlockSize / sha256.Size
+const MaxQuoteSeedBlocks uint64 = masterseed.BlockSize / masterseed.DigestSize
 
 // MaxQuoteFileSize is the largest file a quote can describe while the seed is
 // delivered in one BitFS payload.
@@ -255,15 +257,15 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 	if terms == nil {
 		return errors.New("file quote terms are required")
 	}
-	if len(terms.SeedHash) != sha256.Size {
-		return fmt.Errorf("quote seed_hash length must be %d", sha256.Size)
+	if len(terms.SeedHash) != masterseed.DigestSize {
+		return fmt.Errorf("quote seed_hash length must be %d", masterseed.DigestSize)
 	}
 	if len(terms.BuyerPubkey) == 0 {
 		return errors.New("quote buyer_pubkey is required")
 	}
 	if terms.FileSize == 0 {
-		emptySeedHash := sha256.Sum256(nil)
-		if !bytes.Equal(terms.SeedHash, emptySeedHash[:]) {
+		emptySeedHash := masterseed.Sum256(nil)
+		if !bytes.Equal(terms.SeedHash, emptySeedHash.Bytes()) {
 			return errors.New("empty-file quote seed_hash must equal sha256 of empty seed")
 		}
 	}
@@ -351,10 +353,7 @@ func ContentPriceSat(terms *FileQuoteTerms, contentType ContentType, contentSize
 }
 
 func fileQuoteBlockCount(fileSize uint64) uint64 {
-	if fileSize == 0 {
-		return 0
-	}
-	return 1 + (fileSize-1)/BlockSize
+	return masterseed.BlockCountForSourceSize(fileSize)
 }
 
 func validateSupportedArbiterPubkeys(pubkeys [][]byte) error {

@@ -13,6 +13,9 @@ github.com/bsv-blockchain/go-sdk/transaction/chaintracker
 github.com/bsv-blockchain/go-sdk/transaction/sighash
 github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh
 github.com/bsv-blockchain/go-sdk/util
+# github.com/bsv8/MasterSeed v1.1.0
+## explicit; go 1.22
+github.com/bsv8/MasterSeed
 # github.com/bsv8/MultisigPool/v4 v4.0.0
 ## explicit; go 1.24.3
 github.com/bsv8/MultisigPool/v4/internal/versioninfo

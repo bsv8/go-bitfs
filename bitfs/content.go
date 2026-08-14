@@ -2,10 +2,13 @@ package bitfs
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
+
+	masterseed "github.com/bsv8/MasterSeed"
 )
 
 const contentProtocolVersion uint64 = 3
@@ -384,7 +387,7 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if terms.ContentType != ContentSeed && terms.ContentType != ContentBlock {
 		return fmt.Errorf("unsupported content_type %d", terms.ContentType)
 	}
-	if len(terms.ContentHash) != sha256.Size {
+	if len(terms.ContentHash) != masterseed.DigestSize {
 		return errors.New("content_hash must be 32 bytes")
 	}
 	if terms.DeliveryDeadlineUnix <= 0 {
@@ -402,7 +405,7 @@ func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 	if len(terms.PaymentAuthorizationHash) != sha256.Size {
 		return errors.New("payment_authorization_hash must be 32 bytes")
 	}
-	if len(terms.ContentBytes) > int(BlockSize) {
+	if len(terms.ContentBytes) > masterseed.BlockSize {
 		return fmt.Errorf("content_bytes exceeds %d bytes", BlockSize)
 	}
 	return nil
@@ -413,10 +416,18 @@ func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 // additionally require the raw seed previously obtained by the buyer or held
 // by the seller.
 func VerifyContentReference(quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, seed []byte, requireBlockMembership bool) error {
+	return VerifyContentReferenceContext(context.Background(), quoteTerms, contentType, contentHash, seed, requireBlockMembership)
+}
+
+// VerifyContentReferenceContext is the context-aware content reference verifier.
+func VerifyContentReferenceContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, seed []byte, requireBlockMembership bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
 		return fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
 	}
-	if len(contentHash) != sha256.Size {
+	if len(contentHash) != masterseed.DigestSize {
 		return fmt.Errorf("%w: content hash must be 32 bytes", ErrInvalidEvidence)
 	}
 	switch contentType {
@@ -429,18 +440,8 @@ func VerifyContentReference(quoteTerms *FileQuoteTerms, contentType ContentType,
 		if !requireBlockMembership {
 			return nil
 		}
-		expectedSeedSize := fileQuoteBlockCount(quoteTerms.FileSize) * sha256.Size
-		if uint64(len(seed)) != expectedSeedSize {
-			return fmt.Errorf("%w: seed payload size %d does not match quoted file size %d", ErrInvalidEvidence, len(seed), expectedSeedSize)
-		}
-		matched, err := BlockHashInSeed(seed, quoteTerms.SeedHash, contentHash)
-		if err != nil {
-			return err
-		}
-		if !matched {
-			return ErrContentNotInSeed
-		}
-		return nil
+		_, err := VerifyBlockReference(ctx, quoteTerms, contentHash, seed)
+		return err
 	default:
 		return fmt.Errorf("%w: unsupported content type %d", ErrInvalidEvidence, contentType)
 	}
@@ -450,67 +451,96 @@ func VerifyContentReference(quoteTerms *FileQuoteTerms, contentType ContentType,
 // content reference. For a block it also enforces the exact full/tail length
 // derivable from the block's position in the seed.
 func VerifyContentPayload(quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, payload, seed []byte, requireBlockMembership bool) error {
-	if err := VerifyContentReference(quoteTerms, contentType, contentHash, seed, requireBlockMembership); err != nil {
-		return err
+	return VerifyContentPayloadContext(context.Background(), quoteTerms, contentType, contentHash, payload, seed, requireBlockMembership)
+}
+
+// VerifyContentPayloadContext verifies payload bytes and, for block payloads,
+// combines block hashing, membership and protocol-size checks in one pass.
+func VerifyContentPayloadContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, payload, seed []byte, requireBlockMembership bool) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	digest := sha256.Sum256(payload)
-	if !bytes.Equal(digest[:], contentHash) {
-		return fmt.Errorf("%w: content payload hash does not match request", ErrInvalidEvidence)
+	if err := VerifyContentReferenceContext(ctx, quoteTerms, contentType, contentHash, seed, requireBlockMembership && contentType == ContentSeed); err != nil {
+		return err
 	}
 	switch contentType {
 	case ContentSeed:
-		if _, err := ParseSeedBytes(payload); err != nil {
-			return fmt.Errorf("%w: seed payload format: %v", ErrInvalidEvidence, err)
+		digest, err := masterseed.DigestFromBytes(contentHash)
+		if err != nil {
+			return mapMasterSeedError(err)
 		}
-		expected := fileQuoteBlockCount(quoteTerms.FileSize) * sha256.Size
-		if uint64(len(payload)) != expected {
-			return fmt.Errorf("%w: seed payload size %d does not match quote seed size %d", ErrInvalidEvidence, len(payload), expected)
+		if _, err := masterseed.VerifySeedForSourceSize(ctx, bytes.NewReader(payload), digest, quoteTerms.FileSize); err != nil {
+			return mapMasterSeedError(err)
 		}
 	case ContentBlock:
-		if len(payload) == 0 || uint64(len(payload)) > BlockSize {
-			return fmt.Errorf("%w: block payload size is invalid", ErrInvalidEvidence)
+		if len(payload) == 0 {
+			return fmt.Errorf("%w: block payload cannot be empty", ErrInvalidEvidence)
+		}
+		digest, err := masterseed.DigestFromBytes(contentHash)
+		if err != nil {
+			return mapMasterSeedError(err)
+		}
+		if _, err := masterseed.VerifyBlock(ctx, payload, digest); err != nil {
+			return mapMasterSeedError(err)
 		}
 		if requireBlockMembership {
-			if err := verifyBlockPayloadSize(quoteTerms.FileSize, seed, contentHash, len(payload)); err != nil {
-				return err
+			seedDigest, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
+			if err != nil {
+				return mapMasterSeedError(err)
+			}
+			if _, err := masterseed.VerifyBlockInSeed(ctx, bytes.NewReader(seed), seedDigest, quoteTerms.FileSize, payload); err != nil {
+				return mapMasterSeedError(err)
 			}
 		}
 	}
 	return nil
 }
 
-func verifyBlockPayloadSize(fileSize uint64, seed, blockHash []byte, payloadSize int) error {
-	blockHashes, err := ParseSeedBytes(seed)
+// VerifyBlockReference verifies a block digest against a quote-bound seed and
+// returns all matching positions (including duplicate and tail occurrences).
+func VerifyBlockReference(ctx context.Context, quoteTerms *FileQuoteTerms, blockHash, seed []byte) (masterseed.BlockMatches, error) {
+	var result masterseed.BlockMatches
+	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
+		return result, invalidEvidence(err)
+	}
+	digest, err := masterseed.DigestFromBytes(blockHash)
 	if err != nil {
-		return fmt.Errorf("%w: parse seed: %v", ErrInvalidEvidence, err)
+		return result, mapMasterSeedError(err)
 	}
-	for index, candidate := range blockHashes {
-		if !bytes.Equal(candidate, blockHash) {
-			continue
-		}
-		expected := uint64(BlockSize)
-		if index == len(blockHashes)-1 {
-			start := uint64(index) * BlockSize
-			if fileSize <= start {
-				return fmt.Errorf("%w: seed contains a block outside quoted file size", ErrInvalidEvidence)
-			}
-			expected = fileSize - start
-			if expected > BlockSize {
-				expected = BlockSize
-			}
-		}
-		if uint64(payloadSize) == expected {
-			return nil
-		}
+	seedDigest, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
+	if err != nil {
+		return result, mapMasterSeedError(err)
 	}
-	return fmt.Errorf("%w: block payload size does not match the quoted block position", ErrInvalidEvidence)
+	result, err = masterseed.FindBlockHash(ctx, bytes.NewReader(seed), seedDigest, quoteTerms.FileSize, digest)
+	if err != nil {
+		return result, mapMasterSeedError(err)
+	}
+	if result.MatchCount == 0 {
+		return result, ErrContentNotInSeed
+	}
+	return result, nil
+}
+
+func invalidEvidence(err error) error { return errors.Join(ErrInvalidEvidence, err) }
+
+func mapMasterSeedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
+		return errors.Join(ErrContentNotInSeed, err)
+	}
+	return errors.Join(ErrInvalidEvidence, err)
 }
 
 // VerifySignedContentRequestAt verifies the quote binding, buyer signature,
 // arbiter selection and request deadline. Pool ownership and current sequence
 // are deliberately delegated to the pool workflow layer.
 func VerifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	return verifySignedContentRequestAt(request, quote, now, quoteVerifier, buyerVerifier, nil, false)
+	return verifySignedContentRequestAtContext(context.Background(), request, quote, now, quoteVerifier, buyerVerifier, nil, false)
 }
 
 // VerifySignedContentRequestStandalone verifies the self-contained buyer
@@ -537,10 +567,20 @@ func VerifySignedContentRequestStandalone(request *SignedContentRequest, buyerVe
 // VerifySignedContentRequestAt. It additionally proves that a block hash is
 // present in the quote's seed.
 func VerifySignedContentRequestWithSeedAt(request *SignedContentRequest, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	return verifySignedContentRequestAt(request, quote, now, quoteVerifier, buyerVerifier, seed, true)
+	return VerifySignedContentRequestWithSeedAtContext(context.Background(), request, quote, seed, now, quoteVerifier, buyerVerifier)
+}
+
+// VerifySignedContentRequestWithSeedAtContext is the context-aware workflow
+// verifier; cancellation is propagated through seed scanning.
+func VerifySignedContentRequestWithSeedAtContext(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
+	return verifySignedContentRequestAtContext(ctx, request, quote, now, quoteVerifier, buyerVerifier, seed, true)
 }
 
 func verifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, error) {
+	return verifySignedContentRequestAtContext(context.Background(), request, quote, now, quoteVerifier, buyerVerifier, seed, requireBlockMembership)
+}
+
+func verifySignedContentRequestAtContext(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
 		return nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
 	}
@@ -562,7 +602,7 @@ func verifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFi
 	if terms.DeliveryDeadlineUnix > quoteTerms.QuoteExpiresAtUnix {
 		return nil, fmt.Errorf("%w: delivery deadline exceeds quote expiry", ErrDeliveryDeadline)
 	}
-	if err := VerifyContentReference(quoteTerms, terms.ContentType, terms.ContentHash, seed, requireBlockMembership); err != nil {
+	if err := VerifyContentReferenceContext(ctx, quoteTerms, terms.ContentType, terms.ContentHash, seed, requireBlockMembership); err != nil {
 		return nil, err
 	}
 	if !containsBytes(quoteTerms.SupportedArbiterPubkeysCBOR, terms.SelectedArbiterPubkey) {
@@ -581,20 +621,37 @@ func verifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFi
 // signature and raw content hash. The caller may additionally validate a block
 // against a previously received seed index.
 func VerifySignedContentDeliveryAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
-	return verifySignedContentDeliveryAt(request, delivery, quote, nil, now, quoteVerifier, buyerVerifier, sellerVerifier, false)
+	return verifySignedContentDeliveryAtContext(context.Background(), request, delivery, quote, nil, now, quoteVerifier, buyerVerifier, sellerVerifier, false)
 }
 
 // VerifySignedContentDeliveryWithSeedAt additionally validates block
 // membership and the exact full/tail block size derived from the seed.
 func VerifySignedContentDeliveryWithSeedAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
-	return verifySignedContentDeliveryAt(request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier, true)
+	return VerifySignedContentDeliveryWithSeedAtContext(context.Background(), request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier)
 }
 
 func verifySignedContentDeliveryAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier, requireBlockMembership bool) ([]byte, error) {
+	return verifySignedContentDeliveryAtContext(context.Background(), request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier, requireBlockMembership)
+}
+
+// VerifySignedContentDeliveryWithSeedAtContext verifies delivery content with
+// a caller-owned seed while preserving cancellation during seed scans.
+func VerifySignedContentDeliveryWithSeedAtContext(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
+	return verifySignedContentDeliveryAtContext(ctx, request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier, true)
+}
+
+func verifySignedContentDeliveryAtContext(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier, requireBlockMembership bool) ([]byte, error) {
 	if delivery == nil || len(delivery.SellerSignature) == 0 {
 		return nil, fmt.Errorf("%w: signed content delivery is required", ErrInvalidEvidence)
 	}
-	requestTerms, err := verifySignedContentRequestAt(request, quote, now, quoteVerifier, buyerVerifier, seed, requireBlockMembership)
+	requestSeed := seed
+	requestMembership := requireBlockMembership
+	// Payload verification performs the single authoritative block scan; the
+	// request half still validates all signatures and quote bindings first.
+	if requireBlockMembership {
+		requestSeed, requestMembership = nil, false
+	}
+	requestTerms, err := verifySignedContentRequestAtContext(ctx, request, quote, now, quoteVerifier, buyerVerifier, requestSeed, requestMembership)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +673,7 @@ func verifySignedContentDeliveryAt(request *SignedContentRequest, delivery *Sign
 	if err != nil {
 		return nil, err
 	}
-	if err := VerifyContentPayload(quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, deliveryTerms.ContentBytes, seed, requireBlockMembership); err != nil {
+	if err := VerifyContentPayloadContext(ctx, quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, deliveryTerms.ContentBytes, seed, requireBlockMembership); err != nil {
 		return nil, err
 	}
 	return append([]byte(nil), deliveryTerms.ContentBytes...), nil

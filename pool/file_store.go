@@ -10,7 +10,7 @@ import (
 )
 
 // FileStore is a small durable reference implementation of the pool storage
-// ports. It uses an advisory process lock and reloads the current snapshot for
+// interfaces. It uses an advisory process lock and reloads the current snapshot for
 // every operation, so cooperating Unix processes do not overwrite each
 // other's updates. A transactional database is still preferable when the
 // deployment needs indexed queries, crash-recovery guarantees beyond atomic
@@ -33,6 +33,7 @@ type fileStoreSnapshot struct {
 	Accepted  []filePaymentSnapshot   `json:"accepted"`
 	Pending   []filePendingSnapshot   `json:"pending"`
 	Uncertain []fileUncertainSnapshot `json:"uncertain"`
+	Closing   []Hash32                `json:"closing"`
 }
 
 type fileOpeningSnapshot struct {
@@ -57,11 +58,11 @@ type fileUncertainSnapshot struct {
 
 // NewFileStore opens path and rehydrates all pool, payment and delivery-latch
 // state. A missing file is treated as an empty store.
-func NewFileStore(path string, calculator TransactionIDCalculator) (*FileStore, error) {
+func NewFileStore(path string) (*FileStore, error) {
 	if path == "" {
 		return nil, fmt.Errorf("%w: file store path is required", ErrInvalidEvidence)
 	}
-	memory, err := NewMemoryStore(calculator)
+	memory, err := NewMemoryStore()
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +113,28 @@ func (store *FileStore) EnsurePoolHealthy(ctx context.Context, spendTxID Hash32)
 		}
 		return store.memory.EnsurePoolHealthy(ctx, spendTxID)
 	})
+}
+
+func (store *FileStore) EnsurePoolOpen(ctx context.Context, spendTxID Hash32) error {
+	if store == nil || store.memory == nil {
+		return fmt.Errorf("%w: file store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return withProcessFileLock(store.path, false, func() error {
+		if err := store.reloadFromDiskLocked(); err != nil {
+			return err
+		}
+		return store.memory.EnsurePoolOpen(ctx, spendTxID)
+	})
+}
+
+func (store *FileStore) MarkPoolClosing(ctx context.Context, spendTxID Hash32) error {
+	return store.mutate(func() error { return store.memory.MarkPoolClosing(ctx, spendTxID) })
+}
+
+func (store *FileStore) ReconcilePoolClosing(ctx context.Context, spendTxID Hash32) error {
+	return store.mutate(func() error { return store.memory.ReconcilePoolClosing(ctx, spendTxID) })
 }
 
 // MarkExternalStateUncertain records a transaction ID whose node outcome must be reconciled.
@@ -234,7 +257,7 @@ func (store *FileStore) loadPayment(operation func() (*PaymentState, error)) (*P
 }
 
 func (store *FileStore) reloadFromDiskLocked() error {
-	fresh, err := NewMemoryStore(store.memory.calculator)
+	fresh, err := NewMemoryStore()
 	if err != nil {
 		return err
 	}
@@ -313,6 +336,9 @@ func (store *MemoryStore) snapshot() fileStoreSnapshot {
 	for spendTxID, txID := range store.uncertain {
 		snapshot.Uncertain = append(snapshot.Uncertain, fileUncertainSnapshot{SpendTxID: spendTxID, TxID: txID})
 	}
+	for spendTxID := range store.closing {
+		snapshot.Closing = append(snapshot.Closing, spendTxID)
+	}
 	return snapshot
 }
 
@@ -324,6 +350,7 @@ func (store *MemoryStore) replaceSnapshot(snapshot fileStoreSnapshot) {
 	store.accepted = make(map[Hash32]*PaymentState, len(snapshot.Accepted))
 	store.pending = make(map[Hash32]PendingRequest, len(snapshot.Pending))
 	store.uncertain = make(map[Hash32]Hash32, len(snapshot.Uncertain))
+	store.closing = make(map[Hash32]struct{}, len(snapshot.Closing))
 	for _, entry := range snapshot.Openings {
 		store.openingsBySpend[entry.SpendTxID] = cloneOpeningProof(entry.Proof)
 		if entry.Proof != nil && len(entry.Proof.FundingTxID) == 32 {
@@ -339,6 +366,9 @@ func (store *MemoryStore) replaceSnapshot(snapshot fileStoreSnapshot) {
 	for _, entry := range snapshot.Uncertain {
 		store.uncertain[entry.SpendTxID] = entry.TxID
 	}
+	for _, spendTxID := range snapshot.Closing {
+		store.closing[spendTxID] = struct{}{}
+	}
 }
 
 func (store *MemoryStore) restore(snapshot fileStoreSnapshot) error {
@@ -346,7 +376,7 @@ func (store *MemoryStore) restore(snapshot fileStoreSnapshot) error {
 		if entry.Proof == nil {
 			return fmt.Errorf("%w: nil opening proof in snapshot", ErrInvalidEvidence)
 		}
-		spendTxID, err := SpendTxID(context.Background(), entry.Proof, store.calculator)
+		spendTxID, err := SpendTxID(context.Background(), entry.Proof)
 		if err != nil {
 			return err
 		}
@@ -382,6 +412,11 @@ func (store *MemoryStore) restore(snapshot fileStoreSnapshot) error {
 			return fmt.Errorf("%w: invalid uncertain pool state in snapshot", ErrInvalidEvidence)
 		}
 		if err := store.MarkExternalStateUncertain(context.Background(), entry.SpendTxID, entry.TxID); err != nil {
+			return err
+		}
+	}
+	for _, spendTxID := range snapshot.Closing {
+		if err := store.MarkPoolClosing(context.Background(), spendTxID); err != nil {
 			return err
 		}
 	}

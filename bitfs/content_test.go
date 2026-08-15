@@ -13,7 +13,7 @@ import (
 )
 
 func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,9 +30,9 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 		PaymentSequenceAfter:  8,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
 		DeliveryDeadlineUnix:  200,
@@ -76,6 +76,19 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestContentIdentityKeysRequireCompressedEncoding(t *testing.T) {
+	terms := &ContentRequestTerms{
+		QuoteTermsHash: bytes.Repeat([]byte{1}, 32), SpendTxID: bytes.Repeat([]byte{2}, 32),
+		BasePaymentSequence: 1, PaymentSequenceAfter: 2, SellerAmountAfterSat: 1,
+		MinerFeeRateSatPerKB: 1, BuyerPubkey: quoteTestKey().PubKey().Uncompressed(),
+		SellerPubkey: quoteTestPubkey(), SelectedArbiterPubkey: quoteTestArbiterPubkey(),
+		ContentType: ContentSeed, ContentHash: bytes.Repeat([]byte{3}, 32), DeliveryDeadlineUnix: 200,
+	}
+	if _, err := EncodeContentRequestTerms(terms); err == nil {
+		t.Fatal("uncompressed content buyer key was accepted")
+	}
+}
+
 func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 	terms := &ContentRequestTerms{
 		QuoteTermsHash:        bytes.Repeat([]byte{0x01}, sha256.Size),
@@ -84,9 +97,9 @@ func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 		PaymentSequenceAfter:  4,
 		SellerAmountAfterSat:  125,
 		MinerFeeRateSatPerKB:  100,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02, 0x33},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{0x04}, sha256.Size),
 		DeliveryDeadlineUnix:  200,
@@ -110,7 +123,7 @@ func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 }
 
 func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +136,9 @@ func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0xff},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
 		DeliveryDeadlineUnix:  200,
@@ -150,9 +163,9 @@ func TestContentDeliveryRejectsChangedPayload(t *testing.T) {
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
 		DeliveryDeadlineUnix:  200,
@@ -191,7 +204,7 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 	terms := quoteTestTerms(t)
 	terms.FileSize = uint64(len(content))
 	terms.SeedHash = seedHash.Bytes()
-	quote, err := NewSignedFileQuote(terms, []byte{0x03}, "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +219,9 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           blockHash[:],
 		DeliveryDeadlineUnix:  200,
@@ -234,9 +247,9 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           otherHash[:],
 		DeliveryDeadlineUnix:  200,
@@ -260,7 +273,7 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 	terms := quoteTestTerms(t)
 	terms.FileSize = 5
 	terms.SeedHash = seedHash.Bytes()
-	quote, err := NewSignedFileQuote(terms, []byte{0x03}, "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,9 +285,9 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
 		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x02},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentSeed,
 		ContentHash:           seedHash.Bytes(),
 		DeliveryDeadlineUnix:  200,
@@ -299,9 +312,9 @@ func TestContentCBORVector(t *testing.T) {
 		PaymentSequenceAfter:  4,
 		SellerAmountAfterSat:  125,
 		MinerFeeRateSatPerKB:  100,
-		BuyerPubkey:           []byte{0x02, 0x11},
-		SellerPubkey:          []byte{0x03, 0x22},
-		SelectedArbiterPubkey: []byte{0x04},
+		BuyerPubkey:           quoteTestPubkey(),
+		SellerPubkey:          quoteTestPubkey(),
+		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{0x05}, sha256.Size),
 		DeliveryDeadlineUnix:  99,
@@ -322,7 +335,7 @@ func TestContentRequestRejectsLegacyWeakTerms(t *testing.T) {
 	terms := &ContentRequestTerms{
 		QuoteTermsHash:        bytes.Repeat([]byte{1}, sha256.Size),
 		SpendTxID:             bytes.Repeat([]byte{2}, sha256.Size),
-		SelectedArbiterPubkey: []byte{3},
+		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{4}, sha256.Size),
 		DeliveryDeadlineUnix:  100,
@@ -462,7 +475,7 @@ func mustContentQuote(t *testing.T, fileSize uint64) *SignedFileQuote {
 	t.Helper()
 	terms := quoteTestTerms(t)
 	terms.FileSize = fileSize
-	quote, err := NewSignedFileQuote(terms, []byte{0x03}, "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}

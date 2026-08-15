@@ -61,40 +61,24 @@ type ArbitrationResponse struct {
 	ArbiterTransactionSignature []byte
 }
 
-// PoolPort is the only transaction capability required by the arbitration
-// workflow. Implementations must verify transactions with MultisigPool,
-// never modify the candidate or construct a replacement, and provide the
-// arbiter role signature after seller verification succeeds.
-type PoolPort interface {
-	VerifyOpening(*pool.OpeningProof) error
-	VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
-	SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
-}
-
-// WorkflowConfig supplies the arbiter signer, MultisigPool verification/signing
-// port, and verifier for the buyer's signed 003 authorization.
 type WorkflowConfig struct {
-	Signer                pool.Signer
-	Pool                  PoolPort
-	AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
+	Signer pool.Signer
 }
 
 // Workflow verifies 007 evidence and adds only the arbiter signature. It never
 // prices content, replaces the seller candidate transaction, or submits a node
 // transaction on the arbiter's behalf.
 type Workflow struct {
-	signer                pool.Signer
-	pool                  PoolPort
-	authorizationVerifier bitfs.ContentTermsSignatureVerifier
+	signer pool.Signer
 }
 
-// NewWorkflow requires a non-nil arbiter Signer, PoolPort, and authorization
-// verifier. It returns an arbiter workflow with no storage or network side effects.
+// NewWorkflow requires only a non-nil arbiter Signer. It returns an arbiter
+// workflow with no storage or network side effects.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
-	if config.Signer == nil || config.Pool == nil || config.AuthorizationVerifier == nil {
-		return nil, errors.New("arbitration workflow requires an arbiter signer, an authorization verifier, and a pool verification and signing port")
+	if config.Signer == nil {
+		return nil, errors.New("arbitration workflow requires an arbiter signer")
 	}
-	return &Workflow{signer: config.Signer, pool: config.Pool, authorizationVerifier: config.AuthorizationVerifier}, nil
+	return &Workflow{signer: config.Signer}, nil
 }
 
 // SignPayment decodes and verifies the opening proof, standalone 003 buyer
@@ -113,26 +97,38 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	if err != nil {
 		return nil, fmt.Errorf("decode opening proof: %w", err)
 	}
-	if err := workflow.pool.VerifyOpening(proof); err != nil {
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey})
+	if err != nil {
+		return nil, fmt.Errorf("build pool engine: %w", err)
+	}
+	poolAdapter := &pool.MultisigPoolAdapter{Engine: engine, ArbiterKey: workflow.signer}
+	if err := engine.VerifyOpening(proof); err != nil {
 		return nil, fmt.Errorf("verify opening proof: %w", err)
 	}
 	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("decode payment authorization: %w", err)
 	}
-	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, workflow.authorizationVerifier)
+	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, bitfs.VerifySignature)
 	if err != nil {
 		return nil, fmt.Errorf("verify payment authorization: %w", err)
 	}
 	if err := ensureAuthorizationPool(terms, proof); err != nil {
 		return nil, err
 	}
-	if _, err := workflow.pool.VerifyArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, terms, request.SellerTransactionSignature); err != nil {
+	if _, err := poolAdapter.VerifyArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, terms, request.SellerTransactionSignature); err != nil {
 		return nil, fmt.Errorf("verify arbitration candidate: %w", err)
 	}
-	arbiterSig, err := workflow.pool.SignArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, workflow.signer)
+	arbiterSig, err := poolAdapter.SignArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof)
 	if err != nil {
 		return nil, fmt.Errorf("sign arbitration candidate: %w", err)
+	}
+	unsigned, err := engine.ParseUnsignedPayment(ctx, request.UnsignedStateTxRaw, proof)
+	if err != nil {
+		return nil, fmt.Errorf("reparse arbitration candidate: %w", err)
+	}
+	if err := engine.VerifyArbiterPayment(unsigned, arbiterSig, proof); err != nil {
+		return nil, fmt.Errorf("verify arbiter signature: %w", err)
 	}
 	if len(arbiterSig) == 0 {
 		return nil, fmt.Errorf("%w: arbiter signature is empty", pool.ErrInvalidEvidence)

@@ -19,18 +19,12 @@ title: 03 · 角色工作流 API
 type Workflow struct { /* 未公开字段 */ }
 
 type WorkflowConfig struct {
-    Signer            pool.Signer
-    QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
-    SignatureVerifier bitfs.ContentTermsSignatureVerifier
-    Clock             func() time.Time
-    Quotes            QuoteStore
-    Pools             pool.PoolStore
-    Opening           pool.BuyerPoolOpeningHooks
-    Participants      pool.ParticipantVerifier
-    Node              pool.NonFinalPoolNode
-    Transactions      pool.BuyerPoolPort
-    ContentSink       ContentSink
-    SeedSource        SeedSource
+    Signer      pool.Signer
+    Quotes      QuoteStore
+    Pools       pool.PoolStore
+    Backend     pool.NonFinalPoolBackend
+    ContentSink ContentSink
+    SeedSource  SeedSource
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -85,18 +79,19 @@ func (workflow *buyer.Workflow) RefundAfterExpiry(ctx context.Context, spendTxID
 // 交易的 nSequence 与 nLockTime 都为 0xffffffff；它不适用于单方到期退款。
 func (workflow *buyer.Workflow) BuildImmediateClose(
     ctx context.Context,
-    input pool.CloseInput,
+    spendTxID pool.Hash32,
 ) (*pool.UnsignedPayment, []byte, error)
 
-// SubmitImmediateClose 提交卖方已补足签名的最终交易。
-// 它只调用 SubmitFinal，不会写入或覆盖非最终交易池状态。
+// SubmitImmediateClose 提交卖方已补足签名的最终交易，将最终状态保存为最新池状态，
+// 并清除持久化 closing 保护。若保存后清理失败，重试会验证已保存的最终状态，
+// 只重试清理，不会再次提交最终交易。
 func (workflow *buyer.Workflow) SubmitImmediateClose(
     ctx context.Context,
     close *pool.SignedPayment,
 ) (pool.Hash32, error)
 ```
 
-`ContentRequestInput` 至少包含：已验证报价、`Pool.Reference`（其中包含 `SpendTxID` 和当前 `BasePaymentSequence`）、选定仲裁公钥、`ContentRef` 和交付期限。它不接收块索引、报价价格或任意卖方金额。
+`ContentRequestInput` 包含已验证报价、`SpendTxID`、`ContentRef` 和交付期限。工作流自行从已验证存储加载 OpeningProof 和当前状态，推导 base sequence 与仲裁者；调用者不能重复或覆盖这些协议字段。
 
 ## 卖方 API
 
@@ -105,18 +100,12 @@ func (workflow *buyer.Workflow) SubmitImmediateClose(
 ```go
 // package seller
 type WorkflowConfig struct {
-    Signer            pool.Signer
-    SignatureVerifier bitfs.ContentTermsSignatureVerifier
-    QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
-    Clock             func() time.Time
-    Quotes            QuoteStore
-    Pools             pool.PoolStore
-    OpeningHooks      pool.SellerPoolOpeningHooks
-    Pending           pool.PendingRequestStore
-    Content           ContentSource
-    Transactions      pool.SellerPoolPort
-    Participants      pool.ParticipantVerifier
-    Node              pool.NonFinalPoolNode
+    Signer  pool.Signer
+    Quotes  QuoteStore
+    Pools   pool.PoolStore
+    Pending pool.PendingRequestStore
+    Content ContentSource
+    Backend pool.PoolBackend
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -137,7 +126,9 @@ func (workflow *seller.Workflow) PresignPoolOpening(
 ) (*pool.RefundPresignResponse, error)
 
 // AcceptPoolFunding 验证 FundingTx 与已保存证明一致，保存完整证明并提交 FundingTx。
-// 只有节点提交成功后，卖方才把池视为可用于 003。
+// 只有节点提交成功后，卖方才把池视为可用于 003。若节点已接受但本地初始状态
+// 保存失败，工作流会标记池状态不确定；重试要求后端按相同原始交易幂等返回规范
+// txid，并直接对账恢复，不会先做普通重复保存。
 func (workflow *seller.Workflow) AcceptPoolFunding(
     ctx context.Context,
     delivery *pool.FundingTxDelivery,
@@ -159,22 +150,19 @@ func (workflow *seller.Workflow) AcceptPayment(
     payment *pool.PaymentUpdate,
 ) (*pool.PaymentState, error)
 
-// SignImmediateClose 验证空解锁关闭交易和 Buyer detached signature，
+// SignImmediateClose 验证空解锁关闭交易和 Buyer detached signature，持久化 closing 保护，
 // 使用工作流配置中的卖方签名能力补足 Seller detached signature，
-// 并返回可立即提交的完整交易。它不自行广播；signer 参数仅为接口兼容保留。
+// 并返回可立即提交但不会广播的完整交易。该方法只使用工作流配置中的签名能力。
 func (workflow *seller.Workflow) SignImmediateClose(
     ctx context.Context,
     close *pool.UnsignedPayment,
     buyerSignature []byte,
-    signer pool.Signer,
 ) (*pool.SignedPayment, error)
 
 // BuildArbitrationRequestFromAuthorization 依据最终 003 授权和当前状态构造空解锁候选，并签 Seller。
 func (workflow *seller.Workflow) BuildArbitrationRequestFromAuthorization(
     ctx context.Context,
-    proof *pool.OpeningProof,
     authorization *bitfs.SignedContentRequest,
-    latest *pool.PaymentState,
 ) (*arbitration.ArbitrationRequest, error)
 
 // SubmitArbitratedPayment 合并仲裁者签名，并通过非最终节点提交同一累计状态。
@@ -192,9 +180,7 @@ func (workflow *seller.Workflow) SubmitArbitratedPayment(
 ```go
 // package arbitration
 type WorkflowConfig struct {
-    Signer                pool.Signer
-    Pool                  PoolPort
-    AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
+    Signer pool.Signer
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -214,33 +200,22 @@ func (workflow *arbitration.Workflow) SignPayment(
 
 ## 完整业务流程示例
 
-下面用一次“买方购买卖方文件”的完整流程串起主要 API。代码是应用层伪代码；钱包、数据库、内容源、MultisigPool 适配器和节点适配器均由应用实现并注入 SDK。
+下面用一次“买方购买卖方文件”的完整流程串起主要 API。代码是应用层伪代码；钱包、数据库、内容源和窄原始 BSV 后端由应用实现，工作流在内部构造经验证的节点边界和具体 MultisigPool 适配器。
 
 ### 1. 为三个角色创建各自的能力
 
-一个 `Signer` 只代表一个角色的一把私钥。验证器没有自己的公钥；调用时由 SDK 从报价、003 授权或开池证明中取出被验证者的公钥，再传给验证回调。
+一个 `Signer` 只代表一个角色，并在 SDK 外部保管私钥。固定核心从报价、003 授权和开池证明中读取公钥，并自行完成报价、内容、开池、参与者和支付验证。
 
 ```go
 buyerSigner   := app.BuyerSigner()   // implements pool.Signer
 sellerSigner  := app.SellerSigner()  // implements pool.Signer
 arbiterSigner := app.ArbiterSigner() // implements pool.Signer
 
-// These callbacks implement the underlying signature scheme. The pubkey is
-// supplied by the credential being verified; the verifier has no role key.
-verifyQuote := app.VerifyQuote       // bitfs.QuoteTermsSignatureVerifier
-verifyTerms := app.VerifyTerms       // bitfs.ContentTermsSignatureVerifier
-
 buyerWorkflow, err := buyer.NewWorkflow(buyer.WorkflowConfig{
     Signer:            buyerSigner,
-    QuoteVerifier:     verifyQuote,
-    SignatureVerifier: verifyTerms,
-    Clock:             time.Now,
     Quotes:            buyerQuotes,
     Pools:             buyerPools,
-    Opening:           buyerOpeningHooks,
-    Participants:      participantVerifier,
-    Transactions:      buyerPoolPort,
-    Node:              buyerNode,
+    Backend:           buyerBackend,
     ContentSink:       buyerContentSink,
     SeedSource:        buyerSeedSource,
 })
@@ -248,24 +223,16 @@ must(err)
 
 sellerWorkflow, err := seller.NewWorkflow(seller.WorkflowConfig{
     Signer:            sellerSigner,
-    QuoteVerifier:     verifyQuote,
-    SignatureVerifier: verifyTerms,
-    Clock:             time.Now,
     Quotes:            sellerQuotes,
     Pools:             sellerPools,
-    OpeningHooks:      sellerOpeningHooks,
     Pending:           sellerPending,
     Content:           sellerContent,
-    Transactions:      sellerPoolPort,
-    Participants:      participantVerifier,
-    Node:              sellerNode,
+    Backend:           sellerBackend,
 })
 must(err)
 
 arbiterWorkflow, err := arbitration.NewWorkflow(arbitration.WorkflowConfig{
     Signer:                arbiterSigner,
-    Pool:                  arbiterPoolPort,
-    AuthorizationVerifier: verifyTerms,
 })
 must(err)
 ```
@@ -304,7 +271,7 @@ quoteHash := bitfs.Hash32(quoteHashRaw)
 _ = quoteTerms // 已验证的报价条款；后续请求按 quoteHash 引用它。
 ```
 
-这里发生了两次不同的动作：卖方的 `Signer` 签署报价，买方的 `QuoteVerifier` 验证报价中的 `SellerPubkey`。买方不需要拥有卖方的私钥。
+卖方 `Signer` 创建报价，买方工作流使用固定协议验证器核对报价中的卖方公钥。应用不再注入验证回调，也不需要拥有卖方私钥。
 
 ### 3. 买方和卖方完成费用池开立
 
@@ -353,7 +320,7 @@ _, err = sellerWorkflow.AcceptPoolFunding(ctx, sellerFunding)
 must(err)
 ```
 
-`PreparePoolOpening` 和 `PresignPoolOpening` 使用的是费用池开立钩子；底层 MultisigPool 需要实际私钥来计算交易签名，因此这部分能力通常由 `PrivateKeyProvider` 封装在 pool adapter 中。它和凭证用的通用 `Signer` 是两个层次。
+`PreparePoolOpening` 和 `PresignPoolOpening` 使用固定的 MultisigPool v4 引擎。角色工作流只接收窄 `Signer`，不会接收或导出私钥；应用提供原始 funding 字节，工作流负责构造并验证规范开池证据。
 
 ### 4. 买方请求内容，卖方交付内容
 
@@ -363,8 +330,7 @@ must(err)
 contentHash := app.RequestedBlockHash()
 request, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
     QuoteTermsHash:        quoteHash,
-    Pool:                  reference,
-    SelectedArbiterPubKey: arbiterPubkey,
+    SpendTxID:             reference.SpendTxID,
     Content: bitfs.ContentRef{
         Type: bitfs.ContentBlock,
         Hash: contentHash,
@@ -388,7 +354,7 @@ buyerDelivery, err := wire.UnmarshalContentDelivery(deliveryCBOR)
 must(err)
 ```
 
-买方的 `RequestContent` 使用自己的 `Signer` 签 003；卖方的 `SignatureVerifier` 验证这个签名时，使用报价中约定的买方公钥。卖方随后用自己的 `Signer` 签 004；买方验收时使用报价中的卖方公钥。
+买方 `Signer` 签 003；卖方工作流使用固定核心和报价中的买方公钥验签，然后用自己的 `Signer` 签 004，买方仍由固定核心验收返回的 delivery。
 
 ### 5. 买方验收交付，卖方接受累计付款
 
@@ -414,13 +380,8 @@ _ = accepted
 下面是替代 `AcceptPayment` 的分支，不应与正常付款路径同时执行。卖方依据已经签名的 003 和自己保存的最新池状态构造 007，仲裁者只验证证据并添加自己的交易签名。
 
 ```go
-proof, err := sellerPools.LoadOpeningProof(ctx, reference.SpendTxID)
-must(err)
-latest, err := sellerPools.LoadAcceptedPayment(ctx, reference.SpendTxID)
-must(err)
-
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequestFromAuthorization(
-    ctx, proof, sellerRequest, latest,
+    ctx, sellerRequest,
 )
 must(err)
 
@@ -442,26 +403,17 @@ must(err)
 _ = arbitrated
 ```
 
-仲裁者的 `AuthorizationVerifier` 验证的是 003 中的买方签名；仲裁者自己的 `Signer` 只负责给经过验证的候选交易添加仲裁者签名。
+仲裁工作流使用固定核心验证 003 买方授权；只有候选交易全部通过后，仲裁者自己的 `Signer` 才添加仲裁签名。
 
 ### 7. 另外两个结束分支：协商关闭和到期退款
 
-协商关闭和到期退款也是替代路径，不是上面正常付款后的必经步骤。协商关闭需要双方共同签名，但不新增一个 CBOR `CloseRequest`。下面假设 `buyerPools` 已经通过节点或应用同步保存了最新被接受状态：
+协商关闭和到期退款也是替代路径，不是上面正常付款后的必经步骤。协商关闭需要双方共同签名，但不新增一个 CBOR `CloseRequest`。`SignImmediateClose` 只签名并持久化 closing 保护，不会广播；`SubmitImmediateClose` 在节点接受后保存最终状态并清除保护。若保存后清理失败，重试只做清理，不会再次广播。下面假设 `buyerPools` 已经通过节点或应用同步保存了最新被接受状态：
 
 ```go
-opening, err := buyerPools.LoadOpeningProof(ctx, reference.SpendTxID)
-must(err)
-latestPayment, err := buyerPools.LoadAcceptedPayment(ctx, reference.SpendTxID)
+unsignedClose, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, reference.SpendTxID)
 must(err)
 
-unsignedClose, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, pool.CloseInput{
-    Opening:              opening,
-    Latest:               latestPayment,
-    SellerAmountAfterSat: latestPayment.SellerAmountSat,
-})
-must(err)
-
-closed, err := sellerWorkflow.SignImmediateClose(ctx, unsignedClose, buyerSig, sellerSigner)
+closed, err := sellerWorkflow.SignImmediateClose(ctx, unsignedClose, buyerSig)
 must(err)
 
 _, err = buyerWorkflow.SubmitImmediateClose(ctx, closed)

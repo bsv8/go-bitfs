@@ -8,7 +8,7 @@ import (
 )
 
 func TestFileQuoteStoreRehydratesSignedQuote(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "report.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "report.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +56,13 @@ func TestFileQuoteStoreInstancesReloadBeforeMutating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstQuote, err := NewSignedFileQuote(quoteTestTerms(t), []byte{0x03}, "first.bin", quoteTestSigner)
+	firstQuote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "first.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	terms := quoteTestTerms(t)
 	terms.FullBlockPriceSat++
-	secondQuote, err := NewSignedFileQuote(terms, []byte{0x03}, "second.bin", quoteTestSigner)
+	secondQuote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "second.bin", quoteTestSigner)
 	if err != nil {
 		t.Fatal(err)
 	}

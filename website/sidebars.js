@@ -8,6 +8,7 @@ module.exports = {
         'sdk/external-hooks-and-data-types',
         'sdk/role-workflow-api',
         'sdk/implementation-roadmap',
+        'sdk/core-boundary-refactor-work-order',
         'sdk/sdk-api-framework-design',
       ],
     },

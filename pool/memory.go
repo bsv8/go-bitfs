@@ -6,48 +6,38 @@ import (
 	"sync"
 )
 
-// BSVTransactionIDCalculator adapts the synchronous reference engine to the
-// context-aware opening workflow port.  Production applications can replace
-// it with a database-backed calculator or a node/SDK implementation.
-type BSVTransactionIDCalculator struct {
-	Engine *MultisigPoolEngine
-}
-
-// TransactionID computes the canonical transaction identifier from raw transaction bytes.
-func (calculator BSVTransactionIDCalculator) TransactionID(_ context.Context, rawTx []byte) (Hash32, error) {
-	if calculator.Engine == nil {
-		return Hash32{}, fmt.Errorf("%w: MultisigPool engine is required", ErrInvalidEvidence)
-	}
-	return calculator.Engine.TransactionID(rawTx)
-}
-
 // MemoryStore is a concurrency-safe reference implementation of the pool
-// persistence ports.  It is useful for integration tests and small embedded
+// persistence interfaces. It is useful for integration tests and small embedded
 // deployments; replacing it does not change protocol semantics.
 type MemoryStore struct {
 	mu                sync.Mutex
-	calculator        TransactionIDCalculator
 	openingsBySpend   map[Hash32]*OpeningProof
 	openingsByFunding map[Hash32]*OpeningProof
 	accepted          map[Hash32]*PaymentState
 	pending           map[Hash32]PendingRequest
 	uncertain         map[Hash32]Hash32
+	closing           map[Hash32]struct{}
 }
 
-// NewMemoryStore requires a non-nil transaction ID calculator and returns an
-// empty concurrency-safe store for opening proofs, payments, health markers,
-// and pending delivery leases.
-func NewMemoryStore(calculator TransactionIDCalculator) (*MemoryStore, error) {
-	if calculator == nil {
-		return nil, fmt.Errorf("%w: transaction ID calculator is required", ErrInvalidEvidence)
+func fixedTransactionID(raw []byte) (Hash32, error) {
+	value, err := parseCanonicalTransaction(raw)
+	if err != nil {
+		return Hash32{}, err
 	}
+	return hash32FromBytes(value.TxID().CloneBytes()), nil
+}
+
+// NewMemoryStore returns an empty concurrency-safe store for opening proofs,
+// payments, health markers, and pending delivery leases. Transaction IDs are
+// always calculated by the fixed SDK transaction parser.
+func NewMemoryStore() (*MemoryStore, error) {
 	return &MemoryStore{
-		calculator:        calculator,
 		openingsBySpend:   make(map[Hash32]*OpeningProof),
 		openingsByFunding: make(map[Hash32]*OpeningProof),
 		accepted:          make(map[Hash32]*PaymentState),
 		pending:           make(map[Hash32]PendingRequest),
 		uncertain:         make(map[Hash32]Hash32),
+		closing:           make(map[Hash32]struct{}),
 	}, nil
 }
 
@@ -57,17 +47,13 @@ func (store *MemoryStore) SaveOpeningProof(ctx context.Context, proof *OpeningPr
 		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
 	}
 	cloned := cloneOpeningProof(proof)
-	if cloned != nil && len(cloned.SpendTxID) == 0 {
-		spendTxID, err := store.calculator.TransactionID(ctx, append([]byte(nil), cloned.RefundTx...))
-		if err != nil {
-			return fmt.Errorf("calculate opening spend transaction ID: %w", err)
-		}
-		cloned.SpendTxID = append([]byte(nil), spendTxID[:]...)
+	if cloned == nil || len(cloned.SpendTxID) != 32 {
+		return fmt.Errorf("%w: opening proof SpendTxID must be supplied", ErrInvalidEvidence)
 	}
 	if err := ValidateOpeningProof(cloned); err != nil {
 		return err
 	}
-	spendTxID, err := SpendTxID(ctx, cloned, store.calculator)
+	spendTxID, err := SpendTxID(ctx, cloned)
 	if err != nil {
 		return err
 	}
@@ -161,6 +147,44 @@ func (store *MemoryStore) EnsurePoolHealthy(_ context.Context, spendTxID Hash32)
 	return nil
 }
 
+// EnsurePoolOpen rejects uncertain or close-issued pools before new business side effects.
+func (store *MemoryStore) EnsurePoolOpen(_ context.Context, spendTxID Hash32) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if txID, ok := store.uncertain[spendTxID]; ok {
+		return fmt.Errorf("%w: accepted transaction %x requires external reconciliation", ErrPoolStateUncertain, txID[:])
+	}
+	if _, ok := store.closing[spendTxID]; ok {
+		return fmt.Errorf("%w: immediate close has been issued", ErrPoolStateUncertain)
+	}
+	return nil
+}
+
+// MarkPoolClosing durably prevents new content/payment side effects after a close is issued.
+func (store *MemoryStore) MarkPoolClosing(_ context.Context, spendTxID Hash32) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.closing[spendTxID] = struct{}{}
+	return nil
+}
+
+// ReconcilePoolClosing clears the close-issued guard after final state is observed.
+func (store *MemoryStore) ReconcilePoolClosing(_ context.Context, spendTxID Hash32) error {
+	if store == nil {
+		return fmt.Errorf("%w: pool store is required", ErrInvalidEvidence)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	delete(store.closing, spendTxID)
+	return nil
+}
+
 // MarkExternalStateUncertain records a transaction ID whose node outcome must be reconciled.
 func (store *MemoryStore) MarkExternalStateUncertain(_ context.Context, spendTxID, txID Hash32) error {
 	if store == nil {
@@ -180,7 +204,7 @@ func (store *MemoryStore) ReconcileExternalState(ctx context.Context, spendTxID 
 	if state == nil || state.SpendTxID != spendTxID || len(state.RawTx) == 0 {
 		return fmt.Errorf("%w: reconciled payment state is incomplete", ErrInvalidEvidence)
 	}
-	txID, err := store.calculator.TransactionID(ctx, append([]byte(nil), state.RawTx...))
+	txID, err := fixedTransactionID(append([]byte(nil), state.RawTx...))
 	if err != nil {
 		return fmt.Errorf("calculate reconciled transaction ID: %w", err)
 	}
@@ -192,6 +216,21 @@ func (store *MemoryStore) ReconcileExternalState(ctx context.Context, spendTxID 
 	}
 	if old := store.accepted[spendTxID]; old != nil && state.PaymentSequence < old.PaymentSequence {
 		return ErrStalePaymentSequence
+	}
+	if state.PaymentAuthorizationHash != (Hash32{}) {
+		if pending, ok := store.pending[spendTxID]; ok {
+			if pending.SpendTxID != spendTxID || pending.ContentRequestHash != state.PaymentAuthorizationHash || pending.BasePaymentSequence == ^uint32(0) || pending.BasePaymentSequence+1 != state.PaymentSequence {
+				return fmt.Errorf("%w: reconciled authorization does not match pending sequence lease", ErrInvalidEvidence)
+			}
+			if pending.BaseSellerAmountSat > state.SellerAmountSat || pending.ExpectedSellerAmountSat != state.SellerAmountSat-pending.BaseSellerAmountSat {
+				return fmt.Errorf("%w: reconciled authorization does not match pending amount lease", ErrInvalidEvidence)
+			}
+		}
+	}
+	if state.PaymentAuthorizationHash != (Hash32{}) {
+		if _, ok := store.pending[spendTxID]; ok {
+			delete(store.pending, spendTxID)
+		}
 	}
 	store.accepted[spendTxID] = clonePaymentState(state)
 	delete(store.uncertain, spendTxID)

@@ -5,205 +5,167 @@ title: 02 · 外部钩子与数据类型
 
 # 02 · 外部钩子与数据类型
 
-返回 [SDK API 框架入口](sdk-api-framework-design.md)。
+SDK 边界只承载基础设施，不承载协议规则。应用提供私钥保管、持久化、
+内容字节和窄 BSV 后端；go-bitfs 固定报文编码、签名验证、定价、状态
+迁移、MultisigPool v4 交易构造以及提交前后的验收条件。
 
-调用方把钱包、持久化、内容源和节点能力注入 SDK。SDK 不要求某个数据库或 RPC 服务。
+## 签名和私钥保管
 
-## 签名、时间与内容钩子
+角色工作流唯一接收的签名能力是 pool.Signer：
 
-```go
-// package pool
-// Signer 暴露一个角色的公钥和分离签名能力。SDK 永不接收或保存私钥。
+~~~go
 type Signer interface {
-    PublicKey(ctx context.Context) ([]byte, error)
-    Sign(ctx context.Context, payload []byte) ([]byte, error)
+    PublicKey(context.Context) ([]byte, error)
+    Sign(context.Context, []byte) ([]byte, error) // 只返回 DER 签名
 }
+~~~
 
-// package pool
-// SignatureVerifier 是费用池适配器使用的通用分离签名验证器。
-// 买方和卖方工作流使用下面 bitfs 包中的两个验证函数类型。
-type SignatureVerifier interface {
-    Verify(pubkey, payload, signature []byte) error
-}
+`PublicKey` 必须返回协议规定的 33 字节压缩 secp256k1 公钥编码。65 字节未
+压缩公钥会在进入签名报文或费用池证据前被拒绝。
 
-// package bitfs
-type QuoteTermsSignatureVerifier func(sellerPubkey, termsCBOR, signature []byte) error
-type ContentTermsSignatureVerifier func(pubkey, termsCBOR, signature []byte) error
+应用可以用本地钱包、HSM、浏览器钱包或远程签名服务实现它。SDK 不接收
+私钥、种子、导出私钥的回调，也不接收签名验证回调。角色工作流调用 Sign
+时始终传入 SDK 计算的 32 字节摘要：001/003/004 规范 CBOR 只做一次
+SHA-256，费用池交易使用固定 sighash 摘要。Sign 只返回 DER 字节。需要时
+核心追加协议 sighash 字节，并在返回、保存、合并或提交前按角色验证签名。
 
-// package buyer
-type ContentSink interface {
-    SaveVerifiedContent(ctx context.Context, hash bitfs.Hash32, payload []byte) error
-}
+底层的 `QuoteTermsSigner` 和 `ContentTermsSigner` 回调有所不同：构造器会
+把精确的规范 CBOR 字节传给它们。回调必须对这些字节执行一次 SHA-256，
+返回 DER 字节；构造器在返回凭证前固定复验签名。
 
-type SeedSource interface {
-    LoadSeed(ctx context.Context, seedHash masterseed.Digest) ([]byte, error)
-}
+报价、开池证明、内容请求和支付状态中的公钥属于协议证据。应用不能用
+参与者验证器替换它们，也不能重新配置买方、卖方和仲裁者角色。
 
-// package seller
-// ContentSource 按内容哈希返回 seed 或 block 原始字节；SDK 仍会验证
-// 返回内容的哈希和长度。
-type ContentSource interface {
-    LoadSeed(ctx context.Context, seedHash masterseed.Digest) ([]byte, error)
-    LoadBlock(ctx context.Context, blockHash masterseed.Digest) ([]byte, error)
-}
-```
+## 存储接口
 
-买方和卖方工作流的 `WorkflowConfig` 使用 `Clock func() time.Time`；当前 API 没有 SDK `Clock` 接口。
+报价存储按角色声明，使应用可选数据库、文件或复制服务而不改变 wire
+字节：
 
-## 存储钩子
-
-存储接口按凭证类别拆分。应用可用同一数据库实现它们，也可完全使用文件或内存。
-
-```go
-// package buyer; package seller
-// 两个角色包分别声明同样的本地 QuoteStore 接口。
+~~~go
 type QuoteStore interface {
-    SaveQuote(ctx context.Context, quote *bitfs.SignedFileQuote) error
-    LoadQuote(ctx context.Context, termsHash bitfs.Hash32) (*bitfs.SignedFileQuote, error)
+    SaveQuote(context.Context, *bitfs.SignedFileQuote) error
+    LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
 }
+~~~
 
-// package pool
-// PoolStore 保存完整开池证明、节点接受的付款状态、健康/重协调状态，
-// 以及卖方按 funding ID 查询开池证明所需的能力。
+pool.PoolStore 保存完整开池证明、节点已接受的最新支付状态，并提供外部
+状态不确定和对账标记：
+
+~~~go
 type PoolStore interface {
     OpeningProofStore
     LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
     SaveAcceptedPayment(context.Context, *PaymentState) error
     LoadAcceptedPayment(context.Context, Hash32) (*PaymentState, error)
     EnsurePoolHealthy(context.Context, Hash32) error
+    EnsurePoolOpen(context.Context, Hash32) error
+    MarkPoolClosing(context.Context, Hash32) error
+    ReconcilePoolClosing(context.Context, Hash32) error
     MarkExternalStateUncertain(context.Context, Hash32, Hash32) error
     ReconcileExternalState(context.Context, Hash32, *PaymentState) error
 }
+~~~
 
-// package pool
-// PendingRequestStore 原子管理卖方交付门闩。
-type PendingRequestStore interface {
-    TryAcquire(context.Context, PendingRequest) (PendingAcquireResult, error)
-    Load(context.Context, Hash32) (*PendingRequest, error)
-    Release(context.Context, Hash32, Hash32) error
+卖方还提供 pool.PendingRequestStore 作为内容交付租约。每个租约记录 spend ID、base
+sequence、base seller amount、授权哈希和预期卖方增量；只有完全匹配的租约才能在重试时释放。
+TryAcquire、Load
+和 Release 防止同一累计序列被并发交付。pool.MemoryStore 适合单进程和测试；
+pool.FileStore 通过原子替换持久化快照并在协作进程间加咨询锁。数据库可实现
+相同接口，但不能改变规范交易 ID 或支付序列。存储不接受外部交易 ID 计算器；
+SDK 始终用固定 BSV 交易解析器计算 ID。
+
+## 内容接口
+
+买方内容和种子适配器是可选的：
+
+~~~go
+type ContentSink interface {
+    SaveVerifiedContent(context.Context, bitfs.Hash32, []byte) error
 }
-```
-
-`bitfs.FileQuoteStore` 实现角色本地的报价存储接口。`pool.MemoryStore` 和
-`pool.FileStore` 实现当前支持的 `pool.PoolStore` 与
-`pool.PendingRequestStore`。
-
-## BSV 节点与交易钩子
-
-普通广播和非最终交易更新语义不同，必须使用不同方法，避免调用方误把 HTTP 成功当作池状态已推进。
-
-```go
-// package pool
-type BuyerPoolPort interface {
-    TransactionID([]byte) (Hash32, error)
-    BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
-    BuildRefundSubmission(*OpeningProof) ([]byte, error)
-    VerifyRefundExpired(*OpeningProof, time.Time) error
-    VerifyOpening(*OpeningProof) error
-    ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-    ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
-    VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-    VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
-    CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
-    BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-    SignBuyerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, []byte, error)
+type SeedSource interface {
+    LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
 }
+~~~
 
-// package pool
-type SellerPoolPort interface {
-    TransactionID([]byte) (Hash32, error)
-    FundingTxID([]byte) (Hash32, error)
-    BuildRefundSubmission(*OpeningProof) ([]byte, error)
-    VerifyOpening(*OpeningProof) error
-    ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-    ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
-    VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-    VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
-    VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    VerifySellerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
-    BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-    SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    SignSellerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    MergeBuyerSellerPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
-    MergeSellerArbiterPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
-    SignImmediateClose(context.Context, *UnsignedPayment, []byte, Signer) (*SignedPayment, error)
+卖方 ContentSource 读取报价承诺的种子或区块：
+
+~~~go
+type ContentSource interface {
+    LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
+    LoadBlock(context.Context, masterseed.Digest) ([]byte, error)
 }
+~~~
 
-// package arbitration
-type PoolPort interface {
-    VerifyOpening(*pool.OpeningProof) error
-    VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
-    SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
-}
+工作流在使用加载结果前验证哈希、种子结构、区块归属、内容大小、报价条款
+以及请求/交付签名。内容存储外置，但内容证明和业务定价固定在 bitfs 内部。
 
-// package pool
-type NonFinalPoolNode interface {
+## 窄 BSV 后端边界
+
+买方接收只能提交非最终池状态的原始后端：
+
+~~~go
+type NonFinalPoolBackend interface {
     SubmitUpdate(context.Context, []byte) (*UpdateAcceptance, error)
     SubmitFinal(context.Context, []byte) (Hash32, error)
 }
-```
+~~~
 
-具体 `pool.MultisigPoolEngine` 适配器使用角色专属的 `PrivateKeyProvider`
-计算交易 sighash；它和工作流凭证用的通用 `Signer` 是分开的。
+卖方需要先广播 funding，因此接收更宽的后端：
 
-代码提供的 `pool.VerifiedNonFinalPoolNode` 是节点适配层：它在调用外部后端前重新解析并验证非最终交易、最终双签交易或到期退款，在后端返回后校验交易 ID、`SpendTxID` 和序号完全一致。
-
-`UpdateAcceptance` 至少包含被接受交易的 ID、`SpendTxID` 锚点和已接受的 `nSequence`。若节点只提供“已收到”而不提供状态接受保证，不得实现此接口。
-
-## 关键输入类型
-
-工作流 API 不让应用重复填写已经能从凭证推导的字段。以下类型是少数必须由调用方明确选择或提供的输入。
-
-```go
-// package pool
-// Reference 是 003 选择费用池时使用的稳定引用。
-// SpendTxID 永远是初始远期花费交易 ID，不能填某次 update 的交易 ID。
-type Reference struct {
-    SpendTxID           Hash32
-    BasePaymentSequence uint32 // 买方看到的该池当前最新 nSequence。
+~~~go
+type FundingBackend interface {
+    // 相同原始交易已被接受 => 相同规范 txid，nil error。
+    SubmitTransaction(context.Context, []byte) (Hash32, error)
 }
 
-// package buyer
-// ContentRequestInput 是买方创建 003 时的唯一业务选择。
-// 它不包含价格、块索引、卖方金额或文件名；这些均从已保存报价和 seed 推导。
-type ContentRequestInput struct {
-    QuoteTermsHash        bitfs.Hash32     // 已经 AcceptQuote 的报价条款哈希。
-    Pool                  pool.Reference   // 要使用的一个有效费用池及当前序号。
-    SelectedArbiterPubKey []byte           // 必须属于报价允许列表，且等于开池仲裁公钥。
-    Content               bitfs.ContentRef // Seed 或 Block 加其内容哈希。
-    ContentSize           uint64           // 用于计价的预期内容大小。
-    DeliveryDeadline      bitfs.UnixSeconds // 买方接受的最晚交付时刻。
+type PoolBackend interface {
+    NonFinalPoolBackend
+    FundingBackend
 }
+~~~
 
-// package pool
-// OpeningInput 是买方钱包已经准备好资金交易后交给费用池层的输入。
-// FundingTx 必须是尚未公开的、买方已签名原始交易；PoolOutputIndex 指向其中的 2-of-3 输出。
-type OpeningInput struct {
-    FundingTx            []byte
-    PoolOutputIndex      uint32
-    ExpiryLockTime       uint32
-    MinerFeeRateSatPerKB uint64
-    SellerPubKey         []byte
-    ArbiterPubKey        []byte
-}
+`SubmitTransaction` 的公开契约是按规范交易 ID 幂等广播：完全相同的原始交易
+若已经被接受，重试必须返回相同的 `Hash32` 和 nil error；`already-known` 应视为
+成功，不能视为失败。这是工作流恢复 funding 不确定状态的必要后端行为，不是由
+应用回调自行推断的业务判断。
 
-// PaymentUpdateInput 是 pool 层的低层输入，适用于非 BitFS 的通用费用池调用。
-// buyer.Workflow 不直接暴露 SellerAmountAfter；它会从已验证的 001、003、004 自动计算。
-type PaymentUpdateInput struct {
-    Opening              *OpeningProof // 完整开池证明，而非数据库 ID。
-    Previous             *PaymentState // 已接受的最新状态；首笔付款可表示初始退款状态。
-    PaymentSequenceAfter uint32        // 必须大于 Previous 的 nSequence，且小于 0xffffffff。
-    SellerAmountAfterSat uint64        // 卖方累计金额，不是本次增量。
-}
+后端调用后，普通 error 或交易 ID/sequence 与候选不完全一致都表示外部结果不确定。
+工作流会用候选交易 ID 调用 `MarkExternalStateUncertain` 并返回
+`ErrPoolStateUncertain`；调用者必须对同一原始交易完成对账后才能继续签名或提交。
+`ReconcileExternalState` 保存外部确认的精确状态并清除不确定标记。当同一个 Store
+同时持有完整匹配的 pending 租约时，它可以在校验租约全部字段后原子清理该租约。
+如果 `PoolStore` 与 `PendingRequestStore` 分离，则由 005/007 幂等工作流重试在完整
+密码学证据匹配后释放独立的 pending 租约。观察到最终关闭状态后仍必须调用
+`ReconcilePoolClosing`，因此 close-issued 保护会跨进程重启保留，直到明确清除。
 
-// CloseInput 仅用于双方协商立即关闭。
-// SellerAmountAfterSat 通常等于最后接受付款状态中的卖方累计金额；不得据此重新定价。
-type CloseInput struct {
-    Opening              *OpeningProof
-    Latest               *PaymentState
-    SellerAmountAfterSat uint64
-}
-```
+后端可以是 RPC、gRPC、厂商 SDK 或进程内节点客户端，但不负责构造和验证
+协议交易。工作流会用后端和持久化开池证明在内部构造
+pool.VerifiedNonFinalPoolNode；它按每份 proof 动态建立具体 MultisigPool
+引擎，在转发前验证 funding/update/final 原始字节，在转发后核对交易 ID、
+SpendTxID 和支付序列。即使后端“什么都接受”，畸形证据也不能进入工作流状态。
+
+Funding 使用普通广播语义，不会误用 final 提交。区块高度退款是唯一可选的
+链状态查询：后端可以实现 BlockHeight(context.Context) (uint32, error)。
+应用不能注入 wall-clock 或过期策略；时间锁使用一次捕获的 SDK 操作时间，
+高度锁退款在缺少权威高度源时直接失败。
+
+## 协议输入类型
+
+角色 API 接收协议形状的数据，而不是业务回调：
+
+- pool.OpeningInput：原始 funding、池输出索引、过期锁时间、费用率和卖方/仲裁者公钥。
+- pool.RefundPresignRequest/Response：002 开池证据；pool.FundingTxDelivery
+  只有在退款证明已持久化后才揭示 funding。
+- buyer.ContentRequestInput：报价哈希、`SpendTxID`、ContentRef、大小和截止时间。
+  仲裁者和 base sequence 由 opening proof 推导；价格和支付序列由核心推导。
+- pool.PaymentUpdate、pool.UnsignedPayment、pool.SignedPayment：分别区分
+  未签名状态、分离签名和完整交易。
+
+wire 包把这些值映射到规范 001–007 CBOR。HTTP、WebSocket、队列、CLI 或浏览器
+消息只是传输方式；所有环境都携带同一字节并调用同一角色方法。
+
+## 不属于扩展点的内容
+
+不存在 workflow clock、交易引擎钩子、开池钩子聚合、参与者/验证器端口、私钥
+提供器或应用交易 ID 计算器。它们会允许调用者替换协议业务规则。只有私钥保管、
+持久化、内容和网络/后端集成跨越这条边界。

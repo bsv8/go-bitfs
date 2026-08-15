@@ -5,210 +5,200 @@ title: 02 · External hooks and data types
 
 # 02 · External hooks and data types
 
-Return to the [SDK API framework](sdk-api-framework-design.md).
+The SDK boundary contains infrastructure, not protocol rules. Applications
+provide private-key custody, persistence, content bytes, and a narrow BSV
+backend. go-bitfs owns message encoding, signature verification, pricing,
+state transitions, MultisigPool v4 transaction construction, and submission
+preconditions.
 
-Applications inject wallet, persistence, content, and node capabilities into the SDK. The SDK does not require a particular database or RPC service.
+## Signing and key custody
 
-## Signing, time, and content hooks
+pool.Signer is the only signing capability exposed to role workflows:
 
-```go
-// package pool
-// Signer exposes one role's public key and detached signatures. The SDK never
-// receives or stores the private key.
+~~~go
 type Signer interface {
-    PublicKey(ctx context.Context) ([]byte, error)
-    Sign(ctx context.Context, payload []byte) ([]byte, error)
+    PublicKey(context.Context) ([]byte, error)
+    Sign(context.Context, []byte) ([]byte, error) // DER-only signature
 }
+~~~
 
-// package pool
-// SignatureVerifier is the generic detached-signature verifier used by pool
-// adapters. Buyer and seller workflows use the bitfs verifier function types
-// below instead.
-type SignatureVerifier interface {
-    Verify(pubkey, payload, signature []byte) error
-}
+`PublicKey` must return the protocol's canonical 33-byte compressed
+secp256k1 public-key encoding. Uncompressed 65-byte keys are rejected before
+they can enter signed wire terms or pool evidence.
 
-// package bitfs
-type QuoteTermsSignatureVerifier func(sellerPubkey, termsCBOR, signature []byte) error
-type ContentTermsSignatureVerifier func(pubkey, termsCBOR, signature []byte) error
+The application may implement it with a local wallet, HSM, browser wallet, or
+remote signer. The SDK never accepts a private key, seed, key-export callback,
+or signature-verifier callback. Role workflows always call `Sign` with one
+SDK-computed 32-byte digest: canonical 001/003/004 CBOR is hashed once with
+SHA-256, while pool transactions use the fixed sighash digest. `Sign` returns
+DER-only bytes. The core appends protocol sighash bytes where required and
+verifies the returned signature against the expected role before returning,
+saving, merging, or submitting it.
 
-// package buyer
-type ContentSink interface {
-    SaveVerifiedContent(ctx context.Context, hash bitfs.Hash32, payload []byte) error
-}
+The lower-level `QuoteTermsSigner` and `ContentTermsSigner` callbacks are
+different: constructors pass them the exact canonical CBOR bytes. Each
+callback must hash those bytes once with SHA-256, return DER-only bytes, and
+the constructor fixedly re-verifies the result before returning a credential.
 
-type SeedSource interface {
-    LoadSeed(ctx context.Context, seedHash masterseed.Digest) ([]byte, error)
-}
+Public keys in a quote, opening proof, content request, or payment state are
+protocol evidence. Callers must not substitute a participant verifier or
+reconfigure the buyer/seller/arbiter roles.
 
-// package seller
-// ContentSource returns raw seed or block bytes by content hash. The SDK still
-// verifies the returned hash and length.
-type ContentSource interface {
-    LoadSeed(ctx context.Context, seedHash masterseed.Digest) ([]byte, error)
-    LoadBlock(ctx context.Context, blockHash masterseed.Digest) ([]byte, error)
-}
-```
+## Storage interfaces
 
-Buyer and seller workflows use `Clock func() time.Time` in their respective
-`WorkflowConfig` values; there is no SDK `Clock` interface in the current API.
+Quote stores are intentionally role-local so an application can use a database,
+file, or replicated service without changing wire bytes:
 
-## Storage hooks
-
-Storage interfaces are separated by credential category. An application may implement all of them with one database or use files and memory independently.
-
-```go
-// package buyer; package seller
-// Each role package declares this same small QuoteStore interface locally.
+~~~go
 type QuoteStore interface {
-    SaveQuote(ctx context.Context, quote *bitfs.SignedFileQuote) error
-    LoadQuote(ctx context.Context, termsHash bitfs.Hash32) (*bitfs.SignedFileQuote, error)
+    SaveQuote(context.Context, *bitfs.SignedFileQuote) error
+    LoadQuote(context.Context, bitfs.Hash32) (*bitfs.SignedFileQuote, error)
 }
+~~~
 
-// package pool
-// PoolStore retains complete opening proofs, node-accepted payment states,
-// health/reconciliation state, and the funding-ID lookup used by the seller.
+pool.PoolStore retains complete opening proofs and the latest node-accepted
+payment state, and provides uncertainty/reconciliation markers:
+
+~~~go
 type PoolStore interface {
     OpeningProofStore
     LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
     SaveAcceptedPayment(context.Context, *PaymentState) error
     LoadAcceptedPayment(context.Context, Hash32) (*PaymentState, error)
     EnsurePoolHealthy(context.Context, Hash32) error
+    EnsurePoolOpen(context.Context, Hash32) error
+    MarkPoolClosing(context.Context, Hash32) error
+    ReconcilePoolClosing(context.Context, Hash32) error
     MarkExternalStateUncertain(context.Context, Hash32, Hash32) error
     ReconcileExternalState(context.Context, Hash32, *PaymentState) error
 }
+~~~
 
-// package pool
-// PendingRequestStore atomically manages the seller-side delivery lease.
-type PendingRequestStore interface {
-    TryAcquire(context.Context, PendingRequest) (PendingAcquireResult, error)
-    Load(context.Context, Hash32) (*PendingRequest, error)
-    Release(context.Context, Hash32, Hash32) error
+The seller also supplies pool.PendingRequestStore for the delivery lease. Each
+lease records the spend ID, base sequence, base seller amount, authorization
+hash, and expected seller delta; retries release only an exact matching lease.
+Its TryAcquire, Load, and Release methods prevent two deliveries from spending
+the same cumulative sequence. pool.MemoryStore is a useful single-process
+implementation; pool.FileStore persists snapshots with atomic replacement and
+reloads them under an advisory lock. A database may implement the same
+interfaces, but it cannot change canonical transaction IDs or protocol
+sequence rules. Stores do not calculate an externally supplied transaction ID:
+the SDK derives IDs with its fixed BSV transaction parser.
+
+## Content interfaces
+
+Buyer content and seed adapters are optional because a buyer may request only
+seed data or delegate payload persistence:
+
+~~~go
+type ContentSink interface {
+    SaveVerifiedContent(context.Context, bitfs.Hash32, []byte) error
 }
-```
-
-`bitfs.FileQuoteStore` implements the role-local quote store. `pool.MemoryStore`
-and `pool.FileStore` implement `pool.PoolStore` and
-`pool.PendingRequestStore` for the supported storage modes.
-
-`pool.MemoryStore` is intended for tests and temporary single-process use. `pool.FileStore` reloads under an advisory lock and atomically snapshots opening proofs, latest payment states, and `ExpectedSellerAmountSat`; it can serialize cooperating Unix processes. Replace it with a database for stronger transactional or distributed guarantees.
-
-## BSV node and transaction hooks
-
-Ordinary broadcast and non-final updates have different semantics and therefore use different methods. This prevents an application from treating a successful HTTP request as proof that pool state advanced.
-
-```go
-// package pool
-type BuyerPoolPort interface {
-    TransactionID([]byte) (Hash32, error)
-    BuildRefundPresignRequest(context.Context, OpeningInput, Signer) (*RefundPresignRequest, error)
-    BuildRefundSubmission(*OpeningProof) ([]byte, error)
-    VerifyRefundExpired(*OpeningProof, time.Time) error
-    VerifyOpening(*OpeningProof) error
-    ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-    ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
-    VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-    VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    VerifyCompletedFinalPayment(*SignedPayment, *OpeningProof) error
-    CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
-    BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-    SignBuyerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    BuildImmediateClose(context.Context, CloseInput) (*UnsignedPayment, []byte, error)
+type SeedSource interface {
+    LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
 }
+~~~
 
-// package pool
-type SellerPoolPort interface {
-    TransactionID([]byte) (Hash32, error)
-    FundingTxID([]byte) (Hash32, error)
-    BuildRefundSubmission(*OpeningProof) ([]byte, error)
-    VerifyOpening(*OpeningProof) error
-    ParsePaymentState(context.Context, []byte, *OpeningProof) (*PaymentState, error)
-    ParseUnsignedPayment(context.Context, []byte, *OpeningProof) (*UnsignedPayment, error)
-    VerifyAcceptedPayment(*PaymentState, *OpeningProof) error
-    VerifyArbitratedPayment(*PaymentState, *OpeningProof) error
-    VerifyBuyerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    VerifySellerPayment(*UnsignedPayment, []byte, *OpeningProof) error
-    CheckPaymentCapacity(context.Context, PaymentUpdateInput) error
-    BuildPaymentUpdate(context.Context, PaymentUpdateInput) (*UnsignedPayment, error)
-    SignSellerArbitrationCandidate(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    SignSellerPayment(context.Context, *UnsignedPayment, Signer) ([]byte, error)
-    MergeBuyerSellerPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
-    MergeSellerArbiterPayment(*UnsignedPayment, []byte, []byte) (*SignedPayment, error)
-    SignImmediateClose(context.Context, *UnsignedPayment, []byte, Signer) (*SignedPayment, error)
+The seller's ContentSource loads committed seed or block bytes:
+
+~~~go
+type ContentSource interface {
+    LoadSeed(context.Context, masterseed.Digest) ([]byte, error)
+    LoadBlock(context.Context, masterseed.Digest) ([]byte, error)
 }
+~~~
 
-// package arbitration
-type PoolPort interface {
-    VerifyOpening(*pool.OpeningProof) error
-    VerifyArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, *bitfs.ContentRequestTerms, []byte) (*pool.UnsignedPayment, error)
-    SignArbitrationCandidate(context.Context, []byte, *pool.OpeningProof, pool.Signer) ([]byte, error)
-}
+The workflows verify hashes, seed structure, block membership, content size,
+quote terms, and request/delivery signatures before accepting loaded bytes or
+calling SaveVerifiedContent. Content storage is therefore external, while
+content proof and business pricing remain fixed in bitfs.
 
-// package pool
-type NonFinalPoolNode interface {
+## Narrow BSV backend boundary
+
+The buyer receives a raw backend that can accept only non-final pool states:
+
+~~~go
+type NonFinalPoolBackend interface {
     SubmitUpdate(context.Context, []byte) (*UpdateAcceptance, error)
     SubmitFinal(context.Context, []byte) (Hash32, error)
 }
-```
+~~~
 
-The concrete `pool.MultisigPoolEngine` adapters use a role-specific
-`PrivateKeyProvider` for transaction sighashes. That is separate from the
-workflow credential `Signer`.
+The seller receives the wider backend because it must broadcast funding before
+pool updates and final settlement:
 
-`pool.VerifiedNonFinalPoolNode` is the supplied node adapter. Before calling an external backend it parses and verifies non-final updates, final two-signature transactions, or expired refunds; afterward it checks the returned transaction ID, `SpendTxID`, and sequence.
-
-`UpdateAcceptance` includes the accepted transaction ID, `SpendTxID` anchor, and accepted `nSequence`. A node that reports only “received” without a state-acceptance guarantee cannot implement this interface correctly.
-
-## Key input types
-
-Workflows do not ask applications to repeat fields derivable from credentials. The following types contain the small set of choices or values the caller must supply.
-
-```go
-// package pool
-// Reference identifies the stable pool selected by 003. SpendTxID is always
-// the initial deferred-spend ID, never an update transaction ID.
-type Reference struct {
-    SpendTxID           Hash32
-    BasePaymentSequence uint32 // Latest nSequence observed by the buyer.
+~~~go
+type FundingBackend interface {
+    // Same raw transaction already accepted => same canonical txid, nil error.
+    SubmitTransaction(context.Context, []byte) (Hash32, error)
 }
 
-// package buyer
-// ContentRequestInput is the buyer's business choice for 003. Price, block
-// index, seller amount, and filename are derived from retained evidence.
-type ContentRequestInput struct {
-    QuoteTermsHash        bitfs.Hash32     // A quote previously accepted by AcceptQuote.
-    Pool                  pool.Reference   // A valid pool and its current sequence.
-    SelectedArbiterPubKey []byte           // Allowed by the quote and equal to the pool arbiter.
-    Content               bitfs.ContentRef // Seed or Block plus its content hash.
-    ContentSize           uint64           // Expected payload size used for pricing.
-    DeliveryDeadline      bitfs.UnixSeconds // Latest delivery time accepted by the buyer.
+type PoolBackend interface {
+    NonFinalPoolBackend
+    FundingBackend
 }
+~~~
 
-// OpeningInput is passed to the pool layer after the buyer wallet prepares a
-// signed, unpublished FundingTx. PoolOutputIndex selects its 2-of-3 output.
-type OpeningInput struct {
-    FundingTx       []byte
-    PoolOutputIndex uint32
-    ExpiryLockTime       uint32
-    MinerFeeRateSatPerKB uint64
-    SellerPubKey         []byte
-    ArbiterPubKey        []byte
-}
+`SubmitTransaction` is an idempotent canonical-transaction broadcast contract:
+when the exact same raw transaction was already accepted, a retry returns the
+same `Hash32` and a nil error. An `already-known` response is therefore
+success, not a failure. This contract makes funding uncertainty recovery safe;
+it is a backend behavior, not an application callback that the workflow tries
+to infer.
 
-// PaymentUpdateInput is the low-level generic-pool input. buyer.Workflow does
-// not expose SellerAmountAfterSat; it derives that value from 001, 003, and 004.
-type PaymentUpdateInput struct {
-    Opening              *OpeningProof // Complete evidence, not a database ID.
-    Previous             *PaymentState // Latest state; initially the refund state.
-    PaymentSequenceAfter uint32        // Greater than Previous and below 0xffffffff.
-    SellerAmountAfterSat uint64        // Absolute cumulative amount, not an increment.
-}
+A backend may be an RPC, gRPC, vendor SDK, or in-process node client. It does
+not assemble or validate protocol transactions. Workflows construct a
+pool.VerifiedNonFinalPoolNode internally from the backend and persisted opening
+proofs. That adapter dynamically creates the concrete MultisigPool engine from
+each proof, validates funding/update/final bytes before delegation, and checks
+returned transaction ID, spend anchor, and payment sequence after delegation.
+A permissive backend therefore cannot turn malformed evidence into an accepted
+workflow state.
 
-// CloseInput is only for negotiated immediate close. SellerAmountAfterSat
-// normally equals the last accepted cumulative amount and is not repriced here.
-type CloseInput struct {
-    Opening              *OpeningProof
-    Latest               *PaymentState
-    SellerAmountAfterSat uint64
-}
-```
+After a backend call, an ordinary error or an acceptance whose ID/sequence
+does not exactly match the candidate is treated as an uncertain external
+outcome. The workflow records the candidate transaction ID with
+`MarkExternalStateUncertain` and returns `ErrPoolStateUncertain`; callers must
+reconcile that exact raw transaction before any new signing or submission.
+`ReconcileExternalState` records the exact externally confirmed state and
+clears the uncertain marker. When the same store also owns a matching pending
+lease, it can atomically clear that lease after validating the complete lease
+fields. If `PoolStore` and `PendingRequestStore` are separate, the 005/007
+idempotent workflow retry releases the independent lease only after matching
+the full cryptographic evidence. A final close also requires
+`ReconcilePoolClosing` after the accepted final state is observed, so
+close-issued guards survive process restart until explicitly cleared.
+
+Funding uses ordinary broadcast semantics and is never routed through final
+settlement. Block-height refund expiry is the one optional chain-state query:
+a backend may implement BlockHeight(context.Context) (uint32, error). No wall
+clock or expiry strategy is injected; timestamp expiry uses the captured SDK
+operation time, while height refunds require an authoritative height source.
+
+## Protocol input types
+
+The role APIs intentionally accept protocol-shaped data rather than arbitrary
+business callbacks:
+
+- pool.OpeningInput contains raw funding bytes, pool output index, expiry lock
+  time, fee rate, and seller/arbiter public keys.
+- pool.RefundPresignRequest and pool.RefundPresignResponse carry 002 opening
+  evidence; pool.FundingTxDelivery reveals funding only after the refund proof
+  is durably recorded.
+- buyer.ContentRequestInput contains quote hash, SpendTxID, a ContentRef, size,
+  and deadline. The opening proof supplies the arbiter and base sequence;
+  price and payment sequence are derived, not caller-controlled.
+- pool.PaymentUpdate, pool.UnsignedPayment, and pool.SignedPayment distinguish
+  unsigned state, detached signatures, and complete transactions.
+
+The wire package maps these values to canonical 001–007 CBOR. Transport
+(HTTP, WebSocket, queue, CLI, or browser messaging) is deliberately absent;
+all environments carry the same bytes and use the same role methods.
+
+## What is not an extension point
+
+There is no workflow clock, transaction engine hook, opening-hook aggregate,
+participant/verifier port, private-key provider, or application-supplied
+transaction-ID calculator. Those abstractions would allow a caller to replace
+business rules that define the protocol. Only custody, persistence, content,
+and network/backend integration cross this boundary.

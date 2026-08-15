@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"testing"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
 )
@@ -12,16 +13,20 @@ import (
 func TestNewWirePreservesTypedCBOR(t *testing.T) {
 	terms := &bitfs.FileQuoteTerms{
 		SeedHash:                    bytes.Repeat([]byte{1}, 32),
-		BuyerPubkey:                 []byte{2},
+		BuyerPubkey:                 wireTestPubkey(),
 		SeedPriceSat:                1,
 		FullBlockPriceSat:           2,
 		FileSize:                    1,
 		QuoteExpiresAtUnix:          200,
 		SupportedArbiterPubkeysCBOR: mustArbiterCBOR(t),
 	}
-	quote, err := bitfs.NewSignedFileQuote(terms, []byte{3}, "file.bin", func(raw []byte) ([]byte, error) {
+	quote, err := bitfs.NewSignedFileQuote(terms, wireTestPubkey(), "file.bin", func(raw []byte) ([]byte, error) {
 		digest := sha256.Sum256(raw)
-		return digest[:], nil
+		signature, err := wireTestKey().Sign(digest[:])
+		if err != nil {
+			return nil, err
+		}
+		return signature.Serialize(), nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,9 +69,27 @@ func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 
 func mustArbiterCBOR(t *testing.T) []byte {
 	t.Helper()
-	raw, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{{4}})
+	raw, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{wireTestArbiterPubkey()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func wireTestKey() *ec.PrivateKey {
+	key, err := ec.PrivateKeyFromHex("2222222222222222222222222222222222222222222222222222222222222222")
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+func wireTestPubkey() []byte { return wireTestKey().PubKey().Compressed() }
+
+func wireTestArbiterPubkey() []byte {
+	key, err := ec.PrivateKeyFromHex("3333333333333333333333333333333333333333333333333333333333333333")
+	if err != nil {
+		panic(err)
+	}
+	return key.PubKey().Compressed()
 }

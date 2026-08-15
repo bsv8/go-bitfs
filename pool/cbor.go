@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -358,8 +359,17 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request.MultisigVersion != MultisigVersion {
 		return fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
 	}
-	if len(request.RefundTx) == 0 || len(request.FundingTxID) != sha256.Size || request.PoolOutputSatoshis == 0 || len(request.PoolLockingScript) == 0 || len(request.BuyerPubKey) == 0 || len(request.SellerPubKey) == 0 || len(request.ArbiterPubKey) == 0 || len(request.BuyerRefundSignature) == 0 {
+	if len(request.RefundTx) == 0 || len(request.FundingTxID) != sha256.Size || request.PoolOutputSatoshis == 0 || len(request.PoolLockingScript) == 0 || len(request.BuyerRefundSignature) == 0 {
 		return fmt.Errorf("%w: incomplete refund presign request", ErrInvalidEvidence)
+	}
+	roles := []struct {
+		name string
+		key  []byte
+	}{{"buyer", request.BuyerPubKey}, {"seller", request.SellerPubKey}, {"arbiter", request.ArbiterPubKey}}
+	for _, role := range roles {
+		if err := protocol.ValidateCompressedPubKey(role.key); err != nil {
+			return fmt.Errorf("%w: %s public key: %v", ErrInvalidEvidence, role.name, err)
+		}
 	}
 	return nil
 }
@@ -398,8 +408,17 @@ func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof.MultisigVersion != MultisigVersion {
 		return fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
 	}
-	if len(proof.RefundTx) == 0 || len(proof.SpendTxID) != sha256.Size || len(proof.FundingTxID) != sha256.Size || proof.PoolOutputSatoshis == 0 || len(proof.PoolLockingScript) == 0 || len(proof.BuyerPubKey) == 0 || len(proof.SellerPubKey) == 0 || len(proof.ArbiterPubKey) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
+	if len(proof.RefundTx) == 0 || len(proof.SpendTxID) != sha256.Size || len(proof.FundingTxID) != sha256.Size || proof.PoolOutputSatoshis == 0 || len(proof.PoolLockingScript) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: opening proof contains incomplete evidence", ErrInvalidEvidence)
+	}
+	roles := []struct {
+		name string
+		key  []byte
+	}{{"buyer", proof.BuyerPubKey}, {"seller", proof.SellerPubKey}, {"arbiter", proof.ArbiterPubKey}}
+	for _, role := range roles {
+		if err := protocol.ValidateCompressedPubKey(role.key); err != nil {
+			return fmt.Errorf("%w: %s public key: %v", ErrInvalidEvidence, role.name, err)
+		}
 	}
 	return nil
 }

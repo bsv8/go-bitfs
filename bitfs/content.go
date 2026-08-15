@@ -9,6 +9,7 @@ import (
 	"time"
 
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 const contentProtocolVersion uint64 = 3
@@ -71,8 +72,9 @@ type SignedContentDelivery struct {
 	SellerSignature []byte
 }
 
-// ContentTermsSigner signs the exact canonical CBOR bytes of a content
-// request or delivery terms document.
+// ContentTermsSigner receives the exact canonical CBOR bytes of a content
+// request or delivery terms document. It must hash those bytes once with
+// SHA-256 and return the resulting DER-only signature.
 type ContentTermsSigner func(termsCBOR []byte) ([]byte, error)
 
 // ContentTermsSignatureVerifier verifies a signature over exact bytes.
@@ -170,8 +172,10 @@ func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	return Hash32(sha256.Sum256(termsCBOR)), nil
 }
 
-// NewSignedContentRequest deterministically encodes request terms and signs
-// those exact bytes with the buyer-supplied signer.
+// NewSignedContentRequest deterministically encodes request terms and asks the
+// buyer-supplied signer to sign those exact bytes. The callback must apply the
+// single SHA-256 digest and return DER-only bytes; the fixed verifier checks
+// the signature before the credential is returned.
 func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSigner) (*SignedContentRequest, error) {
 	if signer == nil {
 		return nil, errors.New("content request signer is required")
@@ -186,6 +190,9 @@ func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSign
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("buyer signature is required")
+	}
+	if err := VerifySignature(terms.BuyerPubkey, termsCBOR, signature); err != nil {
+		return nil, fmt.Errorf("%w: buyer signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedContentRequest{
 		TermsCBOR:      append([]byte(nil), termsCBOR...),
@@ -290,7 +297,10 @@ func ContentDeliveryTermsHash(termsCBOR []byte) (Hash32, error) {
 }
 
 // NewSignedContentDelivery binds payload bytes to the request authorization
-// hash and signs the resulting deterministic delivery terms.
+// hash and asks signer to sign the resulting deterministic delivery terms.
+// The callback must apply the single SHA-256 digest and return DER-only bytes;
+// the fixed verifier checks it against the seller key committed by the request
+// before the credential is returned.
 func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, signer ContentTermsSigner) (*SignedContentDelivery, error) {
 	if signer == nil {
 		return nil, errors.New("content delivery signer is required")
@@ -315,6 +325,13 @@ func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sig
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("seller signature is required")
+	}
+	requestTerms, err := DecodeContentRequestTerms(request.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if err := VerifySignature(requestTerms.SellerPubkey, terms, signature); err != nil {
+		return nil, fmt.Errorf("%w: seller signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedContentDelivery{TermsCBOR: terms, SellerSignature: append([]byte(nil), signature...)}, nil
 }
@@ -375,14 +392,17 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if len(terms.SpendTxID) != sha256.Size {
 		return errors.New("spend_txid must be 32 bytes")
 	}
-	if terms.PaymentSequenceAfter == 0 || terms.BasePaymentSequence == ^uint64(0) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
+	if terms.PaymentSequenceAfter == 0 || terms.BasePaymentSequence == ^uint64(0) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) {
 		return errors.New("payment_sequence_after must equal base_payment_sequence plus one")
 	}
-	if len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
-		return errors.New("buyer_pubkey and seller_pubkey are required")
+	if err := protocol.ValidateCompressedPubKey(terms.BuyerPubkey); err != nil {
+		return fmt.Errorf("buyer_pubkey: %w", err)
 	}
-	if len(terms.SelectedArbiterPubkey) == 0 {
-		return errors.New("selected_arbiter_pubkey is required")
+	if err := protocol.ValidateCompressedPubKey(terms.SellerPubkey); err != nil {
+		return fmt.Errorf("seller_pubkey: %w", err)
+	}
+	if err := protocol.ValidateCompressedPubKey(terms.SelectedArbiterPubkey); err != nil {
+		return fmt.Errorf("selected_arbiter_pubkey: %w", err)
 	}
 	if terms.ContentType != ContentSeed && terms.ContentType != ContentBlock {
 		return fmt.Errorf("unsupported content_type %d", terms.ContentType)
@@ -554,7 +574,7 @@ func VerifySignedContentRequestStandalone(request *SignedContentRequest, buyerVe
 	if err != nil {
 		return nil, err
 	}
-	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
+	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) || len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
 		return nil, fmt.Errorf("%w: final payment authorization economic fields are incomplete", ErrInvalidEvidence)
 	}
 	if err := buyerVerifier(terms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
@@ -595,6 +615,9 @@ func verifySignedContentRequestAtContext(ctx context.Context, request *SignedCon
 	quoteHash, _ := FileQuoteTermsHash(quote.TermsCBOR)
 	if !bytes.Equal(terms.QuoteTermsHash, quoteHash[:]) {
 		return nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
+	}
+	if !bytes.Equal(terms.BuyerPubkey, quoteTerms.BuyerPubkey) || !bytes.Equal(terms.SellerPubkey, quote.SellerPubkey) {
+		return nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
 	}
 	if !now.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
 		return nil, fmt.Errorf("%w: delivery deadline has passed", ErrDeliveryDeadline)

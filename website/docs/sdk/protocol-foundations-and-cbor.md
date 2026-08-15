@@ -168,14 +168,19 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 `Unmarshal` answers only whether bytes conform to a message schema. The configured signature-verifier callbacks and the role workflow subsequently validate signatures, quote expiry, payment-pool inputs, and amounts. A decoder MUST NOT expose “decoded” as “verified” or “paid.”
 
+Every protocol identity public key is encoded as a valid 33-byte compressed
+secp256k1 key. The fixed validation layer rejects 65-byte uncompressed keys
+before they can enter signed 001/003/004 terms or 002 pool evidence.
+
 ## Pure protocol API
 
 These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests.
 
 ```go
 // package bitfs
-// NewSignedFileQuote signs deterministic FileQuoteTerms CBOR and creates a 001
-// credential. recommendedFilename is display-only and is not signed.
+// NewSignedFileQuote passes canonical FileQuoteTerms CBOR to signer; signer
+// hashes it once with SHA-256 and returns DER-only bytes. The constructor
+// fixedly verifies the signature and creates a 001 credential.
 func NewSignedFileQuote(
     terms *FileQuoteTerms,
     sellerPubkey []byte,
@@ -191,7 +196,9 @@ func VerifySignedFileQuoteAt(
     verifier QuoteTermsSignatureVerifier,
 ) (*FileQuoteTerms, error)
 
-// NewSignedContentRequest deterministically encodes 003 terms and signs them.
+// NewSignedContentRequest passes canonical 003 terms to signer; signer hashes
+// them once with SHA-256 and returns DER-only bytes. The constructor fixedly
+// verifies the signature before returning.
 func NewSignedContentRequest(
     terms *ContentRequestTerms,
     signer ContentTermsSigner,
@@ -207,7 +214,9 @@ func VerifySignedContentRequestAt(
     buyerVerifier ContentTermsSignatureVerifier,
 ) (*ContentRequestTerms, error)
 
-// NewSignedContentDelivery binds payload bytes to 003 and signs 004 terms.
+// NewSignedContentDelivery binds payload bytes to 003 and passes canonical 004
+// terms to signer; signer hashes them once with SHA-256 and returns DER-only
+// bytes. The constructor fixedly verifies the signature before returning.
 func NewSignedContentDelivery(
     request *SignedContentRequest,
     payload []byte,

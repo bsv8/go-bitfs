@@ -18,18 +18,12 @@ These facades do not own network connections. Each method returns a structured m
 type Workflow struct { /* unexported fields */ }
 
 type WorkflowConfig struct {
-    Signer            pool.Signer
-    QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
-    SignatureVerifier bitfs.ContentTermsSignatureVerifier
-    Clock             func() time.Time
-    Quotes            QuoteStore
-    Pools             pool.PoolStore
-    Opening           pool.BuyerPoolOpeningHooks
-    Participants      pool.ParticipantVerifier
-    Node              pool.NonFinalPoolNode
-    Transactions      pool.BuyerPoolPort
-    ContentSink       ContentSink
-    SeedSource        SeedSource
+    Signer      pool.Signer
+    Quotes      QuoteStore
+    Pools       pool.PoolStore
+    Backend     pool.NonFinalPoolBackend
+    ContentSink ContentSink
+    SeedSource  SeedSource
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -89,18 +83,21 @@ func (workflow *buyer.Workflow) RefundAfterExpiry(ctx context.Context, spendTxID
 // is not the unilateral expiry-refund path.
 func (workflow *buyer.Workflow) BuildImmediateClose(
     ctx context.Context,
-    input pool.CloseInput,
+    spendTxID pool.Hash32,
 ) (*pool.UnsignedPayment, []byte, error)
 
 // SubmitImmediateClose submits the final transaction after the seller has
-// added its signature. It does not overwrite non-final pool state.
+// added its signature, saves that final state as the latest pool state, and
+// clears the durable closing guard. If closing cleanup fails after persistence,
+// retrying verifies the saved final state and only retries cleanup; it does not
+// submit the final transaction twice.
 func (workflow *buyer.Workflow) SubmitImmediateClose(
     ctx context.Context,
     close *pool.SignedPayment,
 ) (pool.Hash32, error)
 ```
 
-`ContentRequestInput` includes a verified quote, a `pool.Reference` containing `SpendTxID` and the current `BasePaymentSequence`, the selected arbiter key, `ContentRef`, and a delivery deadline. It does not accept a block index, quote price, or arbitrary seller amount.
+`ContentRequestInput` includes a verified quote, `SpendTxID`, `ContentRef`, and a delivery deadline. The workflow loads the opening proof and accepted state, deriving the base sequence and selected arbiter itself; callers cannot repeat or override those protocol fields.
 
 ## Seller API
 
@@ -109,18 +106,12 @@ The seller API encloses the risky “deliver first, receive payment later” win
 ```go
 // package seller
 type WorkflowConfig struct {
-    Signer            pool.Signer
-    SignatureVerifier bitfs.ContentTermsSignatureVerifier
-    QuoteVerifier     bitfs.QuoteTermsSignatureVerifier
-    Clock             func() time.Time
-    Quotes            QuoteStore
-    Pools             pool.PoolStore
-    OpeningHooks      pool.SellerPoolOpeningHooks
-    Pending           pool.PendingRequestStore
-    Content           ContentSource
-    Transactions      pool.SellerPoolPort
-    Participants      pool.ParticipantVerifier
-    Node              pool.NonFinalPoolNode
+    Signer  pool.Signer
+    Quotes  QuoteStore
+    Pools   pool.PoolStore
+    Pending pool.PendingRequestStore
+    Content ContentSource
+    Backend pool.PoolBackend
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -141,7 +132,10 @@ func (workflow *seller.Workflow) PresignPoolOpening(
 
 // AcceptPoolFunding checks FundingTx against the pending proof, stores the
 // complete proof, and submits FundingTx. Only successful submission makes the
-// pool usable for 003.
+// pool usable for 003. If submission succeeds but local initial-state storage
+// fails, the workflow marks the pool uncertain; retry requires an idempotent
+// backend (same raw transaction returns the same canonical txid) and
+// reconciles the state without an ordinary duplicate save.
 func (workflow *seller.Workflow) AcceptPoolFunding(
     ctx context.Context,
     delivery *pool.FundingTxDelivery,
@@ -166,23 +160,21 @@ func (workflow *seller.Workflow) AcceptPayment(
 ) (*pool.PaymentState, error)
 
 // SignImmediateClose checks an unsigned close and detached buyer signature,
-// uses the workflow's configured seller signer to add the seller signature,
-// and returns a complete transaction without broadcasting it. The signer
-// parameter is retained for interface compatibility.
+// persists the durable closing guard, uses the workflow's configured seller
+// signer to add the seller signature, and returns a complete transaction
+// without broadcasting it. The workflow's configured signer is the only
+// signing capability used by this method.
 func (workflow *seller.Workflow) SignImmediateClose(
     ctx context.Context,
     close *pool.UnsignedPayment,
     buyerSignature []byte,
-    signer pool.Signer,
 ) (*pool.SignedPayment, error)
 
 // BuildArbitrationRequestFromAuthorization constructs an unsigned candidate from final 003
 // authorization and the current state and adds the seller signature.
 func (workflow *seller.Workflow) BuildArbitrationRequestFromAuthorization(
     ctx context.Context,
-    proof *pool.OpeningProof,
     authorization *bitfs.SignedContentRequest,
-    latest *pool.PaymentState,
 ) (*arbitration.ArbitrationRequest, error)
 
 // SubmitArbitratedPayment merges the arbiter signature and submits that same
@@ -201,9 +193,7 @@ The arbiter receives complete evidence instead of querying buyer or seller state
 ```go
 // package arbitration
 type WorkflowConfig struct {
-    Signer                pool.Signer
-    Pool                  PoolPort
-    AuthorizationVerifier bitfs.ContentTermsSignatureVerifier
+    Signer pool.Signer
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
@@ -225,60 +215,32 @@ func (workflow *arbitration.Workflow) SignPayment(
 
 ## Complete business flow
 
-The following end-to-end example walks through one buyer purchasing a file from a seller. It is application-level pseudocode: the wallet, stores, content source, MultisigPool adapters, and node adapters are implemented by the application and injected into the SDK.
+The following end-to-end example walks through one buyer purchasing a file from a seller. It is application-level pseudocode: the wallet, stores, content source, and narrow raw BSV backend are implemented by the application; each workflow constructs the verified node boundary and concrete MultisigPool adapters internally.
 
 ### 1. Create one capability set for each role
 
-A `Signer` represents one role and one private key. A verifier has no role key of its own; the SDK supplies the public key being checked from the quote, the 003 authorization, or the opening proof.
+A `Signer` represents one role and retains private-key custody outside the SDK. The fixed core obtains public keys from signed protocol objects and performs quote, content, opening, participant, and payment verification itself.
 
 ```go
 buyerSigner   := app.BuyerSigner()   // implements pool.Signer
 sellerSigner  := app.SellerSigner()  // implements pool.Signer
 arbiterSigner := app.ArbiterSigner() // implements pool.Signer
 
-// These callbacks implement the underlying signature scheme. The pubkey is
-// supplied by the credential being verified; the verifier has no role key.
-verifyQuote := app.VerifyQuote       // bitfs.QuoteTermsSignatureVerifier
-verifyTerms := app.VerifyTerms       // bitfs.ContentTermsSignatureVerifier
-
 buyerWorkflow, err := buyer.NewWorkflow(buyer.WorkflowConfig{
-    Signer:            buyerSigner,
-    QuoteVerifier:     verifyQuote,
-    SignatureVerifier: verifyTerms,
-    Clock:             time.Now,
-    Quotes:            buyerQuotes,
-    Pools:             buyerPools,
-    Opening:           buyerOpeningHooks,
-    Participants:      participantVerifier,
-    Transactions:      buyerPoolPort,
-    Node:              buyerNode,
-    ContentSink:       buyerContentSink,
-    SeedSource:        buyerSeedSource,
+    Signer: buyerSigner, Quotes: buyerQuotes, Pools: buyerPools,
+    Backend: buyerBackend, ContentSink: buyerContentSink, SeedSource: buyerSeedSource,
 })
 must(err)
 
 sellerWorkflow, err := seller.NewWorkflow(seller.WorkflowConfig{
-    Signer:            sellerSigner,
-    QuoteVerifier:     verifyQuote,
-    SignatureVerifier: verifyTerms,
-    Clock:             time.Now,
-    Quotes:            sellerQuotes,
-    Pools:             sellerPools,
-    OpeningHooks:      sellerOpeningHooks,
-    Pending:           sellerPending,
-    Content:           sellerContent,
-    Transactions:      sellerPoolPort,
-    Participants:      participantVerifier,
-    Node:              sellerNode,
+    Signer: sellerSigner, Quotes: sellerQuotes, Pools: sellerPools,
+    Pending: sellerPending, Content: sellerContent, Backend: sellerBackend,
 })
 must(err)
 
-arbiterWorkflow, err := arbitration.NewWorkflow(arbitration.WorkflowConfig{
-    Signer:                arbiterSigner,
-    Pool:                  arbiterPoolPort,
-    AuthorizationVerifier: verifyTerms,
-})
+arbiterWorkflow, err := arbitration.NewWorkflow(arbitration.WorkflowConfig{Signer: arbiterSigner})
 must(err)
+
 ```
 
 The application transport carries only the route `Kind` and the original CBOR bytes. This helper represents that rule; a real application can place the result in HTTP, WebSocket, a queue, or local RPC.
@@ -315,7 +277,7 @@ quoteHash := bitfs.Hash32(quoteHashRaw)
 _ = quoteTerms // Verified terms; later requests refer to them by quoteHash.
 ```
 
-Two different actions occur here: the seller's `Signer` signs the quote, and the buyer's `QuoteVerifier` verifies the `SellerPubkey` carried by the quote. The buyer never needs the seller's private key.
+The seller's `Signer` creates the quote and the buyer workflow verifies it with the fixed protocol verifier against the seller public key carried by the quote. No verifier callback is supplied by the application.
 
 ### 3. The buyer and seller open the payment pool
 
@@ -364,7 +326,7 @@ _, err = sellerWorkflow.AcceptPoolFunding(ctx, sellerFunding)
 must(err)
 ```
 
-`PreparePoolOpening` and `PresignPoolOpening` use the pool-opening hooks. The underlying MultisigPool needs the actual private key to calculate transaction signatures, so this capability is normally wrapped in a `PrivateKeyProvider` inside the pool adapter. It is a different layer from the general-purpose credential `Signer`.
+`PreparePoolOpening` and `PresignPoolOpening` use the fixed MultisigPool v4 engine. The role workflows receive only a narrow `Signer`; they never receive or export private keys. The application supplies raw funding bytes and the workflow constructs and verifies canonical opening evidence.
 
 ### 4. The buyer requests content and the seller delivers it
 
@@ -374,8 +336,7 @@ This example requests a block, so the buyer's `SeedSource` must provide the seed
 contentHash := app.RequestedBlockHash()
 request, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
     QuoteTermsHash:        quoteHash,
-    Pool:                  reference,
-    SelectedArbiterPubKey: arbiterPubkey,
+    SpendTxID:             reference.SpendTxID,
     Content: bitfs.ContentRef{
         Type: bitfs.ContentBlock,
         Hash: contentHash,
@@ -399,7 +360,7 @@ buyerDelivery, err := wire.UnmarshalContentDelivery(deliveryCBOR)
 must(err)
 ```
 
-The buyer's `RequestContent` uses its own `Signer` to sign 003. The seller's `SignatureVerifier` checks it with the buyer public key committed by the quote. The seller then uses its own `Signer` to sign 004; the buyer verifies it with the seller public key from the quote.
+The buyer's `Signer` signs 003. The seller workflow verifies it with the fixed protocol verifier and the buyer key committed by the quote, then signs 004 with its own `Signer`; the buyer verifies the returned delivery with the fixed core.
 
 ### 5. The buyer accepts delivery and the seller accepts cumulative payment
 
@@ -425,13 +386,8 @@ There is no extra “payment succeeded” protocol message. The seller treats th
 This branch replaces `AcceptPayment`; it must not be executed alongside the normal payment path. The seller uses the already signed 003 authorization and its retained latest pool state to construct 007. The arbiter verifies the evidence and adds only its transaction signature.
 
 ```go
-proof, err := sellerPools.LoadOpeningProof(ctx, reference.SpendTxID)
-must(err)
-latest, err := sellerPools.LoadAcceptedPayment(ctx, reference.SpendTxID)
-must(err)
-
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequestFromAuthorization(
-    ctx, proof, sellerRequest, latest,
+    ctx, sellerRequest,
 )
 must(err)
 
@@ -453,26 +409,17 @@ must(err)
 _ = arbitrated
 ```
 
-The arbiter's `AuthorizationVerifier` verifies the buyer signature in 003. The arbiter's own `Signer` only adds the arbiter signature after the candidate has passed all checks.
+The arbiter workflow verifies the buyer authorization with the fixed core. Its own `Signer` only adds the arbiter signature after every candidate check passes.
 
 ### 7. Two other endings: negotiated close and expiry refund
 
-Negotiated close and expiry refund are alternative endings, not mandatory steps after normal payment. Negotiated close requires both parties' signatures and does not introduce a new CBOR `CloseRequest`. The example assumes that `buyerPools` has already been updated with the latest node-accepted state:
+Negotiated close and expiry refund are alternative endings, not mandatory steps after normal payment. Negotiated close requires both parties' signatures and does not introduce a new CBOR `CloseRequest`. `SignImmediateClose` persists the closing guard but does not broadcast. `SubmitImmediateClose` saves the final state and clears the guard after node acceptance; if cleanup fails after persistence, retrying is cleanup-only and does not broadcast twice. The example assumes that `buyerPools` has already been updated with the latest node-accepted state:
 
 ```go
-opening, err := buyerPools.LoadOpeningProof(ctx, reference.SpendTxID)
-must(err)
-latestPayment, err := buyerPools.LoadAcceptedPayment(ctx, reference.SpendTxID)
+unsignedClose, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, reference.SpendTxID)
 must(err)
 
-unsignedClose, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, pool.CloseInput{
-    Opening:              opening,
-    Latest:               latestPayment,
-    SellerAmountAfterSat: latestPayment.SellerAmountSat,
-})
-must(err)
-
-closed, err := sellerWorkflow.SignImmediateClose(ctx, unsignedClose, buyerSig, sellerSigner)
+closed, err := sellerWorkflow.SignImmediateClose(ctx, unsignedClose, buyerSig)
 must(err)
 
 _, err = buyerWorkflow.SubmitImmediateClose(ctx, closed)

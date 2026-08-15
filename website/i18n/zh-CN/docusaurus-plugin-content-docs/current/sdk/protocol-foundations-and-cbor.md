@@ -167,13 +167,17 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 `Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由配置的签名验证回调和角色工作流校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
+所有协议身份公钥都必须编码为合法的 33 字节压缩 secp256k1 公钥。固定验证
+层会在它们进入签名的 001/003/004 条款或 002 费用池证据前拒绝 65 字节未压缩公钥。
+
 ## 纯协议 API
 
 这些函数没有存储、网络和时间以外的副作用，适合钱包、服务端、CLI 和测试直接使用。
 
 ```go
 // package bitfs
-// NewSignedFileQuote 对 FileQuoteTerms 的 deterministic CBOR 进行签名，生成 001 报价凭证。
+// NewSignedFileQuote 将 FileQuoteTerms 规范 CBOR 传给 signer；signer 对其执行一次
+// SHA-256 并返回 DER 字节。构造器固定验证签名并生成 001 报价凭证。
 // recommendedFilename 仅为展示信息，不进入签名条款。
 func NewSignedFileQuote(
     terms *FileQuoteTerms,
@@ -189,7 +193,8 @@ func VerifySignedFileQuoteAt(
     verifier QuoteTermsSignatureVerifier,
 ) (*FileQuoteTerms, error)
 
-// NewSignedContentRequest 对 003 条款做确定性编码并签名。
+// NewSignedContentRequest 将规范 003 条款传给 signer；signer 对其执行一次 SHA-256
+// 并返回 DER 字节。构造器在返回前固定验证签名。
 func NewSignedContentRequest(
     terms *ContentRequestTerms,
     signer ContentTermsSigner,
@@ -204,7 +209,8 @@ func VerifySignedContentRequestAt(
     buyerVerifier ContentTermsSignatureVerifier,
 ) (*ContentRequestTerms, error)
 
-// NewSignedContentDelivery 将 payload 绑定到 003 并签名 004 条款。
+// NewSignedContentDelivery 将 payload 绑定到 003，并将规范 004 条款传给 signer；
+// signer 对其执行一次 SHA-256 并返回 DER 字节。构造器在返回前固定验证签名。
 func NewSignedContentDelivery(
     request *SignedContentRequest,
     payload []byte,

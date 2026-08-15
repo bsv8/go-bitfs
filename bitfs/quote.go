@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 const quoteTermsVersion uint64 = 1
@@ -24,7 +25,8 @@ const MaxQuoteSeedBlocks uint64 = masterseed.BlockSize / masterseed.DigestSize
 // delivered in one BitFS payload.
 const MaxQuoteFileSize uint64 = MaxQuoteSeedBlocks * BlockSize
 
-// QuoteTermsSigner signs the exact canonical TermsCBOR bytes.
+// QuoteTermsSigner receives the exact canonical TermsCBOR bytes. It must hash
+// those bytes once with SHA-256 and return the resulting DER-only signature.
 type QuoteTermsSigner func(termsCBOR []byte) ([]byte, error)
 
 // QuoteTermsSignatureVerifier verifies a seller signature over the exact
@@ -137,10 +139,12 @@ func FileQuoteTermsHash(termsCBOR []byte) ([sha256.Size]byte, error) {
 }
 
 // NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
-// signs those exact bytes with signTerms, and returns a portable 001 credential.
+// and asks signTerms to sign those exact bytes. The callback must apply the
+// protocol's single SHA-256 digest and return DER-only bytes; this constructor
+// fixedly re-verifies the signature before returning a portable 001 credential.
 func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedFilename string, signer QuoteTermsSigner) (*SignedFileQuote, error) {
-	if len(sellerPubkey) == 0 {
-		return nil, errors.New("seller pubkey is required")
+	if err := protocol.ValidateCompressedPubKey(sellerPubkey); err != nil {
+		return nil, fmt.Errorf("seller pubkey: %w", err)
 	}
 	if signer == nil {
 		return nil, errors.New("quote terms signer is required")
@@ -155,6 +159,9 @@ func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedF
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("quote terms signature is required")
+	}
+	if err := VerifySignature(sellerPubkey, termsCBOR, signature); err != nil {
+		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedFileQuote{
 		TermsCBOR:           append([]byte(nil), termsCBOR...),
@@ -178,6 +185,9 @@ func VerifySignedFileQuoteAt(quote *SignedFileQuote, now time.Time, verifier Quo
 	}
 	if len(quote.SellerPubkey) == 0 {
 		return nil, fmt.Errorf("%w: seller pubkey is required", ErrInvalidEvidence)
+	}
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
+		return nil, fmt.Errorf("%w: seller pubkey: %v", ErrInvalidEvidence, err)
 	}
 	if len(quote.TermsSignature) == 0 {
 		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
@@ -206,6 +216,9 @@ func EncodeSignedFileQuote(quote *SignedFileQuote) ([]byte, error) {
 	}
 	if len(quote.SellerPubkey) == 0 {
 		return nil, errors.New("seller pubkey is required")
+	}
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
+		return nil, fmt.Errorf("seller pubkey: %w", err)
 	}
 	if len(quote.TermsSignature) == 0 {
 		return nil, errors.New("quote terms signature is required")
@@ -262,6 +275,9 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 	}
 	if len(terms.BuyerPubkey) == 0 {
 		return errors.New("quote buyer_pubkey is required")
+	}
+	if err := protocol.ValidateCompressedPubKey(terms.BuyerPubkey); err != nil {
+		return fmt.Errorf("quote buyer_pubkey: %w", err)
 	}
 	if terms.FileSize == 0 {
 		emptySeedHash := masterseed.Sum256(nil)
@@ -358,8 +374,8 @@ func fileQuoteBlockCount(fileSize uint64) uint64 {
 
 func validateSupportedArbiterPubkeys(pubkeys [][]byte) error {
 	for index, pubkey := range pubkeys {
-		if len(pubkey) == 0 {
-			return fmt.Errorf("supported arbiter pubkey #%d is required", index)
+		if err := protocol.ValidateCompressedPubKey(pubkey); err != nil {
+			return fmt.Errorf("supported arbiter pubkey #%d: %w", index, err)
 		}
 		for previous := 0; previous < index; previous++ {
 			if bytes.Equal(pubkeys[previous], pubkey) {

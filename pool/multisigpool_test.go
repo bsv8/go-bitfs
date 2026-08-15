@@ -46,6 +46,30 @@ func (s *countingPoolSigner) Sign(_ context.Context, digest []byte) ([]byte, err
 func (s malformedSigner) PublicKey(context.Context) ([]byte, error)    { return s.pub, nil }
 func (s malformedSigner) Sign(context.Context, []byte) ([]byte, error) { return s.sig, nil }
 
+func TestBuild2of3LockingScriptUsesExplicitParticipantRoles(t *testing.T) {
+	buyer := mustPoolTestKey(t, "11")
+	seller := mustPoolTestKey(t, "22")
+	arbiter := mustPoolTestKey(t, "33")
+
+	lock, err := Build2of3LockingScript(MultisigPoolPublicKeys{
+		BuyerPubKey:   buyer.PubKey().Compressed(),
+		SellerPubKey:  seller.PubKey().Compressed(),
+		ArbiterPubKey: arbiter.PubKey().Compressed(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := mp.BuildArbitratedPoolLock(mp.ArbitratedPoolRoles{
+		Buyer: buyer.PubKey(), Seller: seller.PubKey(), Arbiter: arbiter.PubKey(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(lock, expected.Bytes()) {
+		t.Fatal("role-explicit locking script differs from the MultisigPool result")
+	}
+}
+
 func TestSignerBoundaryRejectsWrongRoleMalformedAndInvalidSignatures(t *testing.T) {
 	ctx := context.Background()
 	buyer := mustPoolTestKey(t, "11")

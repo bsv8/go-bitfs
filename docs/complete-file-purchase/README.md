@@ -343,10 +343,12 @@ func PurchaseCompleteFile(ctx context.Context, app *App, asset SaleAsset) error 
 
     // ---------- 步骤 002：先预签退款，再为支付池充值 ----------
 
-    // 三个公钥的顺序必须固定为 buyer、seller、arbiter。
-    poolLockingScript, err := pool.Build2of3LockingScript(
-        [][]byte{buyerPubKey, sellerPubKey, arbiterPubKey},
-    )
+    // 使用业务角色字段表达三个公钥的含义，不依赖调用方记忆位置顺序。
+    poolLockingScript, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
+        BuyerPubKey:   buyerPubKey,
+        SellerPubKey:  sellerPubKey,
+        ArbiterPubKey: arbiterPubKey,
+    })
     must(err)
 
     // 资金至少覆盖 Seed、所有块价格和交易费。尾块价格由 SDK 按报价规则计算，

@@ -290,7 +290,9 @@ func newProtocolFixtureAt(t *testing.T, expiry uint32) *protocolFixture {
 	if _, err := buyerWorkflow.AcceptQuote(ctx, quote); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := pool.Build2of3LockingScript([][]byte{buyerKey.PubKey().Compressed(), sellerKey.PubKey().Compressed(), arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
+		BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1138,7 +1140,9 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if _, err := buyerWorkflow.AcceptQuote(ctx, quote); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := pool.Build2of3LockingScript([][]byte{buyerKey.PubKey().Compressed(), sellerKey.PubKey().Compressed(), arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
+		BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1386,7 +1390,9 @@ func TestFundingPersistenceFailureCanBeReconciled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock, err := pool.Build2of3LockingScript([][]byte{buyerKey.PubKey().Compressed(), sellerKey.PubKey().Compressed(), arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
+		BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

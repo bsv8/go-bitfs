@@ -35,6 +35,14 @@ type MultisigPoolEngineConfig struct {
 	BlockHeight   func() uint32
 }
 
+// MultisigPoolPublicKeys identifies the three pool participants by settlement role.
+// The explicit fields keep callers from relying on positional key ordering.
+type MultisigPoolPublicKeys struct {
+	BuyerPubKey   []byte
+	SellerPubKey  []byte
+	ArbiterPubKey []byte
+}
+
 // MultisigPoolEngine is the adapter boundary to MultisigPool v4. It preserves
 // Buyer/Seller/Arbiter role ordering while delegating scripts, fees, sighash,
 // state construction, and signature ordering to that dependency.
@@ -105,25 +113,22 @@ func (engine *MultisigPoolEngine) roles() mp.ArbitratedPoolRoles {
 	return mp.ArbitratedPoolRoles{Buyer: engine.buyer, Seller: engine.seller, Arbiter: engine.arbiter}
 }
 
-// Build2of3LockingScript delegates construction of the role-ordered 2-of-3
-// MultisigPool locking script. pubkeys must be exactly Buyer, Seller, Arbiter.
-func Build2of3LockingScript(pubkeys [][]byte) ([]byte, error) {
-	if len(pubkeys) != 3 {
-		return nil, invalid("exactly three pool public keys are required")
-	}
-	keys := make([]*ec.PublicKey, 3)
-	for i, raw := range pubkeys {
-		key, err := parsePoolKey(raw)
-		if err != nil {
-			return nil, err
-		}
-		keys[i] = key
-	}
-	lock, err := mp.BuildArbitratedPoolLock(mp.ArbitratedPoolRoles{Buyer: keys[0], Seller: keys[1], Arbiter: keys[2]})
+// Build2of3LockingScript delegates construction of the 2-of-3 MultisigPool
+// locking script using the explicit Buyer, Seller, and Arbiter public keys.
+func Build2of3LockingScript(keys MultisigPoolPublicKeys) ([]byte, error) {
+	buyer, err := parsePoolKey(keys.BuyerPubKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("buyer public key: %w", err)
 	}
-	return append([]byte(nil), lock.Bytes()...), nil
+	seller, err := parsePoolKey(keys.SellerPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("seller public key: %w", err)
+	}
+	arbiter, err := parsePoolKey(keys.ArbiterPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("arbiter public key: %w", err)
+	}
+	return BuildPoolLock(mp.ArbitratedPoolRoles{Buyer: buyer, Seller: seller, Arbiter: arbiter})
 }
 
 // BuildRefundPresignRequest constructs a RefundPresignRequest from the funding

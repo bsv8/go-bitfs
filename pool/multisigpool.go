@@ -8,8 +8,8 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 )
 
-// BuildPoolLock is the public role-explicit lock adapter. The argument order
-// is permanently Buyer, Seller, Arbiter through the v4 role object.
+// BuildPoolLock is the public role-explicit lock adapter. The v4 role object
+// determines each participant's meaning by its Buyer, Seller, and Arbiter fields.
 func BuildPoolLock(roles mp.ArbitratedPoolRoles) ([]byte, error) {
 	lock, err := mp.BuildArbitratedPoolLock(roles)
 	if err != nil {

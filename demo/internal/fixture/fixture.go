@@ -260,7 +260,9 @@ func (f *Fixture) DeliverAndBuildPayment(ctx context.Context) (*bitfs.SignedCont
 }
 
 func buildFundingTx(buyer, seller, arbiter []byte) ([]byte, error) {
-	lock, err := pool.Build2of3LockingScript([][]byte{buyer, seller, arbiter})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
+		BuyerPubKey: buyer, SellerPubKey: seller, ArbiterPubKey: arbiter,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -27,6 +27,8 @@ chmod 600 demo/secrets/*.value
 
 `FILE_PATH` 指向卖家要报价的文件，例如 `demo/file.bin`。`QUOTE_VALID_FOR` 是相对有效期，例如 `1h`、`30m` 或 `24h`，程序用“当前 UTC 时间 + 有效期”计算 `ExpiresAt`，不会使用固定过期时间。
 
+报价中的 `RECOMMENDED_FILENAME` 展示字段会自动取 `FILE_PATH` 的文件名，不需要再单独配置。
+
 ## 卖家生成报价单
 
 ```sh

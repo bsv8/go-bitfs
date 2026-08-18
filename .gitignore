@@ -31,6 +31,7 @@ go.work.sum
 # Local demo secrets
 demo/secrets/
 demo/quote/**/secrets/
+demo/.state/
 
 # Editor/IDE
 # .idea/

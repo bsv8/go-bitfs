@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,22 +34,22 @@ func main() {
 	seedPrice := flag.Uint64("seed-price-sat", envUint64("SEED_PRICE_SAT", 0), "seed price in satoshis")
 	blockPrice := flag.Uint64("block-price-sat", envUint64("FULL_BLOCK_PRICE_SAT", 0), "full block price in satoshis")
 	validFor := flag.Duration("quote-valid-for", envDuration("QUOTE_VALID_FOR", time.Hour), "how long the quote remains valid, for example 1h or 30m")
-	filename := flag.String("filename", envOr("RECOMMENDED_FILENAME", ""), "display-only recommended filename")
 	flag.Parse()
 
-	if err := run(*privateKeyHex, *privateKeyFile, *filePath, *seedPrice, *blockPrice, *validFor, *filename); err != nil {
+	if err := run(*privateKeyHex, *privateKeyFile, *filePath, *seedPrice, *blockPrice, *validFor); err != nil {
 		fmt.Fprintln(os.Stderr, "seller:", err)
 		os.Exit(1)
 	}
 }
 
-func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice uint64, validFor time.Duration, filename string) error {
+func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice uint64, validFor time.Duration) error {
+	filename := filepath.Base(filePath)
 	debugf("=== BitFS Seller Quote Builder ===")
 	debugf("[config] source file       : %s", filePath)
 	debugf("[config] seed price        : %d satoshis", seedPrice)
 	debugf("[config] full block price : %d satoshis", blockPrice)
 	debugf("[config] valid for         : %s", validFor)
-	debugf("[config] filename          : %q", filename)
+	debugf("[config] recommended name  : %q (from FILE_PATH)", filename)
 	if validFor <= 0 {
 		return fmt.Errorf("quote validity duration must be positive")
 	}

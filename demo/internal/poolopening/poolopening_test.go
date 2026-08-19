@@ -1,3 +1,5 @@
+// 本文件覆盖 002 demo 层的本地交易构造、网络地址选择和 JungleBus 交互。
+// 测试只使用临时目录和 httptest 服务，不广播任何真实交易。
 package poolopening
 
 import (
@@ -20,6 +22,8 @@ import (
 )
 
 func TestBuildFundingTxUsesSelectedUTXOAndSignsInput(t *testing.T) {
+	// 验证资金交易确实花费传入的 txid:vout，输入已经签名，且输出金额与
+	// 实际手续费满足“池输出 + 找零 + 矿工费 = UTXO 金额”。
 	buyer := testPrivateKey(t, 0x11)
 	seller := testPrivateKey(t, 0x22)
 	arbiter := testPrivateKey(t, 0x33)
@@ -65,6 +69,7 @@ func TestBuildFundingTxUsesSelectedUTXOAndSignsInput(t *testing.T) {
 		t.Fatalf("pool output = %d, want 20000", transaction.Outputs[0].Satoshis)
 	}
 	actualFee := uint64(25_000) - transaction.Outputs[0].Satoshis - transaction.Outputs[1].Satoshis
+	// 费率按交易原始字节数计算，因此断言不能只检查固定手续费金额。
 	expectedFee, err := minerFeeForSize(len(raw), 100)
 	if err != nil {
 		t.Fatalf("calculate expected miner fee: %v", err)
@@ -75,6 +80,8 @@ func TestBuildFundingTxUsesSelectedUTXOAndSignsInput(t *testing.T) {
 }
 
 func TestFundingAddressesDerivesBothNetworks(t *testing.T) {
+	// 同一公钥应能派生出主网和测试网两种地址，BITFS_NETWORK 决定本次选中
+	// 哪一个，但不会影响另一个地址的计算结果。
 	session := &BuyerSession{buyerKey: testPrivateKey(t, 0x11)}
 	t.Setenv("BITFS_NETWORK", "testnet")
 
@@ -102,6 +109,8 @@ func TestFundingAddressesDerivesBothNetworks(t *testing.T) {
 }
 
 func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
+	// 使用本地 HTTP 服务模拟地址历史和交易详情，验证 PrepareFunding 会
+	// 使用真实接口数据构造资金交易，并把环境变量费率传递到最终 OpeningInput。
 	buyer := testPrivateKey(t, 0x11)
 	buyerAddress, err := script.NewAddressFromPublicKey(buyer.PubKey(), false)
 	if err != nil {
@@ -124,6 +133,8 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 	rawSource := source.Bytes()
 	sourceID := source.TxID().String()
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		// 服务端返回一笔含买方 P2PKH 输出的规范交易，客户端随后会从它重建
+		// UTXO 并为资金交易输入签名。
 		switch request.URL.Path {
 		case "/v1/address/get/" + address:
 			response.Header().Set("Content-Type", "application/json")
@@ -179,6 +190,8 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 }
 
 func testPrivateKey(t *testing.T, value byte) *ec.PrivateKey {
+	// 使用重复字节生成确定性的测试私钥，便于构造三方角色而不依赖仓库中的
+	// 真实 .env 私钥。
 	t.Helper()
 	key, err := ec.PrivateKeyFromHex(hex.EncodeToString(bytes.Repeat([]byte{value}, 32)))
 	if err != nil {

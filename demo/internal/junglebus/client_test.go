@@ -1,3 +1,5 @@
+// 本文件使用 httptest 模拟 JungleBus，验证 demo 客户端的网络选择、地址历史
+// 处理和 UTXO 重建逻辑，不访问真实主网或测试网。
 package junglebus
 
 import (
@@ -18,6 +20,7 @@ import (
 )
 
 func TestParseNetworkDefaultsToTestnet(t *testing.T) {
+	// 空配置和短名称都应落到测试网；main/mainnet 则必须选择主网。
 	network, err := ParseNetwork("")
 	if err != nil || network != Testnet {
 		t.Fatalf("ParseNetwork(\"\") = %q, %v; want testnet", network, err)
@@ -37,6 +40,8 @@ func TestParseNetworkDefaultsToTestnet(t *testing.T) {
 }
 
 func TestListUTXOsReconstructsAddressStateFromHistory(t *testing.T) {
+	// 构造一笔先收款、再花费并重新找零的交易历史，验证客户端不是简单
+	// 地把所有输出相加，而是按照 outpoint 生命周期重建当前 UTXO 集合。
 	key, err := ec.PrivateKeyFromHex(strings.Repeat("11", 32))
 	if err != nil {
 		t.Fatalf("create private key: %v", err)
@@ -79,8 +84,8 @@ func TestListUTXOsReconstructsAddressStateFromHistory(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/v1/address/get/" + address.AddressString:
-			// Deliberately return reverse order; the client must order by block
-			// position before applying spend transitions.
+			// 故意按倒序返回历史；客户端必须先按区块位置排序，再应用花费
+			// 转移，否则会错误地把已花费的第一笔输出保留下来。
 			_ = json.NewEncoder(response).Encode([]addressTransaction{
 				{TransactionID: secondID, BlockHeight: 101, BlockIndex: 1},
 				{TransactionID: firstID, BlockHeight: 100, BlockIndex: 0},
@@ -123,6 +128,8 @@ func TestListUTXOsReconstructsAddressStateFromHistory(t *testing.T) {
 }
 
 func TestListUTXOsTreatsMissingAddressAsEmpty(t *testing.T) {
+	// JungleBus 对没有历史的地址可能返回 404；demo 将其视为空 UTXO 集合，
+	// 而不是把“尚未充值”误报成客户端网络故障。
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		http.NotFound(response, nil)
 	}))

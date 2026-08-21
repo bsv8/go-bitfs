@@ -10,6 +10,7 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	mp "github.com/bsv8/MultisigPool/v4/pkg"
 	"github.com/bsv8/go-bitfs/bitfs"
@@ -86,7 +87,7 @@ func TestSignerBoundaryRejectsWrongRoleMalformedAndInvalidSignatures(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()}
+	input := OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()}
 	if _, err := NewBuyerPoolAdapter(engine, testSigner{seller}).BuildRefundPresignRequest(ctx, input); err == nil {
 		t.Fatal("wrong role signer was accepted")
 	}
@@ -96,6 +97,29 @@ func TestSignerBoundaryRejectsWrongRoleMalformedAndInvalidSignatures(t *testing.
 	other := mustPoolTestKey(t, "44")
 	if _, err := NewBuyerPoolAdapter(engine, malformedSigner{pub: buyer.PubKey().Compressed(), sig: func() []byte { s, _ := other.Sign(make([]byte, 32)); return s.Serialize() }()}).BuildRefundPresignRequest(ctx, input); err == nil {
 		t.Fatal("cryptographically invalid signer output was accepted")
+	}
+}
+
+func TestBuildRefundPresignRequestRequiresPoolAtOutputZero(t *testing.T) {
+	ctx := context.Background()
+	buyer := mustPoolTestKey(t, "11")
+	seller := mustPoolTestKey(t, "22")
+	arbiter := mustPoolTestKey(t, "33")
+	roles := mp.ArbitratedPoolRoles{Buyer: buyer.PubKey(), Seller: seller.PubKey(), Arbiter: arbiter.PubKey()}
+	lock, err := mp.BuildArbitratedPoolLock(roles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding := tx.NewTransaction()
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: 1, LockingScript: script.NewFromBytes([]byte{0x51})})
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewBuyerPoolAdapter(engine, testSigner{buyer}).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	if err == nil {
+		t.Fatal("pool output at index 1 was accepted")
 	}
 }
 func (provider testSigner) Sign(_ context.Context, digest []byte) ([]byte, error) {
@@ -125,7 +149,7 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	buyerPool := NewBuyerPoolAdapter(engine, testSigner{buyer})
 	sellerPool := NewSellerPoolAdapter(engine, testSigner{seller})
 	arbiterPool := NewArbiterPoolAdapter(engine, testSigner{arbiter})
-	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: 500, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +157,10 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spend, err := engine.TransactionID(request.RefundTx)
+	proof, err := engine.BuildOpeningProof(ctx, request, sellerRefund, funding.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := &OpeningProof{Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion, RefundTx: request.RefundTx, SpendTxID: spend[:], FundingTxID: funding.TxID().CloneBytes(), PoolOutputIndex: 0, PoolOutputSatoshis: 100000, PoolLockingScript: request.PoolLockingScript, BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey, MinerFeeRateSatPerKB: 1, BuyerRefundSignature: request.BuyerRefundSignature, SellerRefundSignature: sellerRefund, FundingTx: funding.Bytes()}
 	if err := engine.VerifyOpening(proof); err != nil {
 		t.Fatal(err)
 	}
@@ -749,7 +772,7 @@ func mustRefundExpiryFixtureWithKeys(t *testing.T, lockTime uint32, blockHeight 
 	}
 	buyerPool := NewBuyerPoolAdapter(engine, testSigner{buyer})
 	sellerPool := NewSellerPoolAdapter(engine, testSigner{seller})
-	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: lockTime, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: lockTime, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,11 +780,10 @@ func mustRefundExpiryFixtureWithKeys(t *testing.T, lockTime uint32, blockHeight 
 	if err != nil {
 		t.Fatal(err)
 	}
-	spend, err := engine.TransactionID(request.RefundTx)
+	proof, err := engine.BuildOpeningProof(ctx, request, sellerRefund, funding.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := &OpeningProof{Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion, RefundTx: request.RefundTx, SpendTxID: spend[:], FundingTxID: funding.TxID().CloneBytes(), PoolOutputIndex: 0, PoolOutputSatoshis: 100000, PoolLockingScript: request.PoolLockingScript, BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey, MinerFeeRateSatPerKB: 1, BuyerRefundSignature: request.BuyerRefundSignature, SellerRefundSignature: sellerRefund, FundingTx: funding.Bytes()}
 	if err := engine.VerifyOpening(proof); err != nil {
 		t.Fatal(err)
 	}

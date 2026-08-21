@@ -152,15 +152,10 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 	if err != nil {
 		return nil, err
 	}
-	proof := &pool.OpeningProof{Version: pool.MajorVersion, MultisigProtocol: pool.MultisigProtocol, MultisigVersion: pool.MultisigVersion, RefundTx: request.RefundTx, FundingTxID: request.FundingTxID, PoolOutputIndex: request.PoolOutputIndex, PoolOutputSatoshis: request.PoolOutputSatoshis, PoolLockingScript: request.PoolLockingScript, BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey, MinerFeeRateSatPerKB: request.MinerFeeRateSatPerKB, BuyerRefundSignature: request.BuyerRefundSignature, SellerRefundSignature: sig}
-	if err := engine.VerifySellerRefundSignature(ctx, request, sig); err != nil {
+	proof, err := engine.BuildOpeningProof(ctx, request, sig, nil)
+	if err != nil {
 		return nil, err
 	}
-	spendTxID, err := engine.TransactionID(request.RefundTx)
-	if err != nil {
-		return nil, fmt.Errorf("calculate opening spend transaction ID: %w", err)
-	}
-	proof.SpendTxID = append([]byte(nil), spendTxID[:]...)
 	if err := workflow.pools.SaveOpeningProof(ctx, proof); err != nil {
 		return nil, err
 	}
@@ -200,9 +195,6 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, delivery *pool.
 	uncertain := errors.Is(healthErr, pool.ErrPoolStateUncertain)
 	if healthErr != nil && !uncertain {
 		return nil, healthErr
-	}
-	if len(proof.SpendTxID) != 32 || !bytes.Equal(proof.SpendTxID, spendID[:]) {
-		return nil, fmt.Errorf("%w: stored opening proof SpendTxID does not match RefundTx", pool.ErrInvalidEvidence)
 	}
 	publicKey, err := workflow.signer.PublicKey(ctx)
 	if err != nil {
@@ -474,7 +466,11 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, update *pool.Paymen
 		return nil, fmt.Errorf("load pool opening proof: %w", err)
 	}
 	opening = pool.CloneOpeningProof(opening)
-	spendTxID := poolHash32Seller(opening.SpendTxID)
+	details, err := pool.DeriveOpeningDetails(opening)
+	if err != nil {
+		return nil, fmt.Errorf("derive pool opening details: %w", err)
+	}
+	spendTxID := details.SpendTxID
 	if err := workflow.pools.EnsurePoolOpen(ctx, spendTxID); err != nil {
 		return nil, err
 	}
@@ -827,7 +823,11 @@ func (workflow *Workflow) SubmitArbitratedPayment(ctx context.Context, request *
 	if err != nil {
 		return nil, err
 	}
-	if err := workflow.pools.EnsurePoolOpen(ctx, poolHash32Seller(proof.SpendTxID)); err != nil {
+	details, err := pool.DeriveOpeningDetails(proof)
+	if err != nil {
+		return nil, err
+	}
+	if err := workflow.pools.EnsurePoolOpen(ctx, details.SpendTxID); err != nil {
 		return nil, err
 	}
 	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
@@ -957,7 +957,11 @@ func validateSellerAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *po
 	if terms == nil || proof == nil {
 		return fmt.Errorf("%w: authorization pool evidence is incomplete", pool.ErrInvalidEvidence)
 	}
-	if !bytes.Equal(terms.SpendTxID, proof.SpendTxID) ||
+	details, err := pool.DeriveOpeningDetails(proof)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(terms.SpendTxID, details.SpendTxID[:]) ||
 		!bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) ||
 		!bytes.Equal(terms.SellerPubkey, proof.SellerPubKey) ||
 		!bytes.Equal(terms.SelectedArbiterPubkey, proof.ArbiterPubKey) {

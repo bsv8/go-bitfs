@@ -353,8 +353,11 @@ func (store *MemoryStore) replaceSnapshot(snapshot fileStoreSnapshot) {
 	store.closing = make(map[Hash32]struct{}, len(snapshot.Closing))
 	for _, entry := range snapshot.Openings {
 		store.openingsBySpend[entry.SpendTxID] = cloneOpeningProof(entry.Proof)
-		if entry.Proof != nil && len(entry.Proof.FundingTxID) == 32 {
-			store.openingsByFunding[hash32FromBytes(entry.Proof.FundingTxID)] = cloneOpeningProof(entry.Proof)
+		if entry.Proof != nil {
+			details, err := DeriveOpeningDetails(entry.Proof)
+			if err == nil {
+				store.openingsByFunding[details.FundingTxID] = cloneOpeningProof(entry.Proof)
+			}
 		}
 	}
 	for _, entry := range snapshot.Accepted {

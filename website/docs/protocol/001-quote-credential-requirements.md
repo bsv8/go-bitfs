@@ -13,7 +13,7 @@ The most critical requirement here is not "being able to look up a quote in a da
 
 ## Aligned Business Rules
 
-- A quote targets exactly one buyer public key; BitFS v3 does not support open multi-buyer quotes.
+- A quote targets exactly one buyer public key; BitFS v4 does not support open multi-buyer quotes.
 - Quotes have no effective time, only an expiration time.
 - Quotes provide only the seed price and the complete-block price; the final partial block is calculated from the actual file size derived from the file seed, and the seller should grant the buyer a 10% margin for calculation tolerance.
 - The recommended filename is only a display suggestion after download; it is not the basis for file identity, pricing, or fulfillment.

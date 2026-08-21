@@ -82,15 +82,15 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 }
 
 // EncodeRefundPresignRequest validates and encodes the 002 buyer refund-presign
-// request, including protocol versions, refund bytes, pool output, role keys,
-// fee rate, and detached buyer signature.
+// request, including the workflow version, refund bytes, role keys, fee rate, and
+// detached buyer signature. The funding outpoint, pool amount, and pool lock
+// are derived canonically from RefundTx and the participant keys.
 func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
 	}
 	return poolEnc.Marshal([]any{
-		MajorVersion, MultisigProtocol, MultisigVersion, request.RefundTx, request.FundingTxID,
-		request.PoolOutputIndex, request.PoolOutputSatoshis, request.PoolLockingScript,
+		MajorVersion, request.RefundTx,
 		request.BuyerPubKey, request.SellerPubKey, request.ArbiterPubKey,
 		request.MinerFeeRateSatPerKB, request.BuyerRefundSignature,
 	})
@@ -99,7 +99,7 @@ func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 // DecodeRefundPresignRequest decodes and canonicality-checks the 002 request;
 // cryptographic and funding-transaction acceptance remains the opening workflow's job.
 func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
-	values, err := decodePoolArray(data, 13)
+	values, err := decodePoolArray(data, 7)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode refund presign request: %v", ErrInvalidEvidence, err)
 	}
@@ -107,40 +107,22 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	if err := poolDec.Unmarshal(values[0], &request.Version); err != nil || request.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported refund presign request version", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[1], &request.MultisigProtocol); err != nil || request.MultisigProtocol != MultisigProtocol {
-		return nil, fmt.Errorf("%w: unsupported multisig protocol", ErrInvalidEvidence)
-	}
-	if err := poolDec.Unmarshal(values[2], &request.MultisigVersion); err != nil || request.MultisigVersion != MultisigVersion {
-		return nil, fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
-	}
-	if err := poolDec.Unmarshal(values[3], &request.RefundTx); err != nil {
+	if err := poolDec.Unmarshal(values[1], &request.RefundTx); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[4], &request.FundingTxID); err != nil {
+	if err := poolDec.Unmarshal(values[2], &request.BuyerPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[5], &request.PoolOutputIndex); err != nil {
+	if err := poolDec.Unmarshal(values[3], &request.SellerPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[6], &request.PoolOutputSatoshis); err != nil {
+	if err := poolDec.Unmarshal(values[4], &request.ArbiterPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[7], &request.PoolLockingScript); err != nil {
+	if err := poolDec.Unmarshal(values[5], &request.MinerFeeRateSatPerKB); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[8], &request.BuyerPubKey); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[9], &request.SellerPubKey); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[10], &request.ArbiterPubKey); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[11], &request.MinerFeeRateSatPerKB); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[12], &request.BuyerRefundSignature); err != nil {
+	if err := poolDec.Unmarshal(values[6], &request.BuyerRefundSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateRefundPresignRequest(request); err != nil {
@@ -157,7 +139,7 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 }
 
 // EncodeRefundPresignResponse validates and encodes the seller's 002 refund
-// signature response with the fixed protocol and MultisigPool version fields.
+// signature response with the workflow version and message kind.
 func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error) {
 	if err := ValidateRefundPresignResponse(response); err != nil {
 		return nil, err
@@ -237,8 +219,9 @@ func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	return cloneFundingTxDelivery(delivery), nil
 }
 
-// EncodeOpeningProof validates and encodes the complete 002 opening proof,
-// including refund/funding bytes, role keys, and pool parameters.
+// EncodeOpeningProof validates and encodes the complete 002 opening proof. IDs,
+// the fixed output index, amount, and locking script are deliberately omitted
+// because they are derived from the transaction evidence and participant keys.
 func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	if err := ValidateOpeningProof(proof); err != nil {
 		return nil, err
@@ -247,9 +230,8 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 		return nil, fmt.Errorf("%w: complete funding transaction is required", ErrInvalidEvidence)
 	}
 	return poolEnc.Marshal([]any{
-		MajorVersion, MultisigProtocol, MultisigVersion, proof.RefundTx, proof.SpendTxID,
-		proof.FundingTxID, proof.PoolOutputIndex, proof.PoolOutputSatoshis, proof.PoolLockingScript,
-		proof.BuyerPubKey, proof.SellerPubKey, proof.ArbiterPubKey, proof.MinerFeeRateSatPerKB,
+		MajorVersion, proof.RefundTx, proof.BuyerPubKey, proof.SellerPubKey,
+		proof.ArbiterPubKey, proof.MinerFeeRateSatPerKB,
 		proof.BuyerRefundSignature, proof.SellerRefundSignature, proof.FundingTx,
 	})
 }
@@ -258,7 +240,7 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 // performs field validation; VerifyOpening is still required for signatures and
 // transaction relationships.
 func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
-	values, err := decodePoolArray(data, 16)
+	values, err := decodePoolArray(data, 9)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode opening proof: %v", ErrInvalidEvidence, err)
 	}
@@ -266,49 +248,28 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	if err := poolDec.Unmarshal(values[0], &proof.Version); err != nil || proof.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported opening proof version", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[1], &proof.MultisigProtocol); err != nil || proof.MultisigProtocol != MultisigProtocol {
-		return nil, fmt.Errorf("%w: unsupported multisig protocol", ErrInvalidEvidence)
-	}
-	if err := poolDec.Unmarshal(values[2], &proof.MultisigVersion); err != nil || proof.MultisigVersion != MultisigVersion {
-		return nil, fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
-	}
-	if err := poolDec.Unmarshal(values[3], &proof.RefundTx); err != nil {
+	if err := poolDec.Unmarshal(values[1], &proof.RefundTx); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[4], &proof.SpendTxID); err != nil {
+	if err := poolDec.Unmarshal(values[2], &proof.BuyerPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[5], &proof.FundingTxID); err != nil {
+	if err := poolDec.Unmarshal(values[3], &proof.SellerPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[6], &proof.PoolOutputIndex); err != nil {
+	if err := poolDec.Unmarshal(values[4], &proof.ArbiterPubKey); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[7], &proof.PoolOutputSatoshis); err != nil {
+	if err := poolDec.Unmarshal(values[5], &proof.MinerFeeRateSatPerKB); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[8], &proof.PoolLockingScript); err != nil {
+	if err := poolDec.Unmarshal(values[6], &proof.BuyerRefundSignature); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[9], &proof.BuyerPubKey); err != nil {
+	if err := poolDec.Unmarshal(values[7], &proof.SellerRefundSignature); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[10], &proof.SellerPubKey); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[11], &proof.ArbiterPubKey); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[12], &proof.MinerFeeRateSatPerKB); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[13], &proof.BuyerRefundSignature); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[14], &proof.SellerRefundSignature); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[15], &proof.FundingTx); err != nil {
+	if err := poolDec.Unmarshal(values[8], &proof.FundingTx); err != nil {
 		return nil, err
 	}
 	if err := ValidateOpeningProof(proof); err != nil {
@@ -346,20 +307,14 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	return nil
 }
 
-// ValidateRefundPresignRequest checks the 002 request discriminators, required
-// funding/refund evidence, role keys, fee rate, and buyer signature presence.
+// ValidateRefundPresignRequest checks the 002 request version, required refund
+// evidence, role keys, fee rate, and buyer signature presence.
 // It does not verify the refund transaction or either signature cryptographically.
 func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request == nil || request.Version != MajorVersion {
 		return fmt.Errorf("%w: invalid refund presign request", ErrInvalidEvidence)
 	}
-	if request.MultisigProtocol != MultisigProtocol {
-		return fmt.Errorf("%w: unsupported multisig protocol", ErrInvalidEvidence)
-	}
-	if request.MultisigVersion != MultisigVersion {
-		return fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
-	}
-	if len(request.RefundTx) == 0 || len(request.FundingTxID) != sha256.Size || request.PoolOutputSatoshis == 0 || len(request.PoolLockingScript) == 0 || len(request.BuyerRefundSignature) == 0 {
+	if len(request.RefundTx) == 0 || len(request.BuyerRefundSignature) == 0 {
 		return fmt.Errorf("%w: incomplete refund presign request", ErrInvalidEvidence)
 	}
 	roles := []struct {
@@ -392,8 +347,8 @@ func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	return nil
 }
 
-// ValidateOpeningProof checks the 002 proof discriminators and required hashes,
-// pool lock, role keys, refund signatures, and funding bytes. It is structural;
+// ValidateOpeningProof checks the 002 version, role keys, and raw refund
+// evidence. It is structural;
 // VerifyOpening performs transaction and signature relationship checks.
 func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof == nil {
@@ -402,13 +357,7 @@ func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof.Version != MajorVersion {
 		return fmt.Errorf("%w: unsupported opening proof version %d", ErrInvalidEvidence, proof.Version)
 	}
-	if proof.MultisigProtocol != MultisigProtocol {
-		return fmt.Errorf("%w: unsupported multisig protocol", ErrInvalidEvidence)
-	}
-	if proof.MultisigVersion != MultisigVersion {
-		return fmt.Errorf("%w: unsupported multisig protocol version", ErrInvalidEvidence)
-	}
-	if len(proof.RefundTx) == 0 || len(proof.SpendTxID) != sha256.Size || len(proof.FundingTxID) != sha256.Size || proof.PoolOutputSatoshis == 0 || len(proof.PoolLockingScript) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
+	if len(proof.RefundTx) == 0 || len(proof.BuyerRefundSignature) == 0 || len(proof.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: opening proof contains incomplete evidence", ErrInvalidEvidence)
 	}
 	roles := []struct {
@@ -447,8 +396,6 @@ func cloneRefundPresignRequest(request *RefundPresignRequest) *RefundPresignRequ
 	}
 	cloned := *request
 	cloned.RefundTx = append([]byte(nil), request.RefundTx...)
-	cloned.FundingTxID = append([]byte(nil), request.FundingTxID...)
-	cloned.PoolLockingScript = append([]byte(nil), request.PoolLockingScript...)
 	cloned.BuyerPubKey = append([]byte(nil), request.BuyerPubKey...)
 	cloned.SellerPubKey = append([]byte(nil), request.SellerPubKey...)
 	cloned.ArbiterPubKey = append([]byte(nil), request.ArbiterPubKey...)
@@ -475,9 +422,6 @@ func cloneOpeningProof(proof *OpeningProof) *OpeningProof {
 	}
 	cloned := *proof
 	cloned.RefundTx = append([]byte(nil), proof.RefundTx...)
-	cloned.SpendTxID = append([]byte(nil), proof.SpendTxID...)
-	cloned.FundingTxID = append([]byte(nil), proof.FundingTxID...)
-	cloned.PoolLockingScript = append([]byte(nil), proof.PoolLockingScript...)
 	cloned.BuyerPubKey = append([]byte(nil), proof.BuyerPubKey...)
 	cloned.SellerPubKey = append([]byte(nil), proof.SellerPubKey...)
 	cloned.ArbiterPubKey = append([]byte(nil), proof.ArbiterPubKey...)

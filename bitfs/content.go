@@ -12,7 +12,7 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-const contentProtocolVersion uint64 = 3
+const contentProtocolVersion uint64 = 4
 
 // Hash32 is a fixed-size SHA-256 reference used by the new protocol.
 type Hash32 [sha256.Size]byte

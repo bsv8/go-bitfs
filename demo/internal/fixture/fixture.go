@@ -258,7 +258,7 @@ func New(ctx context.Context) (*Fixture, error) {
 	if err != nil {
 		return nil, err
 	}
-	openingRequest, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding, PoolOutputIndex: 0, ExpiryLockTime: uint32(now.Add(time.Hour).Unix()), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	openingRequest, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding, ExpiryLockTime: uint32(now.Add(time.Hour).Unix()), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		return nil, fmt.Errorf("prepare fixture opening: %w", err)
 	}

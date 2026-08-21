@@ -46,13 +46,12 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("decode buyer local opening proof: %w", err))
 	}
-	// SpendTxID 是退款交易的规范交易 ID，也是 OpeningProof 在 store 中的
-	// 主键。重新计算它可以避免仅凭 proof 内携带的 ID 去查询本地状态。
-	spendTxID, err := pool.SpendTxID(ctx, proof)
+	// 交易 ID 不在 OpeningProof 中重复传输，而是从原始交易证据推导。
+	details, err := pool.DeriveOpeningDetails(proof)
 	if err != nil {
-		fail(fmt.Errorf("calculate SpendTxID: %w", err))
+		fail(fmt.Errorf("derive opening details: %w", err))
 	}
-	stored, err := session.Store.LoadOpeningProof(ctx, spendTxID)
+	stored, err := session.Store.LoadOpeningProof(ctx, details.SpendTxID)
 	if err != nil {
 		fail(fmt.Errorf("load persisted buyer opening proof: %w", err))
 	}
@@ -81,7 +80,7 @@ func main() {
 		fail(fmt.Errorf("encode FundingTxDelivery: %w", err))
 	}
 	debug("[buyer] FundingTx bytes: %d", len(delivery.FundingTx))
-	debug("[buyer] FundingTxID: %s", hex.EncodeToString(proof.FundingTxID))
+	debug("[buyer] FundingTxID: %s", hex.EncodeToString(details.FundingTxID[:]))
 	debug("[transport] buyer -> seller: PoolFundingTxDelivery (%d bytes)", len(deliveryRaw))
 	// 这是本流程中 FundingTx 原文第一次进入 seller-facing 网络报文。
 	// 仍将报文写成 stdout 上的 hex，保持与前几个步骤相同的管道接口。

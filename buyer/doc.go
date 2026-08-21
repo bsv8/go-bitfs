@@ -1,4 +1,4 @@
-// Package buyer implements the buyer-side BitFS v3 workflow.
+// Package buyer implements the buyer-side BitFS v4 workflow.
 //
 // A Workflow verifies and stores seller quotes, coordinates pool opening,
 // creates signed content requests, verifies deliveries, and produces cumulative

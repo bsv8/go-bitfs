@@ -356,16 +356,15 @@ func PurchaseCompleteFile(ctx context.Context, app *App, asset SaleAsset) error 
     requiredPoolSat := EstimateMaximumCostWithSDK(verifiedQuoteTerms, app.MinerFeeBudgetSat)
 
     // 这是应用钱包接口，不属于 go-bitfs。返回值必须是已签名的规范原始 FundingTx，
-    // 且指定输出必须正好使用上面的 2-of-3 locking script。
-    fundingTx, poolOutputIndex, err := app.Wallet.BuildSignedFundingTransaction(
-        ctx, poolLockingScript, requiredPoolSat,
-    )
+    // 且第 0 个输出必须正好使用上面的 2-of-3 locking script。
+    fundingTx, err := app.Wallet.BuildSignedFundingTransaction(
+		ctx, poolLockingScript, requiredPoolSat,
+	)
     must(err)
 
-    openingRequest, err := session.Buyer.PreparePoolOpening(ctx, pool.OpeningInput{
-        FundingTx:            fundingTx,
-        PoolOutputIndex:      poolOutputIndex,
-        ExpiryLockTime:       app.RefundExpiryLockTime(), // 留出完成下载和异常重试的时间
+	openingRequest, err := session.Buyer.PreparePoolOpening(ctx, pool.OpeningInput{
+		FundingTx:            fundingTx,
+		ExpiryLockTime:       app.RefundExpiryLockTime(), // 留出完成下载和异常重试的时间
         MinerFeeRateSatPerKB: app.MinerFeeRateSatPerKB,
         SellerPubKey:         sellerPubKey,
         ArbiterPubKey:        arbiterPubKey,

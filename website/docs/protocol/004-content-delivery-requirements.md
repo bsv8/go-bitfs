@@ -21,7 +21,7 @@ After receiving 003, the seller must deliver the seed body or file-chunk body. T
 
 ## Delivery Deadline Boundary
 
-`DeliveryDeadlineUnix` comes from 003. The buyer SHOULD decide whether to accept based on the local time at which the delivery package is actually received and verified; a timestamp filled in by the seller cannot prove when the content was delivered over the network, therefore v3 does not treat the seller-declared time as objective evidence.
+`DeliveryDeadlineUnix` comes from 003. The buyer SHOULD decide whether to accept based on the local time at which the delivery package is actually received and verified; a timestamp filled in by the seller cannot prove when the content was delivered over the network, therefore v4 does not treat the seller-declared time as objective evidence.
 
 The seller's 004 signature proves that the seller declared and committed to these content bytes, but it cannot independently prove that the buyer actually received them. The buyer's signature on the payment state in 005 constitutes strong evidence of acceptance and payment. If arbitration later needs to determine "whether the seller delivered on time and the buyer refused to pay," a provable receipt or arbitrated handoff mechanism MUST be introduced separately.
 

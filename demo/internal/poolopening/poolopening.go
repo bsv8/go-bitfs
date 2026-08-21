@@ -151,7 +151,6 @@ func NewSeller(ctx context.Context) (*SellerSession, error) {
 func (session *BuyerSession) OpeningInput(fundingTx []byte, minerFeeRateSatPerKB uint64) pool.OpeningInput {
 	return pool.OpeningInput{
 		FundingTx:            append([]byte(nil), fundingTx...),
-		PoolOutputIndex:      0,
 		ExpiryLockTime:       uint32(time.Now().UTC().Add(time.Hour).Unix()),
 		MinerFeeRateSatPerKB: minerFeeRateSatPerKB,
 		SellerPubKey:         append([]byte(nil), session.SellerPubKey...),
@@ -506,7 +505,7 @@ func fundingTransactionFee(raw []byte, inputSatoshis uint64) (uint64, error) {
 }
 
 // FundingTxPath 返回 0201 到 0203 之间的买方本地交接文件路径。
-// 文件本身不会发送给卖方，RefundPresignRequest 只携带 FundingTxID；完整原文
+// 文件本身不会发送给卖方，FundingTxID 由 RefundPresignRequest 中的 RefundTx 推导；完整原文
 // 要等 0203 成功保存 opening proof 后，才由 0204 放入交付报文。
 func FundingTxPath() string {
 	if value := strings.TrimSpace(os.Getenv("DEMO_02_FUNDING_TX_FILE")); value != "" {

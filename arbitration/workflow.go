@@ -1,4 +1,4 @@
-// Package arbitration implements the BitFS v3 seller-arbitration signing workflow.
+// Package arbitration implements the BitFS v4 seller-arbitration signing workflow.
 // It verifies the buyer authorization and seller candidate transaction, then
 // adds only the arbiter signature. It does not price content, construct
 // transactions, or receive the 005 buyer signature.
@@ -17,7 +17,7 @@ import (
 )
 
 // MajorVersion is the current major version of the pool workflow protocol.
-const MajorVersion uint64 = 3
+const MajorVersion uint64 = 4
 
 var (
 	arbitrationEnc cbor.EncMode
@@ -43,7 +43,7 @@ func init() {
 	}
 }
 
-// ArbitrationRequest is the complete v3 wire request. All transaction bytes
+// ArbitrationRequest is the complete v4 wire request. All transaction bytes
 // are unsigned-template bytes; the seller signature is deliberately separate.
 type ArbitrationRequest struct {
 	Version                    uint64
@@ -240,7 +240,11 @@ func ValidateResponse(response *ArbitrationResponse) error {
 }
 
 func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.OpeningProof) error {
-	if terms == nil || proof == nil || !bytes.Equal(terms.SpendTxID, proof.SpendTxID) {
+	if terms == nil || proof == nil {
+		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
+	}
+	details, err := pool.DeriveOpeningDetails(proof)
+	if err != nil || !bytes.Equal(terms.SpendTxID, details.SpendTxID[:]) {
 		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
 	}
 	if len(proof.BuyerPubKey) != 0 && !bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) {

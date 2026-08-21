@@ -1,0 +1,13 @@
+; 003 and 004 content credentials use major 4.
+content-request-terms = [4, quote-hash, spend-txid, uint, uint, uint, uint, buyer-pubkey, seller-pubkey, arbiter-pubkey, content-type, content-hash, deadline]
+content-delivery-terms = [4, payment-authorization-hash, content-bytes]
+quote-hash = bstr .size 32
+spend-txid = bstr .size 32
+buyer-pubkey = bstr
+seller-pubkey = bstr
+arbiter-pubkey = bstr
+content-type = uint
+content-hash = bstr .size 32
+deadline = int
+payment-authorization-hash = bstr .size 32
+content-bytes = bstr

@@ -1,6 +1,6 @@
 # go-bitfs
 
-go-bitfs is the source of truth for the BitFS v3 Go protocol: file exchange, arbitration, and MultisigPool v4 2-of-3 settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
+go-bitfs is the source of truth for the BitFS v4 Go protocol: file exchange, arbitration, and MultisigPool v4 2-of-3 settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
 
 The protocol is documented in the multilingual [Docusaurus site](website/README.md). English is the normative website language; Simplified Chinese is maintained under `website/i18n/zh-CN/`.
 
@@ -14,13 +14,13 @@ The protocol is documented in the multilingual [Docusaurus site](website/README.
 | 006 | [Pool close](website/docs/protocol/006-unconditional-pool-close-spec.md) | [Requirements](website/docs/protocol/006-pool-close-requirements.md) |
 | 007 | [Seller arbitration](website/docs/protocol/007-seller-arbitration-submission-spec.md) | [Requirements](website/docs/protocol/007-seller-arbitration-submission-requirements.md) |
 
-The current CDDL is under `spec/v3/`. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
+The current CDDL is under `spec/v4/`. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
 
 ## Packages
 
 - `bitfs/`: quote and content credentials, seeds, hashes, and evidence validation.
 - `pool/`: independent 002/005/006 settlement state machine, transaction engine, persistence ports, and memory reference implementation.
-- `buyer/` and `seller/`: role workflows for the v3 protocol.
+- `buyer/` and `seller/`: role workflows for the v4 protocol.
 - `arbitration/` and `wire/`: arbitration evidence signing and typed protocol message dispatch.
 
 Run the test suite with:

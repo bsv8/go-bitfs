@@ -284,13 +284,15 @@ must(err)
 fundingTx := app.BuildFundingTx()
 presign, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{
     FundingTx:            fundingTx,
-    PoolOutputIndex:      0,
     ExpiryLockTime:       app.RefundExpiryLockTime(),
     MinerFeeRateSatPerKB: app.MinerFeeRate(),
     SellerPubKey:         receivedQuote.SellerPubkey,
     ArbiterPubKey:        arbiterPubkey,
 })
 must(err)
+
+// 资金池锁定输出固定为 FundingTx 的第 0 个输出。FundingTxID、资金池金额与
+// 锁定脚本均由协议推导，不再作为 wire 字段传输。
 
 _, sellerPresignCBOR := transmit(makePacket(wire.PoolRefundPresignRequest, presign))
 sellerPresign, err := wire.UnmarshalPoolRefundPresignRequest(sellerPresignCBOR)

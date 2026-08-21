@@ -56,17 +56,19 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("encode seller completed opening proof: %w", err))
 	}
+	details, err := pool.DeriveOpeningDetails(opening)
+	if err != nil {
+		fail(fmt.Errorf("derive seller opening details: %w", err))
+	}
 	debug("[seller] FundingTx 已通过验证并提交给 demo backend")
 	debug("[seller] funding submissions accepted: %d", session.Backend.Fundings)
 	debug("[state] pool opened: true")
 	fmt.Printf("POOL_OPENED=true\n")
-	fmt.Printf("FUNDING_TX_ID_HEX=%s\n", hex.EncodeToString(opening.FundingTxID))
-	fmt.Printf("SPEND_TX_ID_HEX=%s\n", hex.EncodeToString(opening.SpendTxID))
+	fmt.Printf("FUNDING_TX_ID_HEX=%s\n", hex.EncodeToString(details.FundingTxID[:]))
+	fmt.Printf("SPEND_TX_ID_HEX=%s\n", hex.EncodeToString(details.SpendTxID[:]))
 	// 重新从 seller store 读取初始支付状态，验证提交资金后 opening proof
 	// 和 PaymentState 都已经持久化，而不是只在 AcceptPoolFunding 返回值中存在。
-	var spendTxID pool.Hash32
-	copy(spendTxID[:], opening.SpendTxID)
-	initial, err := session.Store.LoadAcceptedPayment(ctx, spendTxID)
+	initial, err := session.Store.LoadAcceptedPayment(ctx, details.SpendTxID)
 	if err != nil {
 		fail(fmt.Errorf("load seller initial payment state: %w", err))
 	}

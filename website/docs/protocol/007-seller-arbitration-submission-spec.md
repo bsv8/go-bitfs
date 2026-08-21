@@ -1,17 +1,17 @@
 ---
 id: 007-seller-arbitration-submission-spec
-title: 007 · v3 Seller arbitration submission specification
+title: 007 · v4 Seller arbitration submission specification
 ---
 
-# 007 · v3 Seller arbitration submission specification
+# 007 · v4 Seller arbitration submission specification
 
-007 defines how a seller requests an Arbiter detached signature under final buyer payment authorization. The current protocol major is 3, the payment pool is bound to `bitfs.pool.v4`, and `ArbiterAmount = 0`.
+007 defines how a seller requests an Arbiter detached signature under final buyer payment authorization. The current protocol major is 4, and `ArbiterAmount = 0`.
 
 ## Evidence package
 
 ```text
 ArbitrationRequest = [
-  3,
+  4,
   pool_opening_proof_cbor,
   payment_authorization_cbor,
   unsigned_state_tx_raw,
@@ -19,12 +19,14 @@ ArbitrationRequest = [
 ]
 
 ArbitrationResponse = [
-  3,
+  4,
   payment_authorization_hash,
   unsigned_state_tx_hash,
   arbiter_transaction_signature
 ]
 ```
+
+`pool_opening_proof_cbor` is the nine-field v4 OpeningProof defined by 002. It carries raw RefundTx/FundingTx, participant keys, fee rate, and both refund signatures; it does not carry derived transaction IDs, the fixed output index, pool amount, locking script, or redundant MultisigPool discriminators.
 
 The candidate MUST be a three-output `[Buyer, Seller, Arbiter]` state with an empty input unlocking script and a present Arbiter output of amount 0. Seller and Arbiter signatures MUST cover the same unsigned transaction. The arbiter does not construct a replacement, modify the candidate, or query an external database for missing evidence.
 

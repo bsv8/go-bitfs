@@ -12,7 +12,7 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 )
 
-func TestV3ArbitrationRequestRoundTrip(t *testing.T) {
+func TestV4ArbitrationRequestRoundTrip(t *testing.T) {
 	request := &ArbitrationRequest{
 		Version:                    MajorVersion,
 		PoolOpeningProofCBOR:       []byte{1, 2},
@@ -24,7 +24,7 @@ func TestV3ArbitrationRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, err := hex.DecodeString("8503420102420304420506420708")
+	expected, err := hex.DecodeString("8504420102420304420506420708")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,13 +43,13 @@ func TestV3ArbitrationRequestRoundTrip(t *testing.T) {
 	}
 }
 
-func TestV3ArbitrationResponseBindsTwoHashes(t *testing.T) {
+func TestV4ArbitrationResponseBindsTwoHashes(t *testing.T) {
 	response := &ArbitrationResponse{Version: MajorVersion, PaymentAuthorizationHash: bytes.Repeat([]byte{1}, 32), UnsignedStateTxHash: bytes.Repeat([]byte{2}, 32), ArbiterTransactionSignature: []byte{3}}
 	raw, err := MarshalResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, err := hex.DecodeString("840358200101010101010101010101010101010101010101010101010101010101010101582002020202020202020202020202020202020202020202020202020202020202024103")
+	expected, err := hex.DecodeString("840458200101010101010101010101010101010101010101010101010101010101010101582002020202020202020202020202020202020202020202020202020202020202024103")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +113,7 @@ func testArbitrationEvidence(t *testing.T) ([]byte, []byte) {
 	seller := arbitrationTestPubkey("2222222222222222222222222222222222222222222222222222222222222222")
 	arbiter := arbitrationTestPubkey("3333333333333333333333333333333333333333333333333333333333333333")
 	proof, err := pool.EncodeOpeningProof(&pool.OpeningProof{
-		Version: MajorVersion, MultisigProtocol: pool.MultisigProtocol, MultisigVersion: pool.MultisigVersion, RefundTx: []byte("refund"), SpendTxID: spend, FundingTxID: bytes.Repeat([]byte{2}, sha256.Size),
-		PoolOutputSatoshis: 1000, PoolLockingScript: []byte("lock"), SellerPubKey: seller, BuyerPubKey: buyer, ArbiterPubKey: arbiter,
+		Version: MajorVersion, RefundTx: []byte("refund"), SellerPubKey: seller, BuyerPubKey: buyer, ArbiterPubKey: arbiter,
 		MinerFeeRateSatPerKB: 1, BuyerRefundSignature: []byte("a"), SellerRefundSignature: []byte("server"), FundingTx: []byte("funding"),
 	})
 	if err != nil {

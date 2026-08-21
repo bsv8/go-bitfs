@@ -33,7 +33,7 @@ The seed is first used to discover the list of file block hashes; after that, fi
 
 However, the same pool at a given current sequence number may have at most one pending content request. Otherwise, the buyer could use the same balance to request multiple blocks simultaneously; after the seller delivers, the buyer could check out only one payment, resulting in free content delivery.
 
-Therefore, in BitFS v3 the seller's behavior is:
+Therefore, in BitFS v4 the seller's behavior is:
 
 1. Upon receiving 003, verify that the fee pool's current latest state matches `BasePaymentSequence` and that no in-progress request exists in the pool.
 2. Atomically save the in-progress request, then deliver 004.

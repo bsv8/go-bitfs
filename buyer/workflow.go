@@ -146,23 +146,9 @@ func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, request *pool
 	if err != nil {
 		return nil, err
 	}
-	if err := engine.VerifySellerRefundSignature(ctx, localRequest, localResponse.SellerRefundSignature); err != nil {
-		return nil, fmt.Errorf("verify seller refund signature: %w", err)
-	}
-	fundingID, err := engine.TransactionID(localFundingTx)
+	proof, err := engine.BuildOpeningProof(ctx, localRequest, localResponse.SellerRefundSignature, localFundingTx)
 	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(fundingID[:], localRequest.FundingTxID) {
-		return nil, fmt.Errorf("%w: funding transaction ID does not match request", pool.ErrInvalidEvidence)
-	}
-	spendID, err := engine.TransactionID(localRequest.RefundTx)
-	if err != nil {
-		return nil, err
-	}
-	proof := &pool.OpeningProof{Version: pool.MajorVersion, MultisigProtocol: pool.MultisigProtocol, MultisigVersion: pool.MultisigVersion, RefundTx: append([]byte(nil), localRequest.RefundTx...), SpendTxID: spendID[:], FundingTxID: localRequest.FundingTxID, PoolOutputIndex: localRequest.PoolOutputIndex, PoolOutputSatoshis: localRequest.PoolOutputSatoshis, PoolLockingScript: localRequest.PoolLockingScript, BuyerPubKey: localRequest.BuyerPubKey, SellerPubKey: localRequest.SellerPubKey, ArbiterPubKey: localRequest.ArbiterPubKey, MinerFeeRateSatPerKB: localRequest.MinerFeeRateSatPerKB, BuyerRefundSignature: localRequest.BuyerRefundSignature, SellerRefundSignature: localResponse.SellerRefundSignature, FundingTx: localFundingTx}
-	if err := engine.VerifyOpening(proof); err != nil {
-		return nil, fmt.Errorf("verify complete pool opening proof: %w", err)
+		return nil, fmt.Errorf("build canonical opening proof: %w", err)
 	}
 	publicKey, err := workflow.signer.PublicKey(ctx)
 	if err != nil {
@@ -666,7 +652,11 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, request *bitfs.Sig
 	if err := engine.VerifyRefundNotExpired(opening, now); err != nil {
 		return nil, fmt.Errorf("verify pool refund is still available: %w", err)
 	}
-	if requestTerms.MinerFeeRateSatPerKB != opening.MinerFeeRateSatPerKB || !bytes.Equal(requestTerms.SpendTxID, opening.SpendTxID) {
+	openingDetails, err := pool.DeriveOpeningDetails(opening)
+	if err != nil {
+		return nil, fmt.Errorf("derive pool opening details: %w", err)
+	}
+	if requestTerms.MinerFeeRateSatPerKB != opening.MinerFeeRateSatPerKB || !bytes.Equal(requestTerms.SpendTxID, openingDetails.SpendTxID[:]) {
 		return nil, fmt.Errorf("%w: content request is not bound to opening proof", bitfs.ErrInvalidEvidence)
 	}
 	if !bytes.Equal(opening.BuyerPubKey, quoteTerms.BuyerPubkey) || !bytes.Equal(opening.SellerPubKey, quote.SellerPubkey) || !bytes.Equal(opening.ArbiterPubKey, requestTerms.SelectedArbiterPubkey) {

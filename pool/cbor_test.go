@@ -35,24 +35,7 @@ func TestPaymentUpdateRoundTripAndIsolation(t *testing.T) {
 }
 
 func TestOpeningProofRoundTrip(t *testing.T) {
-	buyer, seller, arbiter := poolTestPubkeys(t)
-	proof := &OpeningProof{
-		Version:               MajorVersion,
-		RefundTx:              []byte("refund"),
-		SpendTxID:             bytes.Repeat([]byte{2}, sha256.Size),
-		FundingTxID:           bytes.Repeat([]byte{1}, sha256.Size),
-		PoolOutputIndex:       2,
-		PoolOutputSatoshis:    1000,
-		PoolLockingScript:     []byte("2of3"),
-		MultisigProtocol:      MultisigProtocol,
-		MultisigVersion:       MultisigVersion,
-		SellerPubKey:          seller,
-		BuyerPubKey:           buyer,
-		ArbiterPubKey:         arbiter,
-		BuyerRefundSignature:  []byte("buyer"),
-		SellerRefundSignature: []byte("seller"),
-		FundingTx:             []byte("funding"),
-	}
+	_, proof := mustRefundExpiryFixture(t, 500000100, nil)
 	raw, err := EncodeOpeningProof(proof)
 	if err != nil {
 		t.Fatal(err)
@@ -61,8 +44,15 @@ func TestOpeningProofRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.FundingTx, proof.FundingTx) || !bytes.Equal(decoded.FundingTxID, proof.FundingTxID) {
+	if len(raw) == 0 || raw[0] != 0x89 {
+		t.Fatalf("opening proof must be a nine-element array: %x", raw)
+	}
+	if !bytes.Equal(decoded.FundingTx, proof.FundingTx) || !bytes.Equal(decoded.RefundTx, proof.RefundTx) {
 		t.Fatalf("decoded proof = %#v", decoded)
+	}
+	details, err := DeriveOpeningDetails(decoded)
+	if err != nil || details.PoolOutputSatoshis == 0 || details.FundingTxID == (Hash32{}) {
+		t.Fatalf("derived opening details = %#v, err = %v", details, err)
 	}
 }
 
@@ -73,12 +63,34 @@ func TestPaymentUpdateRejectsInvalidReference(t *testing.T) {
 	}
 }
 
+func TestRefundPresignRequestRoundTripUsesDerivedPoolTerms(t *testing.T) {
+	buyer, seller, arbiter := poolTestPubkeys(t)
+	request := &RefundPresignRequest{
+		Version:  MajorVersion,
+		RefundTx: []byte{1, 2, 3}, BuyerPubKey: buyer, SellerPubKey: seller, ArbiterPubKey: arbiter,
+		MinerFeeRateSatPerKB: 100, BuyerRefundSignature: []byte{4, 5, 6},
+	}
+	raw, err := EncodeRefundPresignRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 || raw[0] != 0x87 {
+		t.Fatalf("refund presign request must be a seven-element array: %x", raw)
+	}
+	decoded, err := DecodeRefundPresignRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.RefundTx, request.RefundTx) || decoded.MinerFeeRateSatPerKB != request.MinerFeeRateSatPerKB {
+		t.Fatalf("decoded request = %#v", decoded)
+	}
+}
+
 func TestRoleKeyValidationHasStableBuyerPriority(t *testing.T) {
 	buyer, seller, arbiter := poolTestPubkeys(t)
 	request := &RefundPresignRequest{
-		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-		RefundTx: []byte{1}, FundingTxID: bytes.Repeat([]byte{2}, sha256.Size),
-		PoolOutputSatoshis: 1, PoolLockingScript: []byte{3}, BuyerRefundSignature: []byte{4},
+		Version:  MajorVersion,
+		RefundTx: []byte{1}, BuyerRefundSignature: []byte{4},
 		BuyerPubKey: buyer, SellerPubKey: seller, ArbiterPubKey: arbiter,
 	}
 	request.BuyerPubKey = []byte{1}
@@ -92,9 +104,7 @@ func TestRoleKeyValidationHasStableBuyerPriority(t *testing.T) {
 	}
 
 	proof := &OpeningProof{
-		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-		RefundTx: []byte{1}, SpendTxID: bytes.Repeat([]byte{4}, sha256.Size), FundingTxID: bytes.Repeat([]byte{5}, sha256.Size),
-		PoolOutputSatoshis: 1, PoolLockingScript: []byte{6}, BuyerRefundSignature: []byte{7}, SellerRefundSignature: []byte{8},
+		Version: MajorVersion, RefundTx: []byte{1}, BuyerRefundSignature: []byte{7}, SellerRefundSignature: []byte{8},
 		BuyerPubKey: buyer, SellerPubKey: seller, ArbiterPubKey: arbiter,
 	}
 	proof.BuyerPubKey = []byte{1}

@@ -20,10 +20,23 @@ func SpendTxID(_ context.Context, proof *OpeningProof) (Hash32, error) {
 		return Hash32{}, err
 	}
 	computed := hash32FromBytes(value.TxID().CloneBytes())
-	if len(proof.SpendTxID) > 0 && !bytes.Equal(proof.SpendTxID, computed[:]) {
-		return Hash32{}, fmt.Errorf("%w: spend transaction ID does not match refund transaction", ErrInvalidEvidence)
-	}
 	return computed, nil
+}
+
+// DeriveOpeningDetails derives transaction identities and pool-output terms
+// from the proof's transaction bytes and participant keys. The returned view
+// is ephemeral and is never part of the transmitted OpeningProof.
+func DeriveOpeningDetails(proof *OpeningProof) (*OpeningDetails, error) {
+	if err := ValidateOpeningProof(proof); err != nil {
+		return nil, err
+	}
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{
+		BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return engine.deriveOpeningDetails(proof)
 }
 
 // parseCanonicalTransaction is the only parser used for protocol transaction

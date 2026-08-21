@@ -1,0 +1,3 @@
+; v4 wire family. Quote remains independently versioned; pool/content/arbitration
+; messages carry their own strict major and are not decoded as older payloads.
+wire-family = "bitfs.protocol.v4"

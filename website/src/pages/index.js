@@ -6,7 +6,7 @@ import './home.css';
 
 export default function Home() {
   return (
-    <Layout title="go-bitfs" description={translate({id: 'home.description', message: 'Source-driven BitFS v3 SDK documentation'})}>
+    <Layout title="go-bitfs" description={translate({id: 'home.description', message: 'Source-driven BitFS v4 SDK documentation'})}>
       <main>
         <section className="hero hero--protocol">
           <div className="hero__grain" aria-hidden="true" />

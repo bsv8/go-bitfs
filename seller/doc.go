@@ -1,4 +1,4 @@
-// Package seller implements the seller-side BitFS v3 workflow.
+// Package seller implements the seller-side BitFS v4 workflow.
 //
 // A Workflow creates signed quotes, coordinates pool opening, validates content
 // requests, delivers signed content, advances cumulative payments, and prepares

@@ -52,6 +52,38 @@ func poolTestPubkeys(t *testing.T) (buyer, seller, arbiter []byte) {
 	return mustPoolTestKey(t, "11").PubKey().Compressed(), mustPoolTestKey(t, "22").PubKey().Compressed(), mustPoolTestKey(t, "33").PubKey().Compressed()
 }
 
+func storeTestOpeningProof(t *testing.T, marker byte) *OpeningProof {
+	t.Helper()
+	ctx := context.Background()
+	buyer := mustPoolTestKey(t, "11")
+	seller := mustPoolTestKey(t, "22")
+	arbiter := mustPoolTestKey(t, "33")
+	keys := MultisigPoolPublicKeys{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()}
+	lock, err := Build2of3LockingScript(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding := tx.NewTransaction()
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000 + uint64(marker), LockingScript: script.NewFromBytes(lock)})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: keys.BuyerPubKey, SellerPubKey: keys.SellerPubKey, ArbiterPubKey: keys.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewBuyerPoolAdapter(engine, testSigner{buyer}).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100 + uint32(marker), MinerFeeRateSatPerKB: 1, SellerPubKey: keys.SellerPubKey, ArbiterPubKey: keys.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := NewSellerPoolAdapter(engine, testSigner{seller}).SignSellerRefund(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := engine.BuildOpeningProof(ctx, request, signature, funding.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
+}
+
 func TestFileStoreRejectsPreviousSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pool-state.json")
 	if err := os.WriteFile(path, []byte(`{"version":3,"openings":[],"accepted":[],"pending":[],"uncertain":[]}`), 0o600); err != nil {
@@ -105,27 +137,12 @@ func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := &OpeningProof{
-		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-		RefundTx:           validTestTx(),
-		SpendTxID:          make([]byte, 32),
-		FundingTxID:        make([]byte, 32),
-		PoolOutputSatoshis: 100,
-		PoolLockingScript:  []byte("script"),
-		SellerPubKey:       nil, BuyerPubKey: nil, ArbiterPubKey: nil,
-		BuyerRefundSignature:  []byte("buyer"),
-		SellerRefundSignature: []byte("seller"),
-	}
-	proof.BuyerPubKey, proof.SellerPubKey, proof.ArbiterPubKey = poolTestPubkeys(t)
-	spendID, err := fixedTransactionID(proof.RefundTx)
-	if err != nil {
+	proof := storeTestOpeningProof(t, 1)
+	pending := CloneOpeningProof(proof)
+	pending.FundingTx = nil
+	if err := store.SaveOpeningProof(context.Background(), pending); err != nil {
 		t.Fatal(err)
 	}
-	proof.SpendTxID = append([]byte(nil), spendID[:]...)
-	if err := store.SaveOpeningProof(context.Background(), proof); err != nil {
-		t.Fatal(err)
-	}
-	proof.FundingTx = validTestTx()
 	if err := store.SaveOpeningProof(context.Background(), proof); err != nil {
 		t.Fatal(err)
 	}
@@ -157,37 +174,30 @@ func TestMemoryStoreUpgradesPendingOpeningAndSerializesRequests(t *testing.T) {
 	}
 }
 
-func TestStoresRequireCorrectSuppliedSpendTxID(t *testing.T) {
+func TestStoresDeriveOpeningIdentifiers(t *testing.T) {
 	ctx := context.Background()
-	_, proof := mustRefundExpiryFixture(t, 500000100, nil)
+	proof := storeTestOpeningProof(t, 2)
 	store, err := NewMemoryStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing := CloneOpeningProof(proof)
-	missing.SpendTxID = nil
-	if err := store.SaveOpeningProof(ctx, missing); err == nil {
-		t.Fatal("memory store accepted missing SpendTxID")
-	}
-	mismatch := CloneOpeningProof(proof)
-	mismatch.SpendTxID[0] ^= 0xff
-	if err := store.SaveOpeningProof(ctx, mismatch); err == nil {
-		t.Fatal("memory store accepted mismatched SpendTxID")
+	if err := store.SaveOpeningProof(ctx, proof); err != nil {
+		t.Fatalf("memory store did not derive opening identifiers: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "pool-state.json")
 	file, err := NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.SaveOpeningProof(ctx, missing); err == nil {
-		t.Fatal("file store accepted missing SpendTxID")
+	if err := file.SaveOpeningProof(ctx, proof); err != nil {
+		t.Fatalf("file store did not derive opening identifiers: %v", err)
 	}
 }
 
-func TestSpendTxIDRejectsForgedAnchor(t *testing.T) {
-	proof := &OpeningProof{RefundTx: validTestTx(), SpendTxID: bytes32(0xaa)}
-	if _, err := SpendTxID(context.Background(), proof); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("SpendTxID forged anchor error = %v, want ErrInvalidEvidence", err)
+func TestSpendTxIDRejectsMalformedRefund(t *testing.T) {
+	proof := &OpeningProof{RefundTx: []byte{0xff}}
+	if _, err := SpendTxID(context.Background(), proof); err == nil {
+		t.Fatal("SpendTxID accepted malformed refund bytes")
 	}
 }
 
@@ -198,24 +208,7 @@ func TestFileStoreRehydratesPoolPaymentAndPendingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := &OpeningProof{
-		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-		RefundTx:           validTestTx(),
-		SpendTxID:          make([]byte, 32),
-		FundingTxID:        make([]byte, 32),
-		PoolOutputSatoshis: 100,
-		PoolLockingScript:  []byte("script"),
-		SellerPubKey:       nil, BuyerPubKey: nil, ArbiterPubKey: nil,
-		BuyerRefundSignature:  []byte("buyer"),
-		SellerRefundSignature: []byte("seller"),
-		FundingTx:             validTestTx(),
-	}
-	proof.BuyerPubKey, proof.SellerPubKey, proof.ArbiterPubKey = poolTestPubkeys(t)
-	spendID, err := fixedTransactionID(proof.RefundTx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proof.SpendTxID = append([]byte(nil), spendID[:]...)
+	proof := storeTestOpeningProof(t, 3)
 	if err := first.SaveOpeningProof(ctx, proof); err != nil {
 		t.Fatal(err)
 	}
@@ -351,28 +344,7 @@ func TestFileStoreInstancesReloadBeforeMutating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := func(marker byte) *OpeningProof {
-		result := &OpeningProof{
-			Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-			RefundTx:           validTestTxWithMarker(marker),
-			SpendTxID:          make([]byte, 32),
-			FundingTxID:        bytes32(marker),
-			PoolOutputSatoshis: 100,
-			PoolLockingScript:  []byte("script"),
-			SellerPubKey:       nil, BuyerPubKey: nil, ArbiterPubKey: nil,
-			BuyerRefundSignature:  []byte("buyer"),
-			SellerRefundSignature: []byte("seller"),
-			FundingTx:             []byte{marker, 0xff},
-		}
-		result.BuyerPubKey, result.SellerPubKey, result.ArbiterPubKey = poolTestPubkeys(t)
-		spendID, err := fixedTransactionID(result.RefundTx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		result.SpendTxID = append([]byte(nil), spendID[:]...)
-		return result
-	}
-	firstProof, secondProof := proof(1), proof(2)
+	firstProof, secondProof := storeTestOpeningProof(t, 4), storeTestOpeningProof(t, 5)
 	if err := first.SaveOpeningProof(ctx, firstProof); err != nil {
 		t.Fatal(err)
 	}

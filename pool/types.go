@@ -6,22 +6,23 @@ import (
 )
 
 // ProtocolFamily 表示 go-bitfs 资金池工作流协议族的名称。
-//
-// 该标识用于区分工作流层协议与 OpeningProof 中嵌入的 MultisigPool
-// 库协议；两者分别负责工作流消息版本和底层多签交易版本，不能混用。
-const ProtocolFamily = "bitfs.pool.workflow.v3"
+const ProtocolFamily = "bitfs.pool.workflow.v4"
 
 // MajorVersion 是当前资金池工作流协议的主版本号。
 //
 // 主版本号参与协议对象的编码与校验。发生不兼容的字段、语义或验证规则
 // 变化时应递增该值。
-const MajorVersion uint64 = 3
+const MajorVersion uint64 = 4
 
-// MultisigProtocol 标识 OpeningProof 中使用的底层 MultisigPool 交易协议。
+// MultisigProtocol 标识实现使用的底层 MultisigPool 交易协议。
 const MultisigProtocol = "bitfs.pool.v4"
 
-// MultisigVersion 是 OpeningProof 中使用的底层 MultisigPool 协议版本号。
+// MultisigVersion 是实现使用的底层 MultisigPool 协议版本号。
 const MultisigVersion uint64 = 4
+
+// PoolOutputIndex 是 FundingTx 中资金池输出的协议固定索引。
+// v4 工作流只接受第 0 个输出作为资金池输出，因此无需在消息中重复传输。
+const PoolOutputIndex uint32 = 0
 
 // Hash32 保存固定长度的 32 字节哈希值。
 //
@@ -47,25 +48,9 @@ type Reference struct {
 type OpeningProof struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
-	// MultisigProtocol 是底层多签交易协议标识，应等于 MultisigProtocol 常量。
-	MultisigProtocol string
-	// MultisigVersion 是底层多签交易协议版本号，应等于 MultisigVersion 常量。
-	MultisigVersion uint64
 	// RefundTx 是预签名退款交易的原始序列化字节。
 	// 该交易构成资金池的支出锚点，并由买方和卖方共同提供退款签名。
 	RefundTx []byte
-	// SpendTxID 是 RefundTx 的规范交易 ID，以原始字节形式保存。
-	// 它是 OpeningProof 在存储层和后续付款状态中的主键身份。
-	SpendTxID []byte
-	// FundingTxID 是买方资金交易的规范交易 ID，以原始字节形式保存。
-	// 卖方可先凭该 ID 关联待确认的 OpeningProof，再验证 FundingTx 原文。
-	FundingTxID []byte
-	// PoolOutputIndex 是 FundingTx 中资金池输出的零基索引。
-	PoolOutputIndex uint32
-	// PoolOutputSatoshis 是资金池输出的金额，单位为 satoshi。
-	PoolOutputSatoshis uint64
-	// PoolLockingScript 是资金池输出使用的锁定脚本原始字节。
-	PoolLockingScript []byte
 	// BuyerPubKey 是买方的 33 字节压缩 secp256k1 公钥。
 	BuyerPubKey []byte
 	// SellerPubKey 是卖方的 33 字节压缩 secp256k1 公钥。
@@ -83,28 +68,25 @@ type OpeningProof struct {
 	FundingTx []byte
 }
 
+// OpeningDetails 是从 OpeningProof 原始证据即时计算出的只读视图。
+// 它不属于协议消息，也不会被编码或持久化为 OpeningProof 的字段。
+type OpeningDetails struct {
+	SpendTxID          Hash32
+	FundingTxID        Hash32
+	PoolOutputSatoshis uint64
+	PoolLockingScript  []byte
+}
+
 // RefundPresignRequest 包含买方请求卖方预签退款交易时发送的开池条款和交易材料。
 //
 // 该请求由买方构造，卖方验证退款交易、资金池输出、公钥及费率后，使用
 // SellerPubKey 对退款交易签名并返回 RefundPresignResponse。请求本身不包含
-// FundingTx 原文，只携带其交易 ID。
+// FundingTx 原文；资金交易 ID 和固定输出索引直接从 RefundTx 的 input 推导。
 type RefundPresignRequest struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
-	// MultisigProtocol 是底层多签交易协议标识。
-	MultisigProtocol string
-	// MultisigVersion 是底层多签交易协议版本号。
-	MultisigVersion uint64
 	// RefundTx 是买方构造的预签名退款交易原始字节。
 	RefundTx []byte
-	// FundingTxID 是买方资金交易的规范交易 ID；请求不直接携带资金交易原文。
-	FundingTxID []byte
-	// PoolOutputIndex 是资金交易中资金池输出的零基索引。
-	PoolOutputIndex uint32
-	// PoolOutputSatoshis 是资金池输出金额，单位为 satoshi。
-	PoolOutputSatoshis uint64
-	// PoolLockingScript 是资金池输出锁定脚本的原始字节。
-	PoolLockingScript []byte
 	// BuyerPubKey 是买方的压缩 secp256k1 公钥原始字节。
 	BuyerPubKey []byte
 	// SellerPubKey 是买方期望用于卖方签名校验的压缩 secp256k1 公钥。
@@ -133,7 +115,7 @@ type FundingTxDelivery struct {
 	FundingTx []byte
 }
 
-// PaymentUpdate 是 v3 协议 005 使用的付款更新传输容器。
+// PaymentUpdate 是 v4 协议 005 使用的付款更新传输容器。
 //
 // 它携带未签名的状态交易和独立传输的买方签名，绝不携带只有部分解锁
 // 脚本的交易。接收方应分别验证授权哈希、交易内容和买方签名，然后再与
@@ -344,10 +326,8 @@ type Signer interface {
 // 该对象由买方使用，不携带卖方签名；它用于生成 RefundPresignRequest，
 // 而不是直接表示已经完成的 OpeningProof。
 type OpeningInput struct {
-	// FundingTx 是买方资金交易的原始序列化字节。
+	// FundingTx 是买方资金交易的原始序列化字节；其第 0 个输出必须是资金池输出。
 	FundingTx []byte
-	// PoolOutputIndex 是 FundingTx 中资金池输出的零基索引。
-	PoolOutputIndex uint32
 	// ExpiryLockTime 是退款交易使用的到期锁定时间，具体解释遵循底层交易协议。
 	ExpiryLockTime uint32
 	// MinerFeeRateSatPerKB 是构造退款和付款交易时采用的矿工费率，单位为 satoshi/KB。

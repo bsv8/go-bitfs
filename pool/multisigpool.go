@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"bytes"
 	"context"
 
 	mp "github.com/bsv8/MultisigPool/v4/pkg"
@@ -89,8 +88,8 @@ func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context
 	return append([]byte(nil), sig...), nil
 }
 
-func unsignedFromRaw(raw []byte, proof *OpeningProof) (*UnsignedPayment, error) {
-	if proof == nil || len(raw) == 0 {
+func unsignedFromRaw(raw []byte, details *OpeningDetails) (*UnsignedPayment, error) {
+	if details == nil || len(raw) == 0 {
 		return nil, invalid("unsigned state transaction and opening proof are required")
 	}
 	state, err := parseCanonicalTransaction(raw)
@@ -100,12 +99,12 @@ func unsignedFromRaw(raw []byte, proof *OpeningProof) (*UnsignedPayment, error) 
 	if len(state.Inputs) != 1 || len(state.Outputs) != 3 {
 		return nil, invalid("pool state must have exactly three outputs")
 	}
-	if state.Inputs[0].SourceTXID == nil || !bytes.Equal(state.Inputs[0].SourceTXID.CloneBytes(), proof.FundingTxID) || state.Inputs[0].SourceTxOutIndex != proof.PoolOutputIndex {
+	if state.Inputs[0].SourceTXID == nil || hash32FromBytes(state.Inputs[0].SourceTXID.CloneBytes()) != details.FundingTxID || state.Inputs[0].SourceTxOutIndex != PoolOutputIndex {
 		return nil, invalid("unsigned payment does not spend the opening pool outpoint")
 	}
-	setPoolSource(state, proof.PoolOutputSatoshis, proof.PoolLockingScript)
+	setPoolSource(state, details.PoolOutputSatoshis, details.PoolLockingScript)
 	if state.Inputs[0].UnlockingScript != nil && len(state.Inputs[0].UnlockingScript.Bytes()) != 0 {
 		return nil, invalid("arbitration candidate must have an empty unlocking script")
 	}
-	return &UnsignedPayment{SpendTxID: hash32FromBytes(proof.SpendTxID), RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: proof.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), proof.PoolLockingScript...)}, nil
+	return &UnsignedPayment{SpendTxID: details.SpendTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}, nil
 }

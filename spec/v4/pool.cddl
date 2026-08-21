@@ -1,0 +1,14 @@
+; Current go-bitfs pool workflow v4, bound to MultisigPool v4.
+; RefundTx is the single source of truth for the spend txid, funding txid, fixed
+; output index 0, and pool amount. The pool lock is derived from the ordered
+; participant keys. None of those derived values is encoded in opening-proof.
+pool-refund-presign-request = [4, refund-tx, buyer-pubkey, seller-pubkey, arbiter-pubkey, fee-rate, buyer-signature]
+opening-proof = [4, refund-tx, buyer-pubkey, seller-pubkey, arbiter-pubkey, fee-rate, buyer-signature, seller-signature, funding-tx]
+refund-tx = bstr
+funding-tx = bstr
+buyer-pubkey = bstr
+seller-pubkey = bstr
+arbiter-pubkey = bstr
+fee-rate = uint
+buyer-signature = bstr
+seller-signature = bstr

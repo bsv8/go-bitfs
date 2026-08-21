@@ -1,9 +1,9 @@
 ---
 id: 005-cumulative-payment-spec
-title: "005 · v3 Cumulative Payment Specification"
+title: "005 · v4 Cumulative Payment Specification"
 ---
 
-# 005 · v3 Cumulative Payment Specification
+# 005 · v4 Cumulative Payment Specification
 
 005 is the normal fulfillment message of the 003 Final Payment Authorization. The transaction template, fees, sequence number, outputs, and signatures are uniquely determined by MultisigPool v4.0.0; go-bitfs only passes the authorization hash, the unsigned state transaction, and the independent Buyer signature.
 
@@ -13,7 +13,7 @@ All state transactions have exactly three funding outputs fixed as `[Buyer, Sell
 
 ```text
 CumulativePaymentUpdateCBOR = deterministic CBOR([
-  3,
+  4,
   payment_authorization_hash,
   unsigned_state_tx_raw,
   buyer_transaction_signature

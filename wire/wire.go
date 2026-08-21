@@ -14,7 +14,7 @@ import (
 )
 
 // ProtocolFamily is the wire protocol identifier carried by the transport layer.
-const ProtocolFamily = "bitfs.protocol.v3"
+const ProtocolFamily = "bitfs.protocol.v4"
 
 // Kind identifies the message type selected by the transport. The tag is not
 // inserted into the signed 001–007 CBOR document.

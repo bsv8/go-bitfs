@@ -290,13 +290,15 @@ must(err)
 fundingTx := app.BuildFundingTx()
 presign, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{
     FundingTx:            fundingTx,
-    PoolOutputIndex:      0,
     ExpiryLockTime:       app.RefundExpiryLockTime(),
     MinerFeeRateSatPerKB: app.MinerFeeRate(),
     SellerPubKey:         receivedQuote.SellerPubkey,
     ArbiterPubKey:        arbiterPubkey,
 })
 must(err)
+
+// The pool locking output is fixed at FundingTx output index 0. FundingTxID,
+// pool amount, and pool locking script are derived and are not wire fields.
 
 _, sellerPresignCBOR := transmit(makePacket(wire.PoolRefundPresignRequest, presign))
 sellerPresign, err := wire.UnmarshalPoolRefundPresignRequest(sellerPresignCBOR)

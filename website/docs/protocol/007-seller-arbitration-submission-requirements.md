@@ -37,6 +37,6 @@ The arbiter verifies only the 003 authorization, candidate transaction, and sell
 
 ## One-way boundary
 
-Only a seller can initiate this step. A buyer cannot request arbitration close because a seller failed to submit a transaction, countersign an amount, or respond; the buyer waits for expiry and receives its refund or change. The seller pays the arbitration service cost, and BitFS v3 does not silently deduct it from the pool.
+Only a seller can initiate this step. A buyer cannot request arbitration close because a seller failed to submit a transaction, countersign an amount, or respond; the buyer waits for expiry and receives its refund or change. The seller pays the arbitration service cost, and BitFS v4 does not silently deduct it from the pool.
 
 See the [Seller arbitration submission specification](007-seller-arbitration-submission-spec.md) for the evidence package and validation rules.

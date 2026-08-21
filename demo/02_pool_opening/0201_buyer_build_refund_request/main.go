@@ -95,7 +95,7 @@ func main() {
 	debug("[funding] raw tx hex: %s", hex.EncodeToString(funding.RawTx))
 	debug("[funding] buyer-local file: %s", poolopening.FundingTxPath())
 	debug("[buyer] 构造并签名退款交易预签名请求")
-	// OpeningInput 把资金交易、费用率、池输出位置和参与方公钥交给
+	// OpeningInput 把资金交易、费用率和参与方公钥交给
 	// buyer workflow。workflow 会构造退款交易，并由买方对退款交易签名；
 	// 卖方稍后只需在同一退款交易上补充自己的签名。
 	request, err := session.Buyer.PreparePoolOpening(ctx, session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatPerKB))
@@ -109,7 +109,7 @@ func main() {
 		fail(fmt.Errorf("encode RefundPresignRequest: %w", err))
 	}
 	debug("[buyer] RefundTx bytes: %d", len(request.RefundTx))
-	debug("[buyer] FundingTxID: %s", hex.EncodeToString(request.FundingTxID))
+	debug("[buyer] FundingTxID (derived from RefundTx): %s", fundingTransaction.TxID().String())
 	debug("[buyer] FundingTx 原文尚未进入报文：yes")
 	debug("[transport] buyer -> seller: PoolRefundPresignRequest (%d bytes)", len(raw))
 	// stdout 只输出可传给下一个命令的 hex 报文，stderr 承载调试日志。

@@ -1,9 +1,9 @@
 ---
 id: 005-cumulative-payment-spec
-title: 005 · v3 累计支付规范
+title: 005 · v4 累计支付规范
 ---
 
-# 005 · v3 累计支付规范
+# 005 · v4 累计支付规范
 
 005 是对 003 最终付款授权的正常履行消息。交易模板、费用、序号、输出和签名由 MultisigPool v4.0.0 唯一决定；go-bitfs 只传递授权哈希、无签名状态交易和独立 Buyer 签名。
 
@@ -13,7 +13,7 @@ title: 005 · v3 累计支付规范
 
 ```text
 CumulativePaymentUpdateCBOR = deterministic CBOR([
-  3,
+  4,
   payment_authorization_hash,
   unsigned_state_tx_raw,
   buyer_transaction_signature

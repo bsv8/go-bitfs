@@ -26,7 +26,7 @@ sequenceDiagram
 | `0204_buyer_build_funding_delivery` | buyer | 确认本地退款证据已保存，构造资金交易交付报文 | `FundingTxDelivery` |
 | `0205_seller_accept_funding_delivery` | seller | 接收、检验资金交易，提交给后端并完成开池 | 本地 `PoolOpened` 状态 |
 
-0203 的 `OpeningProof` 和 0205 的 `PoolOpened` 是本地状态，不是额外的网络报文。Funding transaction 在 0201 的报文中只以 `FundingTxID` 出现；只有 0203 成功保存退款证据后，0204 才把原始 FundingTx 放入 `FundingTxDelivery`。
+0203 的 `OpeningProof` 和 0205 的 `PoolOpened` 是本地状态，不是额外的网络报文。0201 不单独携带 `FundingTxID`，卖方从 RefundTx 输入推导它；只有 0203 成功保存退款证据后，0204 才把原始 FundingTx 放入 `FundingTxDelivery`。
 
 ## 按报文顺序运行
 

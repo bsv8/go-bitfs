@@ -303,7 +303,7 @@ func newProtocolFixtureAt(t *testing.T, expiry uint32) *protocolFixture {
 	}
 	funding.AddInput(&tx.TransactionInput{SourceTXID: zero, SequenceNumber: tx.DefaultSequenceNumber, UnlockingScript: script.NewFromBytes(nil)})
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 20000, LockingScript: script.NewFromBytes(lock)})
-	opening, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	opening, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1005,7 +1005,7 @@ func (store *failOncePoolStore) LoadOpeningProofByFundingTxID(ctx context.Contex
 		return proof, err
 	}
 	forged := pool.CloneOpeningProof(proof)
-	forged.SpendTxID[0] ^= 0xff
+	forged.RefundTx[0] ^= 0xff
 	return forged, nil
 }
 
@@ -1153,7 +1153,7 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	}
 	funding.AddInput(&tx.TransactionInput{SourceTXID: zero, SequenceNumber: tx.DefaultSequenceNumber, UnlockingScript: script.NewFromBytes(nil)})
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 20000, LockingScript: script.NewFromBytes(lock)})
-	openingRequest, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: uint32(now.Unix() + 100), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	openingRequest, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: uint32(now.Unix() + 100), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,15 +1161,16 @@ func TestCanonicalNormalPaymentAndSellerArbitration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.firstOpening == nil || len(store.firstOpening.SpendTxID) != 32 {
-		t.Fatalf("presign saved proof without a complete SpendTxID: %#v", store.firstOpening)
+	if store.firstOpening == nil {
+		t.Fatal("presign did not save pending opening proof")
 	}
 	expectedSpend, err := engine.TransactionID(openingRequest.RefundTx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(store.firstOpening.SpendTxID, expectedSpend[:]) {
-		t.Fatalf("presign SpendTxID = %x, want %x", store.firstOpening.SpendTxID, expectedSpend)
+	derivedSpend, err := pool.SpendTxID(ctx, store.firstOpening)
+	if err != nil || derivedSpend != expectedSpend {
+		t.Fatalf("derived presign SpendTxID = %x, want %x, err = %v", derivedSpend, expectedSpend, err)
 	}
 	reference, err := buyerWorkflow.AcceptRefundPresign(ctx, openingRequest, openingResponse, funding.Bytes())
 	if err != nil {
@@ -1403,7 +1404,7 @@ func TestFundingPersistenceFailureCanBeReconciled(t *testing.T) {
 	}
 	funding.AddInput(&tx.TransactionInput{SourceTXID: zero, SequenceNumber: tx.DefaultSequenceNumber, UnlockingScript: script.NewFromBytes(nil)})
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 20000, LockingScript: script.NewFromBytes(lock)})
-	request, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), PoolOutputIndex: 0, ExpiryLockTime: uint32(time.Now().Unix() + 100), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	request, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: uint32(time.Now().Unix() + 100), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}

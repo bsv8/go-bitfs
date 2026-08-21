@@ -1,6 +1,6 @@
 const config = {
   title: 'go-bitfs',
-  tagline: 'Source-driven BitFS v3 SDK documentation',
+  tagline: 'Source-driven BitFS v4 SDK documentation',
   favicon: 'img/favicon.svg',
   url: process.env.DOCS_SITE_URL || process.env.CF_PAGES_URL || 'http://localhost:3000',
   baseUrl: '/',

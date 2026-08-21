@@ -192,7 +192,7 @@ func TestVerifiedNodeRejectsForgedOpeningSpendAnchorBeforeEveryBackend(t *testin
 	} {
 		backend := &permissivePoolBackend{}
 		forged := CloneOpeningProof(proof)
-		forged.SpendTxID[0] ^= 0xff
+		forged.RefundTx[0] ^= 0xff
 		node, err := NewVerifiedNonFinalPoolNode(fixedOpeningStore{proof: forged}, backend)
 		if err != nil {
 			t.Fatal(err)
@@ -209,9 +209,8 @@ func TestVerifiedNodeRejectsForgedOpeningSpendAnchorBeforeEveryBackend(t *testin
 func TestPoolWireIdentityKeysRequireCompressedEncoding(t *testing.T) {
 	_, proof := mustRefundExpiryFixture(t, 4102444800, nil)
 	request := &RefundPresignRequest{
-		Version: MajorVersion, MultisigProtocol: MultisigProtocol, MultisigVersion: MultisigVersion,
-		RefundTx: proof.RefundTx, FundingTxID: proof.FundingTxID, PoolOutputIndex: proof.PoolOutputIndex,
-		PoolOutputSatoshis: proof.PoolOutputSatoshis, PoolLockingScript: proof.PoolLockingScript,
+		Version:     MajorVersion,
+		RefundTx:    proof.RefundTx,
 		BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey,
 		MinerFeeRateSatPerKB: proof.MinerFeeRateSatPerKB, BuyerRefundSignature: proof.BuyerRefundSignature,
 	}

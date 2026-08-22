@@ -30,9 +30,15 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("build prerequisite payment: %w", err))
 	}
-	// 卖方合并签名后得到完整付款交易；demo 作为调用方把它当作新的最新
-	// 状态保存（真实应用在此处广播并记录结果）。
-	signedPayment, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, deliveryState, verified.Update, blockHeight)
+	// 005 最小凭证只携带授权哈希与买方签名；应用先按哈希取回原始签名 003
+	// 再交给卖方验收。
+	authorization, err := f.LookupPaymentAuthorization(verified.Update.PaymentAuthorizationHash)
+	if err != nil {
+		fail(err)
+	}
+	// 卖方本地重建状态交易、合并签名后得到完整付款交易；demo 作为调用方把
+	// 它当作新的最新状态保存（真实应用在此处广播并记录结果）。
+	signedPayment, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, authorization, deliveryState, verified.Update, blockHeight)
 	if err != nil {
 		fail(fmt.Errorf("accept prerequisite payment: %w", err))
 	}

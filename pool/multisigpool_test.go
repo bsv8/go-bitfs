@@ -634,6 +634,46 @@ func TestBuildPaymentUpdateRejectsSkipOutpointAndMetadataTampering(t *testing.T)
 	}
 }
 
+// Deterministic-rebuild regression: the same explicit inputs must always
+// rebuild byte-identical unsigned payment state transactions (this is the
+// interoperability premise that lets 005 omit the raw transaction), while any
+// different opening, previous, sequence, or amount yields different bytes or
+// a hard failure.
+func TestBuildPaymentUpdateIsDeterministicAndContextBound(t *testing.T) {
+	ctx := context.Background()
+	engine, proof, _, _, _, _ := mustUnsignedPaymentFixture(t)
+	initialRaw, err := engine.BuildRefundSubmission(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := engine.ParsePaymentState(ctx, initialRaw, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1000}
+	first, err := engine.BuildPaymentUpdate(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.BuildPaymentUpdate(ctx, ClonePaymentUpdateInput(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first.RawTx, second.RawTx) {
+		t.Fatal("identical inputs rebuilt different payment state transactions")
+	}
+	differentAmount, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first.RawTx, differentAmount.RawTx) {
+		t.Fatal("different seller amounts rebuilt identical transactions")
+	}
+	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 2, SellerAmountAfterSat: 1000}); err == nil {
+		t.Fatal("skip-sequence rebuild was accepted")
+	}
+}
+
 func adapterForArbitration(engine *MultisigPoolEngine, key *ec.PrivateKey) *MultisigPoolAdapter {
 	return &MultisigPoolAdapter{Engine: engine, ArbiterKey: key}
 }

@@ -4,6 +4,7 @@
 package integration
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -117,4 +118,64 @@ func TestCrossPoolContentAndArbitrationEvidenceAreRefused(t *testing.T) {
 	if arbitrationRequest.RefundTemplateTxID == poolB.buyerAcc.Reference.RefundTemplateTxID {
 		t.Fatal("arbitration request bound to the wrong pool")
 	}
+}
+
+// Minimal 005 credentials carry no pool ID, so routing is hash-based: the
+// application looks up the exact saved 003 by PaymentAuthorizationHash and
+// only the 003's RefundTemplateTxID selects the opening. Supplying a
+// credential from one pool together with another pool's authorization must
+// never merge.
+func TestCrossPoolAuthorizationLookupIsRefused(t *testing.T) {
+	f := newProtocolFixture(t)
+	poolA := f.openNamedPool(t, 100000)
+	poolB := f.openNamedPool(t, 110000)
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	requestA, err := f.buyer.BuildContentRequest(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, deliveryStateA, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedA, err := f.buyer.AcceptDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, mustDeliveryForTwoPools(t, f, poolA, requestA), buyer.ContentDeliveryInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same participants and the same content price in pool B produce a
+	// different authorization hash; pool B's original 003 can never satisfy
+	// pool A's credential.
+	requestB, err := f.buyer.BuildContentRequest(f.ctx, f.quote, poolB.sellerAcc.Opening, poolB.sellerAcc.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashA, err := bitfs.PaymentAuthorizationHash(requestA.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := bitfs.PaymentAuthorizationHash(requestB.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(hashA[:], hashB[:]) {
+		t.Fatal("distinct pools produced identical payment authorization hashes")
+	}
+	// Hash lookup first: the found 003's pool ID selects the opening. Passing
+	// pool A's credential with pool B's authorization is refused before any
+	// signature check.
+	if _, err := f.seller.AcceptPayment(f.ctx, poolB.sellerAcc.Opening, poolB.sellerAcc.InitialPayment, requestB, deliveryStateA, verifiedA.Update, f.facts()); err == nil {
+		t.Fatal("cross-pool delivery state was accepted for pool B")
+	}
+	if _, err := f.seller.AcceptPayment(f.ctx, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestB, deliveryStateA, verifiedA.Update, f.facts()); err == nil {
+		t.Fatal("credential from pool A was accepted against pool B's authorization")
+	}
+}
+
+func mustDeliveryForTwoPools(t *testing.T, f *protocolFixture, target *poolState, request *bitfs.SignedContentRequest) *bitfs.SignedContentDelivery {
+	t.Helper()
+	delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, target.sellerAcc.Opening, target.sellerAcc.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return delivery
 }

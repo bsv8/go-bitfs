@@ -166,8 +166,9 @@ func TestGoldenWireBytes004(t *testing.T) {
 }
 
 // Pre-switch v4 bytes must be rejected outright: the old thirteen-element
-// terms, the old three-element 003 shell, and the old three-element 004 shell
-// all carry removed fields or signatures over removed structures.
+// terms, the old three-element 003 shell, the old three-element 004 shell, and
+// the old five-element 005 payment container all carry removed fields or
+// signatures over removed structures. No length-based legacy decoder exists.
 func canonicalGoldenMarshal(values []any) ([]byte, error) {
 	enc, err := cbor.CoreDetEncOptions().EncMode()
 	if err != nil {
@@ -206,14 +207,24 @@ func TestGoldenWireBytesRejectPreSwitchShapes(t *testing.T) {
 	if _, err := UnmarshalContentDelivery(legacyDeliveryShell); err == nil {
 		t.Fatal("legacy three-element 004 shell was accepted")
 	}
+	legacyUpdate, err := canonicalGoldenMarshal([]any{
+		uint64(4), goldenBstr(hash32), goldenBstr(hash32),
+		goldenBstr([]byte{2, 3, 4}), goldenBstr(signature)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalPaymentUpdate(legacyUpdate); err == nil {
+		t.Fatal("pre-switch five-element v4 005 was accepted")
+	}
 }
 
 func TestGoldenWireBytes005(t *testing.T) {
+	// The minimal 005 credential carries only the authorization hash and the
+	// buyer transaction signature; pool ID and raw state tx are rebuilt
+	// locally by both roles and never transmitted.
 	update := &pool.PaymentUpdate{
 		Version:                   pool.MajorVersion,
-		RefundTemplateTxID:        pool.RefundTemplateTxID(bytes.Repeat([]byte{7}, 32)),
 		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, 32),
-		UnsignedStateTxRaw:        []byte{2, 3, 4},
 		BuyerTransactionSignature: []byte{5, 6},
 	}
 	raw, err := MarshalPaymentUpdate(update)
@@ -221,15 +232,25 @@ func TestGoldenWireBytes005(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := hex.EncodeToString(raw)
-	const want = "8504582007070707070707070707070707070707070707070707070707070707070707075820010101010101010101010101010101010101010101010101010101010101010143020304420506"
+	const want = "830458200101010101010101010101010101010101010101010101010101010101010101420506"
 	if got != want {
 		t.Fatalf("golden 005 mismatch:\n got %s\nwant %s", got, want)
+	}
+	if len(raw) == 0 || raw[0] != 0x83 {
+		t.Fatalf("minimal 005 must be a three-element array: %x", raw)
 	}
 	decoded, err := UnmarshalPaymentUpdate(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.RefundTemplateTxID != update.RefundTemplateTxID || !bytes.Equal(decoded.UnsignedStateTxRaw, update.UnsignedStateTxRaw) {
+	if !bytes.Equal(decoded.PaymentAuthorizationHash, update.PaymentAuthorizationHash) || !bytes.Equal(decoded.BuyerTransactionSignature, update.BuyerTransactionSignature) {
 		t.Fatal("005 round trip changed fields")
+	}
+	again, err := MarshalPaymentUpdate(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatal("005 decode/encode round trip changed bytes")
 	}
 }

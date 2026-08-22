@@ -369,21 +369,43 @@ func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs
 	return delivery, state, nil
 }
 
-// AcceptPayment verifies the buyer's 005 update against the explicitly
-// supplied opening proof, previous accepted state, and the ContentDeliveryState
-// saved after building 004, adds the seller signature, merges the complete
-// transaction, and returns it. Broadcasting and recording the outcome are the
-// application's responsibilities; the SDK never submits anything.
-func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error) {
+// AcceptPayment verifies the buyer's minimal 005 payment credential against
+// the explicitly supplied original signed 003 authorization, opening proof,
+// previous accepted state, and the ContentDeliveryState saved after building
+// 004. The application must first look up the exact original SignedContentRequest
+// by the wire's PaymentAuthorizationHash and pass it in; the SDK never scans
+// pools or queries stores. It recomputes and compares the authorization hash,
+// verifies the exact 003 buyer signature and every pool/target binding, then
+// deterministically rebuilds the unsigned payment state transaction locally
+// through the single BuildPaymentUpdate implementation, verifies the detached
+// buyer signature over that exact rebuilt transaction, adds the seller
+// signature, merges the complete transaction, and returns it with the
+// authorization hash recorded in the state. Broadcasting and recording the
+// outcome are the application's responsibilities; the SDK never submits
+// anything.
+func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, authorization *bitfs.SignedContentRequest, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
+	// 1. 克隆全部可变输入，并对最小 005 做结构校验。
 	update = pool.ClonePaymentUpdate(update)
 	if err := pool.ValidatePaymentUpdate(update); err != nil {
 		return nil, err
 	}
 	opening = pool.CloneOpeningProof(opening)
 	previous = pool.ClonePaymentState(previous)
+	if authorization == nil {
+		return nil, fmt.Errorf("%w: original signed content request is required", pool.ErrInvalidEvidence)
+	}
+	localAuthorization := bitfs.CloneSignedContentRequest(authorization)
+	// 2. 重算 SHA-256(003 TermsCBOR)，与 005 授权哈希逐字节比较。
+	authHash, err := bitfs.PaymentAuthorizationHash(localAuthorization.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(update.PaymentAuthorizationHash, authHash[:]) {
+		return nil, fmt.Errorf("%w: payment update references a different authorization than the supplied signed request", pool.ErrInvalidEvidence)
+	}
 	if err := workflow.verifySellerOwnsOpening(ctx, opening); err != nil {
 		return nil, err
 	}
@@ -392,55 +414,75 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 		return nil, fmt.Errorf("derive pool opening details: %w", err)
 	}
 	refundTemplateTxID := details.RefundTemplateTxID
-	if refundTemplateTxID != update.RefundTemplateTxID {
-		return nil, fmt.Errorf("%w: explicit correlation ID does not match opening evidence", pool.ErrInvalidEvidence)
-	}
 	engine, err := workflow.engineFor(opening)
 	if err != nil {
 		return nil, err
 	}
+	// 3. 用 OpeningProof 的 Buyer 公钥验证精确 003 的买方签名。
+	requestTerms, err := bitfs.VerifySignedContentRequestForOpening(localAuthorization, opening)
+	if err != nil {
+		return nil, fmt.Errorf("verify payment authorization: %w", err)
+	}
+	// 4. 从原始 003 取得 RefundTemplateTxID，与 OpeningProof 派生 ID、previous、
+	// ContentDeliveryState 全部交叉比较；hash 只是查找键，池身份以证据为准。
+	requestRefundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(requestTerms.RefundTemplateTxID))
+	if requestRefundTemplateTxID != refundTemplateTxID {
+		return nil, fmt.Errorf("%w: content request is not bound to opening proof", pool.ErrInvalidEvidence)
+	}
+	if previous == nil || previous.RefundTemplateTxID != refundTemplateTxID {
+		return nil, pool.ErrStalePaymentSequence
+	}
+	if deliveryState == nil {
+		return nil, fmt.Errorf("%w: content delivery state is required", pool.ErrInvalidEvidence)
+	}
+	if deliveryState.RefundTemplateTxID != refundTemplateTxID {
+		return nil, fmt.Errorf("%w: content delivery state belongs to another pool", pool.ErrInvalidEvidence)
+	}
+	// 5. 卖方私钥归属已在 verifySellerOwnsOpening 检查；这里确认开池证据完整
+	// 且费用池尚可接受普通前向付款（未过期）。
 	if err := engine.VerifyOpening(opening); err != nil {
 		return nil, fmt.Errorf("verify pool opening proof: %w", err)
 	}
 	if err := checkSellerPoolNotExpired(opening, time.Now().UTC(), blockHeight); err != nil {
 		return nil, fmt.Errorf("verify pool refund is still available: %w", err)
 	}
-	unsigned, err := engine.ParseUnsignedPayment(ctx, append([]byte(nil), update.UnsignedStateTxRaw...), opening)
-	if err != nil {
-		return nil, fmt.Errorf("parse unsigned payment state: %w", err)
-	}
-	if unsigned == nil {
-		return nil, fmt.Errorf("%w: empty unsigned payment state", pool.ErrInvalidEvidence)
-	}
-	if unsigned.RefundTemplateTxID != refundTemplateTxID {
-		return nil, fmt.Errorf("%w: payment state correlation mismatch", pool.ErrInvalidEvidence)
-	}
-	if err := engine.VerifyBuyerPayment(unsigned, update.BuyerTransactionSignature, opening); err != nil {
-		return nil, fmt.Errorf("verify buyer payment: %w", err)
-	}
-	if deliveryState == nil {
-		return nil, fmt.Errorf("%w: content delivery state is required", pool.ErrInvalidEvidence)
-	}
-	if previous == nil {
-		return nil, pool.ErrStalePaymentSequence
-	}
+	// 6. previous 必须是该 OpeningProof 下密码学完整的已接受或已仲裁状态，
+	// 不信任只填序号/金额的壳。
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
-		return nil, fmt.Errorf("verify previous accepted payment: %w", err)
+		if arbitratedErr := engine.VerifyArbitratedPayment(previous, opening); arbitratedErr != nil {
+			return nil, fmt.Errorf("verify previous accepted payment: %w", err)
+		}
 	}
-	if unsigned.SellerAmountSat < previous.SellerAmountSat {
-		return nil, fmt.Errorf("%w: seller amount cannot decrease", pool.ErrInvalidEvidence)
-	}
-	requestHash := poolHash32Seller(update.PaymentAuthorizationHash)
-	// DeliveryState 只记录目标：池 ID、授权哈希、目标序号和绝对累计金额。
-	if deliveryState.RefundTemplateTxID != unsigned.RefundTemplateTxID || deliveryState.PaymentAuthorizationHash != requestHash {
+	// 7. 目标序号必须恰好是 previous+1，且不是最终关闭哨兵。
+	if previous.PaymentSequence+1 != requestTerms.PaymentSequence || requestTerms.PaymentSequence == ^uint32(0) {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	if previous.PaymentSequence+1 != deliveryState.PaymentSequence || unsigned.PaymentSequence != deliveryState.PaymentSequence {
+	// 8. ContentDeliveryState 与原始 003 完全一致：授权哈希、目标序号、绝对
+	// 累计金额，证明本地确实为这张授权生成过 004。
+	if deliveryState.PaymentAuthorizationHash != pool.Hash32(authHash) ||
+		deliveryState.PaymentSequence != requestTerms.PaymentSequence ||
+		deliveryState.SellerAmountAfterSat != requestTerms.SellerAmountAfterSat {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	if unsigned.SellerAmountSat != deliveryState.SellerAmountAfterSat {
-		return nil, fmt.Errorf("%w: payment seller amount does not match the authorized absolute amount", pool.ErrInvalidEvidence)
+	if requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
+		return nil, fmt.Errorf("%w: authorized seller amount cannot decrease", pool.ErrInvalidEvidence)
 	}
+	// 9. 用 OpeningProof、previous 和 003 目标值调用唯一 BuildPaymentUpdate
+	// 本地重建未签名状态交易；005 不携带也不接受任何 raw bytes。
+	unsigned, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSat: requestTerms.SellerAmountAfterSat})
+	if err != nil {
+		return nil, fmt.Errorf("rebuild payment state transaction: %w", err)
+	}
+	if unsigned == nil || unsigned.RefundTemplateTxID != refundTemplateTxID {
+		return nil, fmt.Errorf("%w: rebuilt payment state correlation mismatch", pool.ErrInvalidEvidence)
+	}
+	// 10. 用固定 Buyer verifier 验证 005 签名覆盖重建出的精确交易；任何错
+	// opening、错 previous、错金额、错序号或错费用都会导致失败。
+	if err := engine.VerifyBuyerPayment(unsigned, update.BuyerTransactionSignature, opening); err != nil {
+		return nil, fmt.Errorf("verify buyer payment over rebuilt transaction: %w", err)
+	}
+	// 11. Seller 对同一重建交易签名，并用唯一 Buyer+Seller merge 入口生成
+	// 完整 SignedPayment。
 	sellerSig, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerPayment(ctx, unsigned, opening)
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
@@ -452,7 +494,8 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 	if signed == nil || len(signed.RawTx) == 0 {
 		return nil, fmt.Errorf("%w: seller produced empty signed payment", pool.ErrInvalidEvidence)
 	}
-	signed.State.PaymentAuthorizationHash = requestHash
+	// 12. 把授权哈希写入返回的 PaymentState；SDK 不保存、不广播、不宣布节点接受。
+	signed.State.PaymentAuthorizationHash = hash32ToPool(authHash)
 	return signed, nil
 }
 

@@ -44,7 +44,7 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signedPayment, err := f.seller.AcceptPayment(f.ctx, opening, previous, deliveryState, verified.Update, f.facts())
+	signedPayment, err := f.seller.AcceptPayment(f.ctx, opening, previous, request, deliveryState, verified.Update, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +67,13 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	}
 	if !bytes.Equal(verified.Update.PaymentAuthorizationHash, authHash[:]) {
 		t.Fatal("005 carries an authorization hash other than SHA-256(TermsCBOR)")
+	}
+	rawUpdate, err := pool.EncodePaymentUpdate(verified.Update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawUpdate) == 0 || rawUpdate[0] != 0x83 {
+		t.Fatalf("minimal 005 must be a three-element array without pool ID or raw transaction: %x", rawUpdate)
 	}
 	if signedPayment.State.PaymentAuthorizationHash != pool.Hash32(authHash) {
 		t.Fatal("accepted payment state carries a foreign authorization hash")

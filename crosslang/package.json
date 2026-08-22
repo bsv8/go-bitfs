@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node verify-go-vector.mjs && node verify-ts-vector.mjs && node generate-ts-vector.mjs --check && node generate-ts-transaction-vector.mjs --check && node verify-go-transaction-vector.mjs && node verify-ts-transaction-vector.mjs"
+    "test": "node verify-go-vector.mjs && node verify-ts-vector.mjs && node generate-ts-vector.mjs --check && node generate-ts-transaction-vector.mjs --check && node verify-go-transaction-vector.mjs && node verify-ts-transaction-vector.mjs && node generate-ts-payment-state-vector.mjs --check && node verify-ts-payment-state-vector.mjs"
   },
   "dependencies": {
     "@bsv/sdk": "2.4.1"

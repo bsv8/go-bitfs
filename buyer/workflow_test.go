@@ -279,6 +279,78 @@ func TestContentRequestAndDeliveryRoundTripWithExplicitState(t *testing.T) {
 	}
 }
 
+// The minimal 005 credential carries only the authorization hash and the
+// buyer transaction signature; the signature must verify against the exact
+// transaction rebuilt locally from the same explicit context, and must fail
+// against any different opening/previous/target.
+func TestAcceptDeliveryProducesMinimalCredentialVerifiableOverRebuiltTransaction(t *testing.T) {
+	f := newBuyerFixture(t)
+	f.prepare(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	input := ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := f.Buyer.AcceptDelivery(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, request, delivery, ContentDeliveryInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := verified.Update
+	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(update.PaymentAuthorizationHash, authHash[:]) {
+		t.Fatal("005 credential does not carry SHA-256(003 TermsCBOR)")
+	}
+	rawUpdate, err := pool.EncodePaymentUpdate(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawUpdate) == 0 || rawUpdate[0] != 0x83 {
+		t.Fatalf("minimal 005 wire must be a three-element array: %x", rawUpdate)
+	}
+	opening := f.Acceptance.Opening
+	previous := f.Acceptance.InitialPayment
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opening.BuyerPubKey, SellerPubKey: opening.SellerPubKey, ArbiterPubKey: opening.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms, err := bitfs.DecodeContentRequestTerms(request.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: terms.PaymentSequence, SellerAmountAfterSat: terms.SellerAmountAfterSat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.VerifyBuyerPayment(rebuilt, update.BuyerTransactionSignature, opening); err != nil {
+		t.Fatalf("buyer credential does not verify over the independently rebuilt transaction: %v", err)
+	}
+	// Rebuilding twice from identical inputs must produce identical bytes:
+	// determinism is what lets the seller verify without any wire raw.
+	rebuiltAgain, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: terms.PaymentSequence, SellerAmountAfterSat: terms.SellerAmountAfterSat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rebuilt.RawTx, rebuiltAgain.RawTx) {
+		t.Fatal("payment state rebuild is not deterministic")
+	}
+	// Input mutation after acceptance cannot change returned results.
+	mutatedPrevious := &pool.PaymentState{}
+	*mutatedPrevious = *previous
+	mutatedPrevious.SellerAmountSat += 1
+	if _, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: mutatedPrevious, PaymentSequence: terms.PaymentSequence, SellerAmountAfterSat: terms.SellerAmountAfterSat}); err == nil {
+		t.Fatal("tampered previous state was accepted by the transaction core")
+	}
+}
+
 func mustMarshalRequest(t *testing.T, request *pool.RefundPresignRequest) []byte {
 	t.Helper()
 	raw, err := pool.EncodeRefundPresignRequest(request)

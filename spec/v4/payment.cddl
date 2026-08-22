@@ -1,6 +1,9 @@
-; 005 always carries an unsigned three-output state and a detached Buyer signature.
-cumulative-payment-update = [4, refund-template-txid, payment-authorization-hash, unsigned-state-tx, buyer-signature]
-refund-template-txid = bstr .size 32
+; 005 is a minimal payment credential: the payment authorization hash
+; (SHA-256 of the signed 003 TermsCBOR) plus the Buyer transaction signature
+; over the exact unsigned state transaction that both sides rebuild locally
+; from the OpeningProof, previous PaymentState, and the referenced 003.
+; The pool correlation ID and the raw state transaction are never transmitted;
+; pre-switch five-element v4 containers are rejected outright.
+cumulative-payment-update = [4, payment-authorization-hash, buyer-signature]
 payment-authorization-hash = bstr .size 32
-unsigned-state-tx = bstr
 buyer-signature = bstr

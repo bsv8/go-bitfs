@@ -112,12 +112,15 @@ The role APIs accept protocol-shaped data and return computed results:
   amount) needed later by AcceptPayment. It carries no owner, lease, or expiry
   semantics.
 - buyer.AcceptDelivery returns VerifiedDelivery\{Payloads, Update\}: the
-  verified payload batch in 003 hash order plus the single signed 005 wire
-  update for the whole batch.
+  verified payload batch in 003 hash order plus the single signed minimal 005
+  payment credential (authorization hash plus buyer transaction signature) for
+  the whole batch; the application must index the exact original signed 003
+  under that hash before sending it.
 - pool.PaymentUpdate, pool.UnsignedPayment, and pool.SignedPayment distinguish
-  unsigned state, detached signatures, and complete transactions. Build/Verify/
-  Accept methods return raw transactions for the application to broadcast;
-  nothing is ever named "submitted" or "accepted" inside the SDK.
+  the minimal wire credential, locally rebuilt unsigned state, detached
+  signatures, and complete transactions. Build/Verify/Accept methods return raw
+  transactions for the application to broadcast; nothing is ever named
+  "submitted" or "accepted" inside the SDK.
 
 The correlation field across these types is `pool.RefundTemplateTxID` — a
 dedicated `[32]byte` type carrying the canonical TxID of the refund template

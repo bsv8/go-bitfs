@@ -159,8 +159,18 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 005 (README §6.2): seller.AcceptPayment takes the saved delivery state.
-	signedPayment, err := f.seller.AcceptPayment(ctx, opening, previous, deliveryState, verified.Update, blockHeight)
+	// 005 (README §6.2): the application first looks up the exact original
+	// signed 003 by the wire authorization hash, then seller.AcceptPayment
+	// takes it together with the saved delivery state.
+	rawUpdate, err := wire.MarshalPaymentUpdate(verified.Update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedUpdate, err := wire.UnmarshalPaymentUpdate(rawUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedPayment, err := f.seller.AcceptPayment(ctx, opening, previous, decodedRequest, deliveryState, decodedUpdate, blockHeight)
 	if err != nil {
 		t.Fatal(err)
 	}

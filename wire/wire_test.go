@@ -42,21 +42,32 @@ func TestNewWirePreservesTypedCBOR(t *testing.T) {
 func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 	update := &pool.PaymentUpdate{
 		Version:                   pool.MajorVersion,
-		RefundTemplateTxID:        pool.RefundTemplateTxID(bytes.Repeat([]byte{7}, 32)),
 		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, 32),
-		UnsignedStateTxRaw:        []byte{2, 3},
 		BuyerTransactionSignature: []byte{4},
 	}
 	raw, err := MarshalPaymentUpdate(update)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(raw) == 0 || raw[0] != 0x83 {
+		t.Fatalf("minimal 005 must be a three-element array: %x", raw)
+	}
 	decoded, err := UnmarshalPaymentUpdate(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.UnsignedStateTxRaw, update.UnsignedStateTxRaw) {
+	if !bytes.Equal(decoded.PaymentAuthorizationHash, update.PaymentAuthorizationHash) || !bytes.Equal(decoded.BuyerTransactionSignature, update.BuyerTransactionSignature) {
 		t.Fatal("payment update changed during wire round trip")
+	}
+	// The transport adds no pool header or session fallback: decoding the
+	// payload under Kind isolation is already covered by wire_pool_test.
+	mutated := &pool.PaymentUpdate{Version: pool.MajorVersion, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: []byte{5}}
+	if _, err := MarshalPaymentUpdate(mutated); err != nil {
+		t.Fatal(err)
+	}
+	update.PaymentAuthorizationHash[0] = 9
+	if decoded.PaymentAuthorizationHash[0] != 1 {
+		t.Fatal("decoded payment update aliases input data")
 	}
 }
 

@@ -42,7 +42,7 @@ sequenceDiagram
     loop Seed + Seed 中列出的每个文件块
         B->>S: 003 SignedContentRequest
         S->>B: 004 SignedContentDelivery
-        B->>S: 005 PaymentUpdate
+        B->>S: 005 PaymentUpdate（授权哈希+买方签名）
         S->>N: 广播双方签名的最新累计状态
         N-->>S: 返回规范 txid
     end
@@ -158,7 +158,9 @@ func (b *NodeBroadcaster) CurrentBlockHeight(ctx context.Context) (uint32, error
 
 ### 3.4 原始协议流水
 
-应用需要按 `RefundTemplateTxID` 保存每一步返回值，用于崩溃恢复、审计和 007 仲裁：
+应用需要按 `RefundTemplateTxID` 保存每一步返回值，用于崩溃恢复、审计和 007 仲裁；
+自 005 最小付款凭证切换起，还必须按 `PaymentAuthorizationHash` 建立唯一索引保存精确的原始签名 003——
+哈希是内容寻址键，不可逆解码，找不到原始 003 就不能验收对应的最小 005：
 
 ```go
 // PurchaseJournal 是应用的业务状态库。表结构建议：
@@ -167,6 +169,8 @@ func (b *NodeBroadcaster) CurrentBlockHeight(ctx context.Context) (uint32, error
 //   buyer_openings(refund_template_txid PRIMARY KEY, request_cbor, funding_tx)
 //   delivery_states(refund_template_txid PRIMARY KEY, auth_hash,
 //                   target_sequence, seller_amount_after_sat)
+//   authorizations(payment_authorization_hash PRIMARY KEY, request_cbor,
+//                  refund_template_txid, processing_status) // 005 最小凭证的哈希索引
 //   journal(id, refund_template_txid, kind, cbor/raw, created_at)
 type PurchaseJournal struct{ /* ... */ }
 
@@ -174,9 +178,12 @@ func (j *PurchaseJournal) LoadBuyerOpeningState(refundTemplateTxID [32]byte) (*b
 func (j *PurchaseJournal) SaveBuyerOpeningState(state *buyer.BuyerOpeningState) error   // 0201 之后立即调用
 func (j *PurchaseJournal) SaveSellerPresignProof(proof *pool.OpeningProof) error         // 0202 之后立即调用
 func (j *PurchaseJournal) SaveOpening(role string, proof *pool.OpeningProof) error       // 0203/0205 之后
-func (j *PurchaseJournal) SaveLatestPayment(role string, state *pool.PaymentState) error // 每次 005 合并完成后
+func (j *PurchaseJournal) SaveLatestPayment(role string, state *pool.PaymentState) error // 每次 005 合并完成且节点确认后，买卖双方保存同一份确认状态
+func (j *PurchaseJournal) SavePendingPayment(payment *pool.SignedPayment) error          // 广播前先持久化完整双签候选（raw/txid/sequence/auth hash）
 func (j *PurchaseJournal) SaveDeliveryState(state *seller.ContentDeliveryState) error    // 每次生成 004 后
 func (j *PurchaseJournal) LoadDeliveryState(refundTemplateTxID [32]byte) (*seller.ContentDeliveryState, error)
+func (j *PurchaseJournal) SaveAuthorization(authHash [32]byte, request *bitfs.SignedContentRequest) error // 生成 004 时保存原始 003
+func (j *PurchaseJournal) LoadAuthorizationByHash(authHash []byte) (*bitfs.SignedContentRequest, error)   // 收到最小 005 后取回原始 003
 func (j *PurchaseJournal) RecordOutbox(kind string, payload []byte) error                // 发送前的 wire 报文留痕
 ```
 
@@ -328,6 +335,7 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     )
     if err != nil { return err }
     journal.SaveDeliveryState(deliveryState) // 先保存交付上下文，再发送 004
+    journal.SaveAuthorization(authHash, request)             // 应用按授权哈希索引原始 003（Seller 收到最小 005 后要查回）
     rawDelivery, err := wire.MarshalContentDelivery(delivery)
     if err != nil { return err }
     sendToBuyer(rawDelivery)
@@ -349,14 +357,41 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
         }
     }
 
-    // 005：卖方凭保存的 ContentDeliveryState 验证金额与序号，合并完整交易。
+    // 005：最小凭证只携带授权哈希 + 买方签名。应用先按哈希查回保存的原始
+    // 签名 003；卖方验证原始授权、交叉核对 ContentDeliveryState，本地重建
+    // 未签名状态交易并验过买方签名后补签合并。
     update := verified.Update
+    authorization, err := journal.LoadAuthorizationByHash(update.PaymentAuthorizationHash)
+    if err != nil { return err } // 哈希不可解码：找不到原始 003 就不能验收
     signedPayment, err := sellerWorkflow.AcceptPayment(ctx, sellerOpening,
-        sellerPrevious, loadedDeliveryState, update, blockHeight)
+        sellerPrevious, authorization, loadedDeliveryState, update, blockHeight)
     if err != nil { return err }
-    journal.SaveLatestPayment("seller", &signedPayment.State) // 先保存，再广播
-    _, err = broadcaster.Broadcast(signedPayment.RawTx)
-    return err
+
+    // 节点确认前：完整双签候选先落库（raw/txid/sequence/auth hash），
+    // 业务 accepted-payment 记录暂不推进。
+    journal.SavePendingPayment(signedPayment)
+    receipt, err := broadcaster.Broadcast(signedPayment.RawTx)
+    if err != nil { return err }
+
+    // 节点确认（finality-deferred 策略确认或 txid/outpoint 对账清楚）之后，
+    // 买方通过同一份完整双签 PaymentState 推进自己的 Journal：买方用
+    // MultisigPoolEngine 的导出纯验证入口复核该状态确实密码学完整、序号
+    // 恰好 +1、金额承接，然后与卖方保存完全相同的确认状态。下一轮 003
+    // 必须以这份共享确认状态为 previous，累计付款循环才能真实滚动。
+    confirmed := &signedPayment.State
+    engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{
+        BuyerPubKey:   sellerOpening.BuyerPubKey,
+        SellerPubKey:  sellerOpening.SellerPubKey,
+        ArbiterPubKey: sellerOpening.ArbiterPubKey,
+    })
+    if err != nil { return err }
+    if err := engine.VerifyAcceptedPayment(confirmed, sellerOpening); err != nil {
+        return err // 双签状态不完整，绝不能作为下一轮 previous
+    }
+    journal.SaveLatestPayment("buyer", confirmed)   // 与卖方同一份确认状态
+    journal.SaveLatestPayment("seller", confirmed)
+    _ = receipt
+    return nil
 }
 ```
 

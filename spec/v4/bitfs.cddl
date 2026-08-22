@@ -1,9 +1,12 @@
 ; v4 wire family. Quote remains independently versioned; pool/content/arbitration
 ; messages carry their own strict major and are not decoded as older payloads.
-; This v4 was hard-switched twice before launch: first RefundTemplateTxID became
+; This v4 was hard-switched three times before launch: first RefundTemplateTxID became
 ; the unified pool correlation ID, then 003/004 were switched to one payment
 ; sequence authorizing an ordered content-hash batch and one delivery package
-; atomically carrying the same batch (see content.cddl). Only post-switch
-; structures are accepted; pre-switch v4 003/004 bytes, legacy aliases, and any
-; dual-shape decoding do not exist in this protocol version.
+; atomically carrying the same batch (see content.cddl), and finally 005 was
+; switched to the minimal payment credential — authorization hash plus Buyer
+; transaction signature — with both sides deterministically rebuilding the state
+; transaction locally (see payment.cddl). Only post-switch structures are
+; accepted; pre-switch v4 003/004/005 bytes, legacy aliases, and any dual-shape
+; decoding do not exist in this protocol version.
 wire-family = "bitfs.protocol.v4"

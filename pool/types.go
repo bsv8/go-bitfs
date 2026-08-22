@@ -132,25 +132,22 @@ type FundingTxDelivery struct {
 	FundingTx []byte
 }
 
-// PaymentUpdate 是 v4 协议 005 使用的付款更新传输容器。
+// PaymentUpdate 是 v4 协议 005 使用的最小付款凭证传输容器。
 //
-// 它携带费用池统一关联 ID、未签名的状态交易和独立传输的买方签名，绝不携带
-// 只有部分解锁脚本的交易。接收方应分别验证关联 ID、授权哈希、交易内容和
-// 买方签名，然后再与卖方签名合并为可接受的 PaymentState。
+// 它只携带内容授权哈希和买方对确定性重建状态交易的签名；费用池 ID 与未签名
+// 状态交易不再进入 wire。接收方先用 PaymentAuthorizationHash 取回保存的精确
+// 原始 003，再从 003、OpeningProof 和 previous PaymentState 在本地调用唯一的
+// BuildPaymentUpdate 重建同一笔未签名状态交易，验过买方签名后补签并合并。
+// 授权哈希是内容寻址键，不可解码出池 ID、金额或交易字节。
 type PaymentUpdate struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
-	// RefundTemplateTxID 是费用池统一关联 ID，即未嵌入角色签名的规范退款
-	// 模板交易 ID。它不是买方交易签名的替代物。
-	RefundTemplateTxID RefundTemplateTxID
 	// PaymentAuthorizationHash 是内容请求条款规范编码的 SHA-256 哈希，长度固定为 32 字节。
-	// 它把本次付款绑定到具体的内容授权，而不是仅绑定到交易字节。
+	// 它是本次付款授权的应用查找键，不携带任何池身份或路由信息。
 	PaymentAuthorizationHash []byte
-	// UnsignedStateTxRaw 是下一付款状态交易的未签名原始字节。
-	// 交易中不应包含任何解锁脚本或角色签名。
-	UnsignedStateTxRaw []byte
-	// BuyerTransactionSignature 是买方针对 UnsignedStateTxRaw 的 DER 签名原始字节。
-	// 该签名与交易原文分离传输，不能把它预先写回 UnsignedStateTxRaw。
+	// BuyerTransactionSignature 是买方针对双方本地确定性重建的未签名状态交易的
+	// DER 签名原始字节。该签名与交易原文分离传输，不能把它预先写回重建交易，
+	// 也不是对授权哈希的普通消息签名。
 	BuyerTransactionSignature []byte
 }
 

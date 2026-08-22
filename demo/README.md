@@ -16,7 +16,7 @@ go-bitfs SDK 是无状态的 BitFS v4 协议库：workflow 对象只持有官方
 | 002 | [`02_pool_opening`](./02_pool_opening/) | 买卖双方开启费用池 |
 | 003 | [`03_content_request`](./03_content_request/) | 买家构造批量内容授权（一个付款序号授权一组内容 hash） |
 | 004 | [`04_content_delivery`](./04_content_delivery/) | 卖家对裸授权哈希签名并原子交付整批 payload |
-| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款（一个批次只生成一个 005） |
+| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款：最小凭证 = 授权哈希 + 买家交易签名，卖家按哈希取回原始 003、本地重建交易并合并（一个批次只生成一个 005） |
 | 006 | [`06_pool_close`](./06_pool_close/) | 双方协商关闭费用池 |
 | 007 | [`07_arbitration`](./07_arbitration/) | 发生争议时由仲裁人签署付款 |
 

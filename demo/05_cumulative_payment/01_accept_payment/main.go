@@ -27,26 +27,34 @@ func main() {
 	}
 	now := time.Now().UTC()
 	debug("=== Step 005: Cumulative Payment ===")
-	debug("[buyer] AcceptDelivery verifies 004 against caller-held state, prices content, builds next unsigned state, and signs buyer payment")
+	debug("[buyer] AcceptDelivery verifies 004 against caller-held state, prices content, rebuilds the unsigned state locally, and signs the buyer payment")
 	request, delivery, deliveryState, verified, err := f.DeliverAndBuildPayment(ctx, now)
 	if err != nil {
 		fail(fmt.Errorf("buyer.AcceptDelivery: %w", err))
 	}
 	update := verified.Update
-	debug("[payment] refund tx hash (pool correlation ID): %s", hex.EncodeToString(update.RefundTemplateTxID[:]))
-	debug("[payment] authorization hash: %s", hex.EncodeToString(update.PaymentAuthorizationHash))
-	debug("[payment] unsigned state tx bytes: %d", len(update.UnsignedStateTxRaw))
+	debug("[payment] authorization hash (application lookup key): %s", hex.EncodeToString(update.PaymentAuthorizationHash))
 	debug("[payment] buyer transaction signature: %s", hex.EncodeToString(update.BuyerTransactionSignature))
-	debug("[seller] seller.AcceptPayment verifies the buyer update against the saved ContentDeliveryState and merges signatures without submitting")
-	signed, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, deliveryState, update, blockHeight)
+	debug("[payment] wire carries no pool ID and no raw transaction; both sides rebuild the exact state transaction locally")
+	// 应用先用 005 携带的授权哈希取回保存的精确原始签名 003；哈希是内容
+	// 寻址键，不可解码出池 ID、金额或交易字节。
+	debug("[app] hash lookup retrieves the exact original signed 003 for the minimal credential")
+	authorization, err := f.LookupPaymentAuthorization(update.PaymentAuthorizationHash)
+	if err != nil {
+		fail(err)
+	}
+	debug("[seller] seller.AcceptPayment re-verifies the original 003, rebuilds the same unsigned transaction via BuildPaymentUpdate, verifies the buyer signature over it, then co-signs and merges")
+	signed, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, authorization, deliveryState, update, blockHeight)
 	if err != nil {
 		fail(fmt.Errorf("seller.AcceptPayment: %w", err))
 	}
 	accepted := signed.State
-	if !bytes.Equal(update.RefundTemplateTxID[:], accepted.RefundTemplateTxID[:]) {
-		fail(fmt.Errorf("refund tx hash changed across seller acceptance"))
+	var updateAuthHash []byte
+	updateAuthHash = append(updateAuthHash, update.PaymentAuthorizationHash...)
+	if !bytes.Equal(updateAuthHash, accepted.PaymentAuthorizationHash[:]) || !bytes.Equal(updateAuthHash, deliveryState.PaymentAuthorizationHash[:]) {
+		fail(fmt.Errorf("authorization hash changed across seller acceptance"))
 	}
-	debug("[payment] refund tx hash unchanged across seller acceptance: true")
+	debug("[payment] authorization hash consistent across 003/004/005 and accepted state: true")
 	rawUpdate, err := pool.EncodePaymentUpdate(update)
 	if err != nil {
 		fail(err)

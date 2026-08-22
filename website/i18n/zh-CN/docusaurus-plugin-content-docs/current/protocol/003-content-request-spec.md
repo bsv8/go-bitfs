@@ -23,4 +23,4 @@ buyer_signature = SignMessage(buyer_key, terms_cbor)
 payment_authorization_hash = SHA-256(terms_cbor)
 ```
 
-外壳版本 `4` 不进入买方签名。条款没有内层版本字段，也不携带公钥与费率；身份与费率从绑定 `refund_template_txid` 的 OpeningProof 恢复。授权哈希作为后续 004、005、007 的 `PaymentAuthorizationHash`。当前版本不携带可协商仲裁金额，构建层始终使用 `ArbiterAmount = 0`。
+外壳版本 `4` 不进入买方签名。条款没有内层版本字段，也不携带公钥与费率；身份与费率从绑定 `refund_template_txid` 的 OpeningProof 恢复。授权哈希作为后续 004、005、007 的 `PaymentAuthorizationHash`；它是指向保存的原始签名请求的内容寻址查找键，永远无法解码出池身份、序号或金额。条款同时签入目标 `PaymentSequence` 和绝对累计卖方金额，双方随后据此重建 005 状态交易。当前版本不携带可协商仲裁金额，构建层始终使用 `ArbiterAmount = 0`。

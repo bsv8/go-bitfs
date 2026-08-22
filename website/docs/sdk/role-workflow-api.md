@@ -54,7 +54,7 @@ type RefundPresignAcceptance struct {
 // VerifiedDelivery is the composite result of AcceptDelivery.
 type VerifiedDelivery struct {
     Payloads [][]byte            // verified payload batch, in 003 hash order (local, save them)
-    Update   *pool.PaymentUpdate // the single wire update for the whole batch
+    Update   *pool.PaymentUpdate // minimal 005 credential: hash + buyer signature
 }
 
 // AcceptQuote verifies signature, terms, and expiry using system UTC read once
@@ -149,7 +149,7 @@ type PoolFundingAcceptance struct {
 }
 
 // ContentDeliveryState records the protocol context for validating the buyer's
-// 005 update for one delivery batch: the pool ID, authorization hash, target
+// 005 credential for one delivery batch: the pool ID, authorization hash, target
 // payment sequence, and absolute cumulative seller amount. It carries no
 // owner/lease/acquire/held/release/expiry semantics — serialization is the
 // caller's job.
@@ -179,10 +179,13 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *p
 // ContentDeliveryState before sending the delivery.
 func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error)
 
-// AcceptPayment verifies the 005 update against the explicit opening proof,
-// previous state, and saved ContentDeliveryState; adds the seller signature
-// and merges the complete transaction. Broadcast RawTx yourself.
-func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error)
+// AcceptPayment verifies the minimal 005 credential (authorization hash plus
+// buyer transaction signature) against the explicit original signed 003,
+// opening proof, previous state, and saved ContentDeliveryState; rebuilds the
+// unsigned state transaction locally through BuildPaymentUpdate; verifies the
+// buyer signature over that exact rebuilt transaction; adds the seller
+// signature and merges. Broadcast RawTx yourself.
+func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, authorization *bitfs.SignedContentRequest, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error)
 
 // SignImmediateClose verifies the candidate structure and protocol amount
 // boundaries against the opening and checks the buyer role signature with the
@@ -300,10 +303,14 @@ send(delivery)
 verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, request,
     delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
 for _, payload := range verified.Payloads { save(payload) } // saving is the application's responsibility
+// The minimal 005 credential carries only hash + buyer signature; index the
+// exact original 003 under the authorization hash before sending it.
+journal.IndexAuthorization(verified.Update.PaymentAuthorizationHash, request)
 send(verified.Update)
 
+authorization := journal.LoadAuthorizationByHash(verified.Update.PaymentAuthorizationHash)
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,
-    savedDeliveryState, verified.Update, blockHeight)
+    authorization, savedDeliveryState, verified.Update, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
 broadcast(signed.RawTx)
 ```

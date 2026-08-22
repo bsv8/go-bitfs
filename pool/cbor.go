@@ -55,22 +55,27 @@ func validatePoolHash32Value(value Hash32, name string) error {
 	return validatePoolHash32(value[:], name)
 }
 
-// EncodePaymentUpdate validates and encodes the 005 unsigned transaction plus
-// detached buyer signature as its five-field deterministic CBOR container,
-// led by the pool's RefundTemplateTxID correlation ID. It performs structural
+// EncodePaymentUpdate validates and encodes the minimal 005 payment
+// authorization hash plus detached buyer transaction signature as its
+// three-field deterministic CBOR container. The pool correlation ID and the
+// unsigned state transaction are not transmitted: both sides rebuild the exact
+// transaction locally from the opening proof, previous payment state, and the
+// signed 003 referenced by the authorization hash. It performs structural
 // validation, not node acceptance or signature verification.
 func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	if err := ValidatePaymentUpdate(update); err != nil {
 		return nil, err
 	}
-	return poolEnc.Marshal([]any{MajorVersion, update.RefundTemplateTxID[:], update.PaymentAuthorizationHash, update.UnsignedStateTxRaw, update.BuyerTransactionSignature})
+	return poolEnc.Marshal([]any{MajorVersion, update.PaymentAuthorizationHash, update.BuyerTransactionSignature})
 }
 
-// DecodePaymentUpdate decodes and canonicality-checks the 005 five-field payment
-// container, then validates its field shape. It does not prove pool ownership or
-// verify the buyer signature against an opening proof.
+// DecodePaymentUpdate decodes and canonicality-checks the 005 three-element
+// minimal payment container, then validates its field shape. Pre-switch v4
+// five-element containers and any other shape are rejected outright; it does
+// not prove pool ownership or verify the buyer signature against a rebuilt
+// transaction.
 func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
-	values, err := decodePoolArray(data, 5)
+	values, err := decodePoolArray(data, 3)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode payment update: %v", ErrInvalidEvidence, err)
 	}
@@ -78,16 +83,10 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	if err := poolDec.Unmarshal(values[0], &update.Version); err != nil || update.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported payment update version", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[1], &update.RefundTemplateTxID); err != nil {
+	if err := poolDec.Unmarshal(values[1], &update.PaymentAuthorizationHash); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[2], &update.PaymentAuthorizationHash); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[3], &update.UnsignedStateTxRaw); err != nil {
-		return nil, err
-	}
-	if err := poolDec.Unmarshal(values[4], &update.BuyerTransactionSignature); err != nil {
+	if err := poolDec.Unmarshal(values[2], &update.BuyerTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidatePaymentUpdate(update); err != nil {
@@ -315,10 +314,11 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	return cloneOpeningProof(proof), nil
 }
 
-// ValidatePaymentUpdate checks the 005 envelope version, 32-byte non-zero
-// RefundTemplateTxID and authorization hash, and presence of the unsigned transaction
-// and detached buyer signature. It does not parse the transaction or establish
-// that a node accepted it.
+// ValidatePaymentUpdate checks the 005 minimal envelope version, 32-byte
+// non-zero authorization hash, and presence of the detached buyer transaction
+// signature. It does not parse transactions or establish that a node accepted
+// anything; the referenced signed 003 and the rebuilt unsigned state
+// transaction are verified by the receiving workflow.
 func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update == nil {
 		return fmt.Errorf("%w: payment update is required", ErrInvalidEvidence)
@@ -326,14 +326,8 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update.Version != MajorVersion {
 		return fmt.Errorf("%w: unsupported payment update version %d", ErrInvalidEvidence, update.Version)
 	}
-	if err := validatePoolHash32Value(Hash32(update.RefundTemplateTxID), "refund_template_txid"); err != nil {
+	if err := validatePoolHash32(update.PaymentAuthorizationHash, "payment_authorization_hash"); err != nil {
 		return err
-	}
-	if len(update.PaymentAuthorizationHash) != sha256.Size {
-		return fmt.Errorf("%w: payment_authorization_hash must be 32 bytes", ErrInvalidEvidence)
-	}
-	if len(update.UnsignedStateTxRaw) == 0 {
-		return fmt.Errorf("%w: unsigned_state_tx_raw is required", ErrInvalidEvidence)
 	}
 	if len(update.BuyerTransactionSignature) == 0 {
 		return fmt.Errorf("%w: buyer transaction signature is required", ErrInvalidEvidence)
@@ -429,7 +423,7 @@ func clonePaymentUpdate(update *PaymentUpdate) *PaymentUpdate {
 	if update == nil {
 		return nil
 	}
-	return &PaymentUpdate{Version: update.Version, RefundTemplateTxID: update.RefundTemplateTxID, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), UnsignedStateTxRaw: append([]byte(nil), update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
+	return &PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
 }
 
 func cloneRefundPresignRequest(request *RefundPresignRequest) *RefundPresignRequest {

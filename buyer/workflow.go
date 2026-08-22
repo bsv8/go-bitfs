@@ -370,12 +370,13 @@ func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.
 
 // VerifiedDelivery is the composite result of AcceptDelivery: Payloads holds
 // the verified content batch in authorized order for the application to
-// persist, and Update is the single signed 005 wire update for the whole batch.
+// persist, and Update is the single signed minimal 005 payment credential
+// (authorization hash plus buyer transaction signature) for the whole batch.
 type VerifiedDelivery struct {
 	// Payloads contains the verified payload bytes, ordered exactly like the
 	// hashes committed in the referenced 003.
 	Payloads [][]byte
-	// Update is the signed cumulative payment update (wire message).
+	// Update is the signed minimal cumulative payment credential (wire message).
 	Update *pool.PaymentUpdate
 }
 
@@ -505,17 +506,20 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.Signe
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
 	}
+	// 本地立即用固定 verifier 回验签名：签名对象是确定性重建的精确未签名
+	// 状态交易，不是授权哈希或任何 wire bytes。
 	if err := engine.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer payment: %w", err)
 	}
 	if unsigned == nil || unsigned.RefundTemplateTxID != refundTemplateTxID || unsigned.PaymentSequence <= previous.PaymentSequence {
 		return nil, fmt.Errorf("%w: signed payment state is stale", bitfs.ErrStalePaymentSequence)
 	}
+	// 005 只发送最小凭证：授权哈希 + 买方交易签名。重建出的 unsigned 交易
+	// 仅在本次调用内用于签名与自验，不进入 wire；应用如需审计可按自身策略
+	// 保存，但协议容器不再携带池 ID 或交易原文。
 	update := &pool.PaymentUpdate{
 		Version:                   pool.MajorVersion,
-		RefundTemplateTxID:        refundTemplateTxID,
 		PaymentAuthorizationHash:  append([]byte(nil), requestHash[:]...),
-		UnsignedStateTxRaw:        append([]byte(nil), unsigned.RawTx...),
 		BuyerTransactionSignature: append([]byte(nil), buyerSig...),
 	}
 	verifiedPayloads := make([][]byte, len(payloads))

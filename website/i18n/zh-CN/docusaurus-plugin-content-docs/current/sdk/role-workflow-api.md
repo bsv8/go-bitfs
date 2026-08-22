@@ -77,7 +77,7 @@ func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.
 // AcceptDelivery 按授权哈希路由到原始 003 后验证整个 004：重算并比较授权哈希、
 // 从 OpeningProof 重derive 池绑定、验证卖方对裸 32 字节哈希的签名，
 // 再逐项校验 payload 数量/顺序/哈希/归属/长度并重算聚合价格与目标序号，
-// 最后构造唯一的 005。
+// 最后本地构造并签署状态交易，但只发送最小 005 凭证（授权哈希 + 买方签名）。
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, input ContentDeliveryInput) (*VerifiedDelivery, error)
 
 // BuildImmediateClose 从调用方选定的基准状态和调用方选择的目标卖方金额构造
@@ -136,7 +136,7 @@ type PoolFundingAcceptance struct {
     FundingTx      []byte             // 通过你自己的节点适配器广播
 }
 
-// ContentDeliveryState 记录验证该交付批次的买方 005 更新所需的协议上下文：
+// ContentDeliveryState 记录验证该交付批次的买方 005 凭证所需的协议上下文：
 // 费用池 ID、授权哈希、目标序号和绝对累计卖方金额。
 // 它不携带 owner/lease/acquire/held/release/expiry 语义——串行化由调用方负责。
 type ContentDeliveryState struct {
@@ -163,9 +163,11 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *p
 // 发送交付前先保存返回的 ContentDeliveryState。
 func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error)
 
-// AcceptPayment 用显式开池证据、上一状态和保存的 ContentDeliveryState 验证 005 更新；
-// 添加卖方签名并合并完整交易。RawTx 由你自己广播。
-func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error)
+// AcceptPayment 用显式传入的原始签名 003、开池证据、上一状态和保存的
+// ContentDeliveryState 验证最小 005 凭证（授权哈希 + 买方交易签名）；
+// 通过 BuildPaymentUpdate 本地重建未签名状态交易，对精确重建交易验证买方签名，
+// 补上卖方签名并合并完整交易。RawTx 由你自己广播。
+func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, authorization *bitfs.SignedContentRequest, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error)
 
 // SignImmediateClose 针对开池证据验证候选结构与协议金额边界，用固定验证器检查
 // 买方角色签名，然后添加卖方签名并合并，但不广播。
@@ -276,10 +278,13 @@ send(delivery)
 verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, request,
     delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
 for _, payload := range verified.Payloads { save(payload) } // 保存是应用的职责
+// 最小 005 凭证只携带哈希 + 买方签名；发送前先把原始 003 按授权哈希建立索引。
+journal.IndexAuthorization(verified.Update.PaymentAuthorizationHash, request)
 send(verified.Update)
 
+authorization := journal.LoadAuthorizationByHash(verified.Update.PaymentAuthorizationHash)
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,
-    savedDeliveryState, verified.Update, blockHeight)
+    authorization, savedDeliveryState, verified.Update, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
 broadcast(signed.RawTx)
 ```

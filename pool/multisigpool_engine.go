@@ -696,6 +696,14 @@ func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input 
 
 // BuildPaymentUpdate constructs the next unsigned pool state transaction from the previous accepted payment
 // and the requested amounts.
+//
+// This is the protocol's single transaction-construction core: buyer and
+// seller must both call it with the same explicit inputs (opening proof,
+// previous state, target sequence, absolute seller amount) so both sides
+// deterministically rebuild byte-identical unsigned transactions. That
+// determinism is what lets 005 transmit only the authorization hash plus the
+// buyer signature; no role-specific builder, raw patching, or wire-supplied
+// transaction exists.
 func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input PaymentUpdateInput) (*UnsignedPayment, error) {
 	if engine == nil || input.Opening == nil || input.Previous == nil {
 		return nil, invalid("opening proof and previous payment are required")

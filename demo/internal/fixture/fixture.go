@@ -30,6 +30,11 @@ import (
 // Fixture 显式保存从报价到开池完成所需的全部对象和中间结果。
 // 它扮演调用方应用的本地状态存储：后续 003、004、005、006、007 演示把这些
 // 字段逐个显式传回 workflow，而不是依赖任何 SDK 内部加载行为。
+//
+// 自 005 最小付款凭证硬切换起，fixture 同时充当授权哈希索引：按
+// PaymentAuthorizationHash 保存精确的原始签名 003，供 Seller 在收到最小 005
+// 后取回原始授权并本地重建状态交易。哈希是内容寻址键，不可解码出池 ID 或
+// 金额；找不到原始 003 就不能验收付款。
 type Fixture struct {
 	Buyer         *buyer.Workflow
 	Seller        *seller.Workflow
@@ -46,6 +51,10 @@ type Fixture struct {
 	Opening       *pool.OpeningProof
 	Reference     pool.Reference
 	LatestPayment *pool.PaymentState
+
+	// authorizations 是应用侧的授权哈希索引：SHA-256(003 TermsCBOR) -> 精确
+	// 原始签名 003。真实应用应使用数据库唯一索引并持久化该映射。
+	authorizations map[bitfs.Hash32]*bitfs.SignedContentRequest
 }
 
 // New 创建一套已经完成 002 开池的显式状态。
@@ -140,21 +149,22 @@ func New(ctx context.Context) (*Fixture, error) {
 		return nil, fmt.Errorf("accept fixture funding: %w", err)
 	}
 	return &Fixture{
-		Buyer:         buyerWorkflow,
-		Seller:        sellerWorkflow,
-		Arbiter:       arbiterWorkflow,
-		BuyerKey:      buyerKey,
-		SellerKey:     sellerKey,
-		ArbiterKey:    arbiterKey,
-		Quote:         quote,
-		QuoteHash:     bitfs.Hash32(quoteHash),
-		Seed:          seed,
-		SeedHash:      seedHash,
-		FileBytes:     fileBytes,
-		FundingTx:     funding,
-		Opening:       fundingAcceptance.Opening,
-		Reference:     acceptance.Reference,
-		LatestPayment: fundingAcceptance.InitialPayment,
+		Buyer:          buyerWorkflow,
+		Seller:         sellerWorkflow,
+		Arbiter:        arbiterWorkflow,
+		BuyerKey:       buyerKey,
+		SellerKey:      sellerKey,
+		ArbiterKey:     arbiterKey,
+		Quote:          quote,
+		QuoteHash:      bitfs.Hash32(quoteHash),
+		Seed:           seed,
+		SeedHash:       seedHash,
+		FileBytes:      fileBytes,
+		FundingTx:      funding,
+		Opening:        fundingAcceptance.Opening,
+		Reference:      acceptance.Reference,
+		LatestPayment:  fundingAcceptance.InitialPayment,
+		authorizations: make(map[bitfs.Hash32]*bitfs.SignedContentRequest),
 	}, nil
 }
 
@@ -220,17 +230,39 @@ func (f *Fixture) BuildBlockBatchRequest(ctx context.Context, at time.Time, coun
 }
 
 // deliver 串起一次完整的批量内容交付：卖方构造交付并保存返回的
-// ContentDeliveryState，买方验收并构造整个批次唯一的 PaymentUpdate。
+// ContentDeliveryState，买方验收并构造整个批次唯一的最小 005 付款凭证。
+// 应用在生成 004 的同时把原始签名 003 存入授权哈希索引。
 func (f *Fixture) deliver(ctx context.Context, request *bitfs.SignedContentRequest, payloads [][]byte) (*bitfs.SignedContentDelivery, *seller.ContentDeliveryState, *buyer.VerifiedDelivery, error) {
 	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, seller.ContentDeliveryInput{ContentPayloads: payloads})
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	f.authorizations[authHash] = bitfs.CloneSignedContentRequest(request)
 	verified, err := f.Buyer.AcceptDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, delivery, buyer.ContentDeliveryInput{})
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return delivery, deliveryState, verified, nil
+}
+
+// LookupPaymentAuthorization 演示应用的授权哈希查找：用最小 005 携带的
+// PaymentAuthorizationHash 取回精确的原始签名 003。哈希不可解码，找不到就
+// 必须拒绝或请求对端重发，不能扫描池或按连接猜池。
+func (f *Fixture) LookupPaymentAuthorization(paymentAuthorizationHash []byte) (*bitfs.SignedContentRequest, error) {
+	var key bitfs.Hash32
+	if len(paymentAuthorizationHash) != len(key) {
+		return nil, fmt.Errorf("authorization hash must be %d bytes", len(key))
+	}
+	copy(key[:], paymentAuthorizationHash)
+	request, ok := f.authorizations[key]
+	if !ok || request == nil {
+		return nil, fmt.Errorf("no signed content request indexed under authorization hash %x", paymentAuthorizationHash)
+	}
+	return request, nil
 }
 
 // DeliverAndBuildPayment 串起一次完整的内容交付和支付更新：买方请求 seed、

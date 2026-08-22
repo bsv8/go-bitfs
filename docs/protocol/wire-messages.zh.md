@@ -81,7 +81,7 @@ sequenceDiagram
     loop 每个内容块
         B->>S: Kind 5  SignedContentRequest（付款授权）
         S->>B: Kind 6  SignedContentDelivery（内容+卖方签名）
-        B->>S: Kind 7  PaymentUpdate（下一状态+买方签名）
+        B->>S: Kind 7  PaymentUpdate（授权哈希+买方签名，交易双方本地重建）
     end
 
     Note over B,S,A: 阶段四：仲裁（007，仅纠纷时）
@@ -321,30 +321,37 @@ Go 结构体 `SignedContentDelivery`：
 
 ### 3.7 Kind 7 · 累计付款更新（005）— 买方 → 卖方
 
-编码（`EncodePaymentUpdate`，5 元数组）：
+编码（`EncodePaymentUpdate`，3 元最小凭证数组）：
 
 ```
-[4, refund_template_txid, payment_authorization_hash, unsigned_state_tx, buyer_signature]
+[4, payment_authorization_hash, buyer_transaction_signature]
 ```
+
+切换前的 v4 五元容器（含 `refund_template_txid` 与 `unsigned_state_tx_raw`）一律严格拒绝，不存在按长度选择的旧 decoder。
 
 Go 结构体 `PaymentUpdate`：
 
 | 字段 | 含义 |
 |---|---|
 | `Version` | 主版本 4 |
-| `RefundTemplateTxID` | 池关联 ID；不是买方签名的替代物 |
-| `PaymentAuthorizationHash` | 绑定的 003 授权哈希——把付款绑到内容，而不只是绑到交易字节 |
-| `UnsignedStateTxRaw` | 下一笔付款状态交易的**未签名**原始字节（三输出：买方/卖方/仲裁人分配） |
-| `BuyerTransactionSignature` | 买方针对该交易 sighash 的 DER 签名，与交易分离传输 |
+| `PaymentAuthorizationHash` | 绑定的 003 授权哈希——应用查找键：接收方先用它取回保存的精确原始 003；哈希不可解码出池 ID、金额或交易 |
+| `BuyerTransactionSignature` | 买方对双方本地确定性重建的未签名状态交易的 DER 签名（重建输入：OpeningProof + previous PaymentState + 003 目标序号/金额），与交易分离传输 |
 
 **合理性分析**
 
-- ✅ "未签名交易 + 分离签名"是全程铁律：任何时刻线上都不存在"半签名交易"，
-  接收方分别验证关联 ID、授权哈希、交易内容和签名后再合并，杜绝脚本拼接攻击面。
-- ✅ 序号与金额不在信封里重复出现——它们编码在状态交易内部，由引擎解析并校验
-  （恰好 +1、卖方累计额与 003 承诺一致、容量检查 `CheckPaymentCapacity`）。
-- ✅ 卖方 `AcceptPayment` 的次序是"先验签、再自己签名、合并完整交易后返回"，
+- ✅ "交易本地重建 + 分离签名"是全程铁律：线上不传输池 ID、未签名交易或半签名交易。
+  双方都调用唯一的 `BuildPaymentUpdate` 从相同显式输入确定性重建同一笔状态交易；
+  只有对 Seller 重建出的精确交易验签成功，005 才成立。授权哈希是内容寻址键，
+  不是池 ID，也不是访问令牌；找不到原始 003 就不能验收。
+- ✅ 序号与卖方累计金额以 Buyer 已签的 003 为业务授权真值；输入 outpoint、三输出
+  （买方/卖方/仲裁人分配）、费用和 locktime 以 OpeningProof、previous state 与
+  MultisigPool v4 构造规则为交易真值。005 不携带金额，也不存在第二份候选交易表示。
+- ✅ 卖方 `AcceptPayment` 的次序是"验原始 003 → 交叉核对 DeliveryState/opening/
+  previous → 本地重建 → 验买方签名 → 自己补签 → 合并完整交易后返回"，
   广播与记录结果是调用方应用的职责；SDK 不提交节点，也不维护"本地领先于链"之类的运行状态。
+- ⚠️ unsigned payment state ≠ RefundTemplate：二者可花费同一费用池来源，但不是
+  同一笔交易，不能互换或复用签名。007 面向没有 Seller 本地数据库的 Arbiter，
+  继续携带自足的候选 raw，不套用 005 最小信封。
 
 ---
 
@@ -424,7 +431,7 @@ Go 结构体 `ArbitrationResponse`：
 ```
 规范未签名 RefundTx（预签退款交易字节）
    └── Transaction.TxID().CloneBytes() ──► RefundTemplateTxID = 资金池统一关联 ID
-                       ├── 0202/0203/005/007 报文的路由键
+                       ├── 0202/0203/007 报文的路由键（005 改由授权哈希路由，应用先查回原始 003 再取池 ID）
                        ├── 双方本地开池证据记录（应用数据库）的主键
                        ├── 买方本地 BuyerOpeningState（应用私有状态）的键
                        └── 付款状态链（PaymentState.RefundTemplateTxID）的归属标识
@@ -451,7 +458,7 @@ Go 结构体 `ArbitrationResponse`：
 | 退款交易 | 买方 + 卖方 | 退款交易 sighash（各出一份，合入解锁脚本） |
 | 003 条款 | 买方 | TermsCBOR |
 | 004 授权哈希 | 卖方 | 精确 32 字节 PaymentAuthorizationHash（裸消息签名，不含 payload） |
-| 005 状态交易 | 买方（线上）→ 卖方合并 | 交易 sighash |
+| 005 状态交易 | 买方（线上）→ 卖方合并 | 本地重建交易的 sighash（wire 只传哈希+签名） |
 | 007 候选交易 | 卖方（线上）→ 仲裁方追加 | 同一交易 sighash |
 
 ---
@@ -481,7 +488,7 @@ Go 结构体 `ArbitrationResponse`：
 | 4 | 0203 资金交付 | ✅ 合理 | 双方退款签名齐备后才公开资金交易 |
 | 5 | 003 内容请求 | ✅ 合理 | 单一目标序号 + 绝对累计金额；身份/费率由 OpeningProof 唯一确定；一个序号授权一批内容 |
 | 6 | 004 内容交付 | ✅ 合理 | 裸授权哈希签名 + payload 间接绑定；批次原子验收（注意必须逐项校验 hash） |
-| 7 | 005 付款更新 | ✅ 合理 | 未签名交易 + 分离签名；授权哈希绑定内容 |
+| 7 | 005 付款更新 | ✅ 合理 | 最小凭证：授权哈希 + 买方对本地重建交易的分离签名；哈希仅作查找键不可解码 |
 | 8 | 007 仲裁请求 | ✅ 合理 | 证据自足；仲裁人只签名不构造；从授权而非付款构建（强制） |
 | 9 | 007 仲裁响应 | ✅ 合理 | 哈希回执将信任降为字节比较；拒绝即无响应 |
 

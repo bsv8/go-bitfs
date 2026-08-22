@@ -213,8 +213,10 @@ func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 	if len(verified.Payloads) != 1 || !bytes.Equal(verified.Payloads[0], f.seed) {
 		t.Fatal("verified payload mismatch")
 	}
-	// 005: seller merges signatures over the buyer update.
-	signedPayment, err := f.seller.AcceptPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, deliveryState, verified.Update, f.facts())
+	// 005: the application routes the minimal credential by its authorization
+	// hash back to the exact original signed 003, then the seller merges
+	// signatures over the locally rebuilt transaction.
+	signedPayment, err := f.seller.AcceptPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, request, deliveryState, verified.Update, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,9 +365,100 @@ func TestStaleSequenceAndTamperedEvidenceAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := &pool.PaymentUpdate{Version: verified.Update.Version, RefundTemplateTxID: verified.Update.RefundTemplateTxID, PaymentAuthorizationHash: append([]byte(nil), verified.Update.PaymentAuthorizationHash...), UnsignedStateTxRaw: append([]byte(nil), verified.Update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), verified.Update.BuyerTransactionSignature...)}
+	tampered := &pool.PaymentUpdate{Version: verified.Update.Version, PaymentAuthorizationHash: append([]byte(nil), verified.Update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), verified.Update.BuyerTransactionSignature...)}
 	tampered.PaymentAuthorizationHash[0] ^= 0xff
-	if _, err := f.seller.AcceptPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, deliveryState, tampered, f.facts()); err == nil {
+	if _, err := f.seller.AcceptPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, request, deliveryState, tampered, f.facts()); err == nil {
 		t.Fatal("tampered authorization hash was accepted")
 	}
+}
+
+// TestConsecutiveCumulativePaymentRoundsShareConfirmedState runs two full
+// 003→004→005 rounds. After each round the application verifies the complete
+// dual-signed payment (the "node confirmed" candidate) and saves the SAME
+// confirmed state on both the buyer and seller sides; the second round must
+// consume the first round's state so sequence and cumulative amount keep
+// advancing. Using a stale buyer-side previous in round two must fail.
+func TestConsecutiveCumulativePaymentRoundsShareConfirmedState(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+	opening := f.completed.Opening
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opening.BuyerPubKey, SellerPubKey: opening.SellerPubKey, ArbiterPubKey: opening.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input := func(deadline time.Time) buyer.ContentRequestInput {
+		return buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(deadline.Add(30 * time.Minute).Unix())}
+	}
+	runRound := func(previous *pool.PaymentState, deadline time.Time) (*pool.SignedPayment, *bitfs.SignedContentRequest) {
+		request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, opening, previous, input(deadline))
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivery, deliveryState, err := f.seller.BuildContentDelivery(f.ctx, f.quote, opening, previous, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		verified, err := f.buyer.AcceptDelivery(f.ctx, f.quote, opening, previous, request, delivery, buyer.ContentDeliveryInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		signedPayment, err := f.seller.AcceptPayment(f.ctx, opening, previous, request, deliveryState, verified.Update, f.facts())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signedPayment, request
+	}
+
+	// Round one.
+	confirmed := f.completed.InitialPayment
+	signed1, _ := runRound(confirmed, f.now)
+	if err := engine.VerifyAcceptedPayment(&signed1.State, opening); err != nil {
+		t.Fatalf("round-one confirmed payment invalid: %v", err)
+	}
+	// Node policy accepted the candidate: BOTH roles now persist the same
+	// complete dual-signed state as their latest.
+	buyerLatest := &signed1.State
+	sellerLatest := &signed1.State
+	if buyerLatest.PaymentSequence != sellerLatest.PaymentSequence || buyerLatest.SellerAmountSat != sellerLatest.SellerAmountSat {
+		t.Fatal("buyer and seller persisted different confirmed states")
+	}
+	if buyerLatest.PaymentSequence != confirmed.PaymentSequence+1 || buyerLatest.SellerAmountSat != 100 {
+		t.Fatalf("round-one state = seq %d amount %d, want seq %d amount 100", buyerLatest.PaymentSequence, buyerLatest.SellerAmountSat, confirmed.PaymentSequence+1)
+	}
+
+	// Round two must consume round one's confirmed state.
+	signed2, _ := runRound(buyerLatest, f.now.Add(time.Minute))
+	if err := engine.VerifyAcceptedPayment(&signed2.State, opening); err != nil {
+		t.Fatalf("round-two confirmed payment invalid: %v", err)
+	}
+	if signed2.State.PaymentSequence != buyerLatest.PaymentSequence+1 {
+		t.Fatalf("round-two sequence = %d, want %d", signed2.State.PaymentSequence, buyerLatest.PaymentSequence+1)
+	}
+	if signed2.State.SellerAmountSat != buyerLatest.SellerAmountSat+100 {
+		t.Fatalf("round-two cumulative amount = %d, want %d", signed2.State.SellerAmountSat, buyerLatest.SellerAmountSat+100)
+	}
+	if !bytes.Equal(signed2.RawTx, signed2.State.RawTx) {
+		t.Fatal("round-two merged transaction does not match its parsed state")
+	}
+	// Round two's confirmed state replaces the shared record on both sides.
+	buyerLatest = &signed2.State
+	sellerLatest = &signed2.State
+
+	// A buyer whose journal still holds the round-one previous cannot start
+	// the next round against the advanced seller state: the request it signs
+	// targets an already-consumed sequence and must be refused.
+	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, opening, sellerLatest, mustStaleRoundRequest(t, f, opening, &signed1.State), seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err == nil {
+		t.Fatal("stale previous state was accepted for the next round's delivery")
+	}
+}
+
+func mustStaleRoundRequest(t *testing.T, f *protocolFixture, opening *pool.OpeningProof, stale *pool.PaymentState) *bitfs.SignedContentRequest {
+	t.Helper()
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, opening, stale, input)
+	if err != nil {
+		t.Fatalf("build stale next-round request: %v", err)
+	}
+	return request
 }

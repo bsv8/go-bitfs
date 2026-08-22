@@ -236,21 +236,81 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Payment amount must match the saved delivery context exactly.
-	tamperedUpdate := &pool.PaymentUpdate{Version: verified.Update.Version, RefundTemplateTxID: verified.Update.RefundTemplateTxID, PaymentAuthorizationHash: verified.Update.PaymentAuthorizationHash, UnsignedStateTxRaw: append([]byte(nil), verified.Update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), verified.Update.BuyerTransactionSignature...)}
-	wrongState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat + 1}
-	if _, err := f.Seller.AcceptPayment(ctx, opened.Opening, opened.InitialPayment, wrongState, tamperedUpdate, 900000); err == nil {
-		t.Fatal("payment amount did not have to match the delivery state")
+	update := verified.Update
+	// Minimal 005 carries only the authorization hash and buyer signature.
+	if len(update.PaymentAuthorizationHash) != 32 || len(update.BuyerTransactionSignature) == 0 {
+		t.Fatal("minimal 005 must carry a 32-byte hash and a non-empty buyer signature")
 	}
-	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence - 1, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
-	if _, err := f.Seller.AcceptPayment(ctx, opened.Opening, opened.InitialPayment, staleState, tamperedUpdate, 900000); err == nil {
-		t.Fatal("stale base sequence was accepted")
-	}
-	signed, err := f.Seller.AcceptPayment(ctx, opened.Opening, opened.InitialPayment, deliveryState, tamperedUpdate, 900000)
+	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !bytes.Equal(update.PaymentAuthorizationHash, authHash[:]) {
+		t.Fatal("005 authorization hash does not match SHA-256 of the signed 003 terms")
+	}
+
+	accept := func(authorization *bitfs.SignedContentRequest, previous *pool.PaymentState, state *ContentDeliveryState, candidate *pool.PaymentUpdate) (*pool.SignedPayment, error) {
+		return f.Seller.AcceptPayment(ctx, opened.Opening, previous, authorization, state, candidate, 900000)
+	}
+
+	// A missing original 003 can never be accepted: the SDK does not scan
+	// pools or guess context from a bare hash.
+	if _, err := accept(nil, opened.InitialPayment, deliveryState, update); err == nil {
+		t.Fatal("missing signed content request was accepted")
+	}
+	// An authorization hashing to something else is the wrong reference.
+	otherInput := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(20 * time.Minute).Unix())}
+	otherRequest, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, otherInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accept(otherRequest, opened.InitialPayment, deliveryState, update); err == nil {
+		t.Fatal("authorization hash mismatch was accepted")
+	}
+	// A previous state that only fills the field shell must be rejected.
+	if _, err := accept(request, &pool.PaymentState{RefundTemplateTxID: opened.InitialPayment.RefundTemplateTxID, PaymentSequence: opened.InitialPayment.PaymentSequence, SellerAmountSat: opened.InitialPayment.SellerAmountSat}, deliveryState, update); err == nil {
+		t.Fatal("shell-only previous state was accepted")
+	}
+	// Delivery state targets must match the original 003 exactly.
+	wrongAmountState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat + 1}
+	if _, err := accept(request, opened.InitialPayment, wrongAmountState, update); err == nil {
+		t.Fatal("payment amount did not have to match the delivery state and 003")
+	}
+	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence - 1, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
+	if _, err := accept(request, opened.InitialPayment, staleState, update); err == nil {
+		t.Fatal("stale base sequence was accepted")
+	}
+	wrongHashState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: pool.Hash32(bytes.Repeat([]byte{9}, 32)), PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
+	if _, err := accept(request, opened.InitialPayment, wrongHashState, update); err == nil {
+		t.Fatal("delivery state hash mismatch was accepted")
+	}
+	// A buyer signature that is valid for a different transaction (here the
+	// immediate-close candidate) must fail against the locally rebuilt
+	// forward-payment transaction.
 	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opened.Opening.BuyerPubKey, SellerPubKey: opened.Opening.SellerPubKey, ArbiterPubKey: opened.Opening.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeCandidate, closeSig, err := f.Buyer.BuildImmediateClose(ctx, opened.Opening, opened.InitialPayment, opened.InitialPayment.SellerAmountSat, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.VerifyBuyerPayment(closeCandidate, closeSig, opened.Opening); err != nil {
+		t.Fatalf("close signature fixture invalid: %v", err)
+	}
+	mismatchedSignature := &pool.PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), closeSig...)}
+	if _, err := accept(request, opened.InitialPayment, deliveryState, mismatchedSignature); err == nil {
+		t.Fatal("buyer signature over another transaction was accepted for the rebuilt state")
+	}
+	// Tampering with the wire hash breaks the binding to the supplied 003.
+	tamperedHash := &pool.PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
+	tamperedHash.PaymentAuthorizationHash[0] ^= 0xff
+	if _, err := accept(request, opened.InitialPayment, deliveryState, tamperedHash); err == nil {
+		t.Fatal("tampered authorization hash was accepted")
+	}
+	// Deep-copy contract: mutating caller inputs after acceptance cannot
+	// change the returned signed payment.
+	signed, err := accept(request, opened.InitialPayment, deliveryState, update)
 	if err != nil {
 		t.Fatal(err)
 	}

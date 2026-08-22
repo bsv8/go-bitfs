@@ -42,7 +42,11 @@ const (
 	// ContentDelivery carries the signed content payload.
 	// Direction: seller -> buyer.
 	ContentDelivery Kind = 6
-	// CumulativePayment carries a cumulative payment update.
+	// CumulativePayment carries a minimal cumulative payment credential: the
+	// payment authorization hash plus the buyer transaction signature over
+	// the locally rebuilt state transaction. The receiver routes it by the
+	// authorization hash to the exact saved signed content request; no pool
+	// ID or raw transaction travels on the wire.
 	// Direction: buyer -> seller.
 	CumulativePayment Kind = 7
 	// ArbitrationRequest carries evidence for arbitration.
@@ -56,7 +60,9 @@ const (
 // Packet carries a transport-selected Kind and the exact canonical CBOR bytes
 // produced by the corresponding protocol encoder. It adds no envelope and no
 // session semantics; pool instances are correlated by RefundTemplateTxID where the
-// message defines that field, while 0201 derives it from RefundTx.
+// message defines that field, while 0201 derives it from RefundTx and the
+// minimal 005 credential is routed by its payment authorization hash through
+// the application's lookup index.
 type Packet struct {
 	Kind Kind
 	CBOR []byte

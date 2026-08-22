@@ -9,6 +9,13 @@
 // evidence, and local role state that the application must persist itself.
 //
 // This package is not a wallet, database client, node client, or concurrency
-// coordinator. Applications own persistence, serialization, retries, routing
-// by RefundTemplateTxID, authorization, and recovery from failures.
+// coordinator. Applications own persistence, serialization, retries, routing,
+// authorization, and recovery from failures.
+//
+// The 005 payment credential produced by AcceptDelivery is minimal: the
+// payment authorization hash (an application lookup key into the saved
+// original signed 003) plus the buyer transaction signature over the exact
+// unsigned state transaction both sides rebuild locally. The wire never
+// carries the pool correlation ID or the raw transaction; hash-bound does not
+// mean hash-decodable.
 package buyer

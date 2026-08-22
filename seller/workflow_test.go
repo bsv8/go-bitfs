@@ -215,7 +215,7 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.Seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
 	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
@@ -225,10 +225,10 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := wrongSeller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{Content: append([]byte(nil), f.Seed...)}); err == nil {
+	if _, _, err := wrongSeller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}}); err == nil {
 		t.Fatal("wrong seller signer delivered content")
 	}
-	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{Content: append([]byte(nil), f.Seed...)})
+	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,11 +238,11 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	}
 	// Payment amount must match the saved delivery context exactly.
 	tamperedUpdate := &pool.PaymentUpdate{Version: verified.Update.Version, RefundTemplateTxID: verified.Update.RefundTemplateTxID, PaymentAuthorizationHash: verified.Update.PaymentAuthorizationHash, UnsignedStateTxRaw: append([]byte(nil), verified.Update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), verified.Update.BuyerTransactionSignature...)}
-	wrongState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, ContentRequestHash: deliveryState.ContentRequestHash, BasePaymentSequence: deliveryState.BasePaymentSequence, BaseSellerAmountSat: deliveryState.BaseSellerAmountSat, ExpectedSellerAmountSat: deliveryState.ExpectedSellerAmountSat + 1}
+	wrongState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat + 1}
 	if _, err := f.Seller.AcceptPayment(ctx, opened.Opening, opened.InitialPayment, wrongState, tamperedUpdate, 900000); err == nil {
 		t.Fatal("payment amount did not have to match the delivery state")
 	}
-	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, ContentRequestHash: deliveryState.ContentRequestHash, BasePaymentSequence: deliveryState.BasePaymentSequence - 1, BaseSellerAmountSat: deliveryState.BaseSellerAmountSat, ExpectedSellerAmountSat: deliveryState.ExpectedSellerAmountSat}
+	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence - 1, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
 	if _, err := f.Seller.AcceptPayment(ctx, opened.Opening, opened.InitialPayment, staleState, tamperedUpdate, 900000); err == nil {
 		t.Fatal("stale base sequence was accepted")
 	}
@@ -258,8 +258,11 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	if err := engine.VerifyAcceptedPayment(latest, opened.Opening); err != nil {
 		t.Fatalf("merged accepted state invalid: %v", err)
 	}
-	if latest.SellerAmountSat != opened.InitialPayment.SellerAmountSat+deliveryState.ExpectedSellerAmountSat {
-		t.Fatalf("accepted amount %d != expected %d", latest.SellerAmountSat, opened.InitialPayment.SellerAmountSat+deliveryState.ExpectedSellerAmountSat)
+	if latest.SellerAmountSat != deliveryState.SellerAmountAfterSat {
+		t.Fatalf("accepted amount %d != authorized absolute amount %d", latest.SellerAmountSat, deliveryState.SellerAmountAfterSat)
+	}
+	if latest.PaymentSequence != deliveryState.PaymentSequence {
+		t.Fatalf("accepted sequence %d != target %d", latest.PaymentSequence, deliveryState.PaymentSequence)
 	}
 
 	// Immediate close from explicit latest state.
@@ -286,12 +289,12 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.Seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
 	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{Content: append([]byte(nil), f.Seed...)})
+	_, _, err = f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}

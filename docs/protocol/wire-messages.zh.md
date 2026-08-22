@@ -144,8 +144,8 @@ Go 结构体 `SignedFileQuote` / `FileQuoteTerms`（bitfs/messages.go）：
 - ✅ 报价绑定唯一买方 + 过期时间 + 内容承诺（SeedHash），防止转售旧报价和无限期占单。
 - ✅ `RecommendedFilename` 排除在签名外是正确的取舍：它是展示元数据而非经济事实；
   配合 sanitize 函数消除路径穿越风险。
-- ✅ 仲裁人白名单放在报价里，使买方后续的仲裁人选择（003 的 `SelectedArbiterPubkey`）
-  有卖方背书的边界，防止买方挑一个与卖方有隙的仲裁人。
+- ✅ 仲裁人白名单放在报价里，使开池时仲裁人角色的选择有卖方背书的边界，
+  防止买方挑一个与卖方有隙的仲裁人。
 - ⚠️ 注意版本号体系：报价条款独立用版本 1，其余报文用主版本 4。这是有意为之
   （报价凭据独立演进），阅读代码时不要混淆。
 
@@ -246,78 +246,76 @@ Go 结构体 `FundingTxDelivery`：
 [4, terms_cbor, buyer_signature]
 ```
 
-内层条款（`EncodeContentRequestTerms`，13 元数组）：
+内层条款（`EncodeContentRequestTerms`，无内层版本的 6 元数组）：
 
 ```
-[4, quote_terms_hash, refund_template_txid, base_payment_sequence, payment_sequence_after,
- seller_amount_after_sat, miner_fee_rate_sat_per_kb,
- buyer_pubkey, seller_pubkey, selected_arbiter_pubkey,
- content_type, content_hash, delivery_deadline_unix]
+[quote_terms_hash, refund_template_txid, payment_sequence,
+ seller_amount_after_sat, content_hashes_cbor, delivery_deadline_unix]
 ```
+
+其中 `content_hashes_cbor` 是先对有序 hash 数组独立执行确定性 CBOR 编码、再作为 `bstr` 放入父数组的子文档（1–64 个不重复的 32 字节 hash）。
 
 Go 结构体 `ContentRequestTerms` / `SignedContentRequest`：
 
 | 字段 | 含义 |
 |---|---|
 | `TermsCBOR` | 条款规范字节，买方签名的直接对象；其 SHA-256 即 `PaymentAuthorizationHash` |
-| `BuyerSignature` | 买方对条款的 DER 签名 |
-| `QuoteTermsHash` | 引用的 001 报价条款哈希，把本次购买锚定到具体报价 |
-| `RefundTemplateTxID` | 所在资金池的关联 ID |
-| `BasePaymentSequence` | 发起请求时已接受状态的付款序号 |
-| `PaymentSequenceAfter` | 本次付款的目标序号，**必须等于 base + 1**（强校验） |
-| `SellerAmountAfterSat` | 付款后卖方累计应得金额（聪），即本次内容的价格承诺 |
-| `MinerFeeRateSatPerKB` | 必须与开池费率一致 |
-| `BuyerPubkey` / `SellerPubkey` | 必须与报价及开池证据中的角色一致 |
-| `SelectedArbiterPubkey` | 买方选定的仲裁人，必须在报价白名单内 |
-| `ContentType` | 0 = 种子（ContentSeed），1 = 数据块（ContentBlock） |
-| `ContentHash` | 请求内容的 SHA-256（32 字节）；种子请求必须等于报价的 SeedHash |
+| `BuyerSignature` | 买方对精确 TermsCBOR 的 DER 签名（密钥由 OpeningProof 的 BuyerPubKey 验证） |
+| `QuoteTermsHash` | 引用的 001 报价条款哈希，把本次购买锚定到具体报价；费用池不能替代报价 |
+| `RefundTemplateTxID` | 所在资金池的关联 ID；Buyer/Seller/Arbiter 公钥与矿工费率全部由其 OpeningProof 唯一确定，不再重复传输 |
+| `PaymentSequence` | 本次授权对应的**目标**付款序号；接收方验证它等于当前已接受序号 + 1，且不超过 0xfffffffe |
+| `SellerAmountAfterSat` | 付款后卖方的**绝对累计金额**（聪）；批次价格必须等于它减去当前状态的卖方金额 |
+| `ContentHashesCBOR` | 有序内容 hash 批次（1–64 项）：等于报价 SeedHash 的项即 seed，其余必须是该 seed 提交过的块；顺序是授权的一部分，重复即拒绝 |
 | `DeliveryDeadlineUnix` | 交付截止时间；不得晚于报价过期时间 |
 
 **合理性分析**
 
-- ✅ 这份文件是整个体系的枢纽：它同时是"想买什么"的内容请求和"愿意为此付多少"的付款授权。
-  其哈希贯穿 004（交付绑定）、005（付款绑定）、007（仲裁锚定）。
-- ✅ 序号连续性（after = base + 1）+ 金额单调递增，使重复/乱序/回退的付款授权全部失效，
-  天然防重放。
-- ✅ **standalone 可验证性**是刻意设计（`VerifySignedContentRequestStandalone`）：
-  不需要报价原文即可验证买方签名和经济字段——这让 007 仲裁只需这一份授权加开池证据即可裁决，
-  仲裁人不接触报价、内容与历史状态，职责最小化。
+- ✅ 这份文件是整个体系的枢纽：一个付款序号授权一组内容 hash，价格逐项推导后安全累加，
+  其哈希贯穿 004（交付绑定）、005（付款绑定）、007（仲裁锚定）。整个批次原子成功或原子失败。
+- ✅ 不再重复携带公钥与费率：这些值已由 RefundTemplateTxID 对应且不可修改的 OpeningProof
+  唯一确定。任何密码学验签都必须同时持有 OpeningProof
+  （`VerifySignedContentRequestForOpening` / 完整入口 `VerifySignedContentRequest`），
+  消除了“不一致时相信谁”的第二真值。
+- ✅ 内容类型从证据推导：hash 等于 SeedHash 即 seed，否则必须出现在 seed 的块列表中；
+  发送方没有任何声明类型的字段。
+- ✅ 序号连续性（目标 = 当前 + 1）+ 绝对累计金额单调递增，使重复/乱序/回退的授权全部失效，
+  天然防重放；stale、跳号、耗尽都返回稳定错误。
 - ✅ 截止时间双向上限约束（未来且 ≤ 报价过期），堵住"永久有效授权"。
 
 ---
 
 ### 3.6 Kind 6 · 内容交付（004）— 卖方 → 买方
 
-外层（`EncodeSignedContentDelivery`，3 元数组）：
+外层（`EncodeSignedContentDelivery`，固定 4 元数组；不存在单独的 DeliveryTerms 层）：
 
 ```
-[4, terms_cbor, seller_signature]
+[4, payment_authorization_hash, seller_payment_authorization_hash_signature,
+ content_payloads_cbor]
 ```
 
-内层条款（`EncodeContentDeliveryTerms`，4 元数组）：
+其中 `content_payloads_cbor` 同样是独立确定性 CBOR 编码后作为 `bstr` 嵌入的子文档（1–64 个非空 payload，单项不得超过一个 MasterSeed 块长）。
 
-```
-[4, refund_template_txid, payment_authorization_hash, content_bytes]
-```
-
-Go 结构体 `ContentDeliveryTerms` / `SignedContentDelivery`：
+Go 结构体 `SignedContentDelivery`：
 
 | 字段 | 含义 |
 |---|---|
-| `TermsCBOR` | 交付条款规范字节，卖方签名的直接对象 |
-| `SellerSignature` | 卖方对交付条款的 DER 签名（密钥须等于 003 里承诺的 SellerPubkey） |
-| `RefundTemplateTxID` | 所属资金池关联 ID，使凭据可独立路由 |
-| `PaymentAuthorizationHash` | 所响应的 003 条款哈希，把交付钉死到一次授权 |
-| `ContentBytes` | 实际载荷：种子或单个数据块，长度不得超过一个 MasterSeed 块 |
+| `PaymentAuthorizationHash` | 所响应的 003 条款哈希（32 字节），把交付钉死到一次授权；也是应用路由 004 到本地原始 003 的索引 |
+| `SellerPaymentAuthorizationHashSignature` | 卖方对**精确 32 字节哈希**的普通消息签名（SignMessage：内部再 SHA-256 一次，low-S DER）；外壳版本不入签，不签 payload、hex 或 CBOR 包装 |
+| `ContentPayloadsCBOR` | 有序 payload 批次，与 003 hashes 一一对应；不进入签名，但通过 hash 链间接绑定 |
 
 **合理性分析**
 
-- ✅ 卖方签名覆盖"哪个池 + 哪份授权 + 什么字节"三元组，买方可以离线验证交付真实性，
-  且同一交付凭据可作为卖方已履约的证据留存。
-- ✅ 内容本身不另设哈希字段再签一遍：`content_bytes` 直接入签，哈希校验由
-  MasterSeed 层完成（块哈希必须命中 003 的 `ContentHash` 并属于报价种子）。
-- ⚠️ 交付条款没有独立的截止时间字段——时效完全继承自所引用的 003 授权。
-  这是合理的最小化设计，但意味着 004 不能脱离 003 单独判定时效。
+- ✅ 大 payload 不再进入签名预映像、CBOR 编码或持久化对象：卖方只对 32 字节哈希走固定消息
+  签名路径，复制和存档成本与内容大小无关。
+- ✅ payload 未直接入签但绑定链完整：
+  `BuyerSignature → 003 TermsCBOR → ordered ContentHashesCBOR + 池 + 序号 + 金额`；
+  `SHA-256(terms_cbor) = PaymentAuthorizationHash ← SellerPaymentAuthorizationHashSignature`；
+  `ContentPayloadsCBOR[i] → SHA-256 → ContentHashesCBOR[i]`。
+  因此接收方必须逐项验证数量、顺序、hash 与长度——任一项错误整批拒绝，绝不部分接受。
+- ✅ 004 不携带池 ID 或内容 hashes：它们都能由授权哈希对应的本地保存 003 恢复；
+  本地找不到 003 时只能暂存/死信或请求重发，不允许从 payload 猜测订单或费用池。
+- ⚠️ 004 不自带时间：时效完全继承自所引用的 003 授权，按验收方本地 UTC 判定；
+  004 不能证明买方在截止前实际收到内容，只证明卖方对该授权给出了可验证 payload。
 
 ---
 
@@ -366,18 +364,18 @@ Go 结构体 `ArbitrationRequest`：
 | `Version` | 主版本 4 |
 | `RefundTemplateTxID` | 池关联 ID，置于首字段，使请求可脱离任何连接/会话独立路由 |
 | `PoolOpeningProofCBOR` | 完整 002 开池证据的规范 CBOR（9 元数组：RefundTx、三方公钥、费率、双方退款签名、FundingTx） |
-| `PaymentAuthorizationCBOR` | 完整的 003 已签名授权凭据（standalone 形式） |
+| `PaymentAuthorizationCBOR` | 完整的 003 已签名授权凭据 |
 | `UnsignedStateTxRaw` | 卖方按授权构造的候选状态交易未签名原文 |
 | `SellerTransactionSignature` | 卖方对候选交易的 DER 签名 |
 
 **合理性分析**
 
 - ✅ 证据自足：仲裁方仅凭这一个报文即可完成全部验证——
-  ① 解码并验证开池证据（含双方退款签名、交易关系、关联 ID 重推导一致）；
-  ② standalone 验证 003 买方授权签名；
-  ③ 交叉核对授权与开池证据的池锚点、三方角色公钥、费率（`ensureAuthorizationPool`）；
-  ④ 验证候选交易确实实现了授权承诺的序号与金额、卖方签名有效；
-  全部通过后才追加仲裁签名。
+  ① 解码并验证开池证据（含双方退款签名、交易关系、关联 ID 重推导一致），
+  从 OpeningProof 恢复 Buyer/Seller/Arbiter 公钥与矿工费率（003 不再自带这些字段）；
+  ② 验证 003 的池绑定与买方对精确 TermsCBOR 的签名（`VerifySignedContentRequestForOpening`）；
+  ③ 验证候选交易确实实现了授权承诺的目标序号与绝对累计金额、卖方签名有效；
+  全部通过后才追加仲裁签名。仲裁人不读取 001、004、payload，也不重新计算内容定价。
 - ✅ 仲裁方**只签名，不构造、不改写、不广播**（`Workflow` 的硬性约束）：
   候选交易由卖方提供且被逐项验证，仲裁人不会成为交易构造方，也就不承担内容定价或交易合法性之外的责任。
 - ✅ `BuildArbitrationRequest(PaymentUpdate)` 被显式禁用（返回错误），强制仲裁必须从
@@ -400,15 +398,19 @@ Go 结构体 `ArbitrationResponse`：
 |---|---|
 | `Version` | 主版本 4 |
 | `RefundTemplateTxID` | 经仲裁方验证过的池关联 ID 回执 |
-| `PaymentAuthorizationHash` | 仲裁方实际签过的 003 授权字节哈希 |
+| `PaymentAuthorizationHash` | 仲裁方实际签过的授权哈希，定义为 SHA-256(003 TermsCBOR)，与 004/005 携带的授权哈希完全一致；完整 003 外壳的哈希不是授权哈希 |
 | `UnsignedStateTxHash` | 仲裁方实际签过的候选交易字节哈希 |
 | `ArbiterTransactionSignature` | 仲裁人对候选交易 sighash 的 DER 签名 |
 
 **合理性分析**
 
 - ✅ 两个哈希回执是关键：卖方无需信任"仲裁人签的是哪份东西"——
-  自己重算哈希比对（`CompleteArbitratedPayment`）即可确认签名对象与本地候选一字不差，
+  自己重算哈希比对（`CompleteArbitratedPayment` 用同一算法
+  `SHA-256(003 TermsCBOR)` 复核授权哈希、用候选交易字节复核交易哈希，
+  并把响应 `RefundTemplateTxID` 与原请求逐字节绑定）即可确认签名对象与本地候选一字不差，
   然后才合并签名返回；广播仍由应用执行。哈希回执把信任问题降为字节比较问题。
+- ✅ 授权哈希全链唯一：同一张 003 的 PaymentAuthorizationHash 在 004、005 与 007 中
+  必须逐字节相等（集成测试覆盖），杜绝"同一授权在不同报文中出现不同身份"。
 - ✅ 拒绝语义 = 返回错误/无响应，不设"拒绝"标志位，避免半吊子的否定凭据流通。
 - ⚠️ 响应不含候选交易原文：若卖方丢失了自己的候选交易，仅有响应无法重建。
   但候选交易本就由卖方构造并可从持久化状态重推导，此取舍合理。
@@ -448,7 +450,7 @@ Go 结构体 `ArbitrationResponse`：
 | 001 条款 | 卖方 | TermsCBOR |
 | 退款交易 | 买方 + 卖方 | 退款交易 sighash（各出一份，合入解锁脚本） |
 | 003 条款 | 买方 | TermsCBOR |
-| 004 条款 | 卖方 | TermsCBOR（含内容字节） |
+| 004 授权哈希 | 卖方 | 精确 32 字节 PaymentAuthorizationHash（裸消息签名，不含 payload） |
 | 005 状态交易 | 买方（线上）→ 卖方合并 | 交易 sighash |
 | 007 候选交易 | 卖方（线上）→ 仲裁方追加 | 同一交易 sighash |
 
@@ -477,8 +479,8 @@ Go 结构体 `ArbitrationResponse`：
 | 2 | 0201 预签请求 | ✅ 合理 | 无冗余哈希字段；FundingTx 延迟公开是核心安全次序 |
 | 3 | 0202 预签响应 | ✅ 合理 | 关联 ID 重推导 + 内嵌 kind + 幂等重放 |
 | 4 | 0203 资金交付 | ✅ 合理 | 双方退款签名齐备后才公开资金交易 |
-| 5 | 003 内容请求 | ✅ 合理 | 序号 +1 强约束；standalone 可验证使仲裁最小化 |
-| 6 | 004 内容交付 | ✅ 合理 | 时效继承自 003，属合理最小化（注意不可脱离 003 判时效） |
+| 5 | 003 内容请求 | ✅ 合理 | 单一目标序号 + 绝对累计金额；身份/费率由 OpeningProof 唯一确定；一个序号授权一批内容 |
+| 6 | 004 内容交付 | ✅ 合理 | 裸授权哈希签名 + payload 间接绑定；批次原子验收（注意必须逐项校验 hash） |
 | 7 | 005 付款更新 | ✅ 合理 | 未签名交易 + 分离签名；授权哈希绑定内容 |
 | 8 | 007 仲裁请求 | ✅ 合理 | 证据自足；仲裁人只签名不构造；从授权而非付款构建（强制） |
 | 9 | 007 仲裁响应 | ✅ 合理 | 哈希回执将信任降为字节比较；拒绝即无响应 |

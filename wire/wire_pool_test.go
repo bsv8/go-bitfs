@@ -149,34 +149,31 @@ func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 }
 
 func TestContentDeliveryTypedRoundTrip(t *testing.T) {
-	buyerKey, err := ec.PrivateKeyFromHex("5555555555555555555555555555555555555555555555555555555555555555")
-	if err != nil {
-		t.Fatal(err)
-	}
 	sellerKey, err := ec.PrivateKeyFromHex("4444444444444444444444444444444444444444444444444444444444444444")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = buyerKey
-	requestTerms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:        bytes.Repeat([]byte{1}, 32),
-		RefundTemplateTxID:    bytes.Repeat([]byte{2}, 32),
-		BasePaymentSequence:   1,
-		PaymentSequenceAfter:  2,
-		SellerAmountAfterSat:  10,
-		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           buyerKey.PubKey().Compressed(),
-		SellerPubkey:          sellerKey.PubKey().Compressed(),
-		SelectedArbiterPubkey: wireTestArbiterPubkey(),
-		ContentType:           bitfs.ContentSeed,
-		ContentHash:           bytes.Repeat([]byte{3}, 32),
-		DeliveryDeadlineUnix:  2_000_000_000,
-	}
-	signedRequest, err := bitfs.NewSignedContentRequest(requestTerms, buyerKey)
+	hashesCBOR, err := bitfs.EncodeContentHashes([][]byte{bytes.Repeat([]byte{3}, 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(signedRequest, []byte("payload"), sellerKey)
+	requestTerms := &bitfs.ContentRequestTerms{
+		QuoteTermsHash:       bytes.Repeat([]byte{1}, 32),
+		RefundTemplateTxID:   bytes.Repeat([]byte{2}, 32),
+		PaymentSequence:      2,
+		SellerAmountAfterSat: 10,
+		ContentHashesCBOR:    hashesCBOR,
+		DeliveryDeadlineUnix: 2_000_000_000,
+	}
+	signedRequest, err := bitfs.NewSignedContentRequest(requestTerms, wireTestBuyerKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authHash, err := bitfs.PaymentAuthorizationHash(signedRequest.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := bitfs.NewSignedContentDelivery(authHash[:], [][]byte{[]byte("payload")}, sellerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,19 +185,24 @@ func TestContentDeliveryTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.TermsCBOR, delivery.TermsCBOR) || !bytes.Equal(decoded.SellerSignature, delivery.SellerSignature) {
+	if !bytes.Equal(decoded.PaymentAuthorizationHash, delivery.PaymentAuthorizationHash) || !bytes.Equal(decoded.SellerPaymentAuthorizationHashSignature, delivery.SellerPaymentAuthorizationHashSignature) || !bytes.Equal(decoded.ContentPayloadsCBOR, delivery.ContentPayloadsCBOR) {
 		t.Fatal("content delivery changed during wire round trip")
 	}
-	// The signed terms must carry the pool correlation ID as their first
-	// business field.
-	terms, err := bitfs.DecodeContentDeliveryTerms(decoded.TermsCBOR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(terms.RefundTemplateTxID, requestTerms.RefundTemplateTxID) {
-		t.Fatal("delivery terms lost the refund_template_txid binding")
+	// The 004 shell must be a four-element array led by version 4 and must
+	// not repeat the pool correlation ID.
+	if len(raw) == 0 || raw[0] != 0x84 {
+		t.Fatalf("004 must be a four-element array: %x", raw)
 	}
 	if _, err := Unmarshal(ContentDelivery, append(raw, 0)); err == nil {
 		t.Fatal("decoder accepted trailing bytes")
 	}
+}
+
+func wireTestBuyerKey(t *testing.T) *ec.PrivateKey {
+	t.Helper()
+	key, err := ec.PrivateKeyFromHex("5555555555555555555555555555555555555555555555555555555555555555")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

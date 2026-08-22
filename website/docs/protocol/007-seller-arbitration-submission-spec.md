@@ -34,4 +34,6 @@ The candidate MUST be a three-output `[Buyer, Seller, Arbiter]` state with an em
 
 `refund_template_txid` is the pool correlation ID derived from the unsigned RefundTx. The arbiter MUST compare it with the hash derived from `pool_opening_proof_cbor`; the seller MUST additionally bind the response's `refund_template_txid` to the original request before merging.
 
+`payment_authorization_hash` in the response is defined exclusively as `SHA-256(003 TermsCBOR)` — the same authorization hash carried by 004 and 005 for the same 003. The full `SignedContentRequest` shell is never hashed; the seller recomputes the value from the retained terms bytes with the same algorithm before comparing, and rejects any response that binds a shell hash or a foreign digest. The same identity must therefore appear byte-for-byte identical across 004, 005, and 007 for one authorization.
+
 After receiving the response, the seller rechecks both hashes and the arbiter signature and creates the final transaction only through `MergeArbitratedPoolSellerArbiterSignatures`. 007 does not require the buyer to sign 005 for this dispute, and go-bitfs does not permit a Buyer+Arbiter business path.

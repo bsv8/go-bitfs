@@ -197,7 +197,7 @@ func TestAcceptRefundPresignProducesCompleteProofAndInitialState(t *testing.T) {
 	if initial.PaymentSequence != 2 || initial.SellerAmountSat != 0 || initial.ArbiterAmountSat != 0 {
 		t.Fatalf("initial state = seq %d seller %d arbiter %d", initial.PaymentSequence, initial.SellerAmountSat, initial.ArbiterAmountSat)
 	}
-	if initial.RefundTemplateTxID != f.Acceptance.Reference.RefundTemplateTxID || f.Acceptance.Reference.BasePaymentSequence != 2 {
+	if initial.RefundTemplateTxID != f.Acceptance.Reference.RefundTemplateTxID || f.Acceptance.Reference.PaymentSequence != 2 {
 		t.Fatalf("reference = %+v", f.Acceptance.Reference)
 	}
 }
@@ -227,12 +227,12 @@ func TestContentRequestAndDeliveryRoundTripWithExplicitState(t *testing.T) {
 	f.prepare(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	input := ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.Seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	input := ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
 	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.Seed...)})
+	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Acceptance.Opening, f.Acceptance.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,8 +240,8 @@ func TestContentRequestAndDeliveryRoundTripWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(verified.Payload, f.Seed) {
-		t.Fatal("verified payload does not match delivered seed content")
+	if len(verified.Payloads) != 1 || !bytes.Equal(verified.Payloads[0], f.Seed) {
+		t.Fatal("verified payload batch does not match delivered seed content")
 	}
 	if deliveryState == nil || deliveryState.RefundTemplateTxID != f.Acceptance.Reference.RefundTemplateTxID {
 		t.Fatal("delivery state does not bind the pool")

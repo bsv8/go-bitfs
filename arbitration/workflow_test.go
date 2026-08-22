@@ -140,10 +140,13 @@ func testArbitrationEvidence(t *testing.T) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hashesCBOR, err := bitfs.EncodeContentHashes([][]byte{bytes.Repeat([]byte{4}, sha256.Size)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	terms, err := bitfs.EncodeContentRequestTerms(&bitfs.ContentRequestTerms{
-		QuoteTermsHash: bytes.Repeat([]byte{3}, sha256.Size), RefundTemplateTxID: spend, BasePaymentSequence: 1, PaymentSequenceAfter: 2,
-		SellerAmountAfterSat: 100, MinerFeeRateSatPerKB: 1, BuyerPubkey: buyer, SellerPubkey: seller, SelectedArbiterPubkey: arbiter,
-		ContentType: bitfs.ContentSeed, ContentHash: bytes.Repeat([]byte{4}, sha256.Size), DeliveryDeadlineUnix: 100,
+		QuoteTermsHash: bytes.Repeat([]byte{3}, sha256.Size), RefundTemplateTxID: spend, PaymentSequence: 2,
+		SellerAmountAfterSat: 100, ContentHashesCBOR: hashesCBOR, DeliveryDeadlineUnix: 100,
 	})
 	if err != nil {
 		t.Fatal(err)

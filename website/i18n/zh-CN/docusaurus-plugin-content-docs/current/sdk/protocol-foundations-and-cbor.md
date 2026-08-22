@@ -173,7 +173,7 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 这些函数没有存储或网络副作用，适合钱包、服务端、CLI 和测试直接使用。签名直接使用调用方解析的官方 BSV 私钥（`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `ec.PrivateKey`；TypeScript 使用 `@bsv/sdk` 原生 `PrivateKey`）。不存在 signer 或 verifier 回调。
 
-所有凭证的签名路径固定且一致：规范 CBOR 用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，而 TS 侧 `PrivateKey.sign(message)` 会自行哈希——跨语言向量必须避免双重哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+所有凭证的签名路径固定且一致：被签字节（规范条款 CBOR，或 004 的裸 32 字节授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，而 TS 侧 `PrivateKey.sign(message)` 会自行哈希——跨语言向量必须避免双重哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 ```go
 // package bitfs
@@ -196,19 +196,31 @@ func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
 func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
 // VerifySignedContentRequest 在入口处读取一次系统 UTC 并使用 SDK 固定验证器，
-// 验证报价绑定、买方签名、仲裁者选择和交付期限。
-func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error)
-
-// NewSignedContentDelivery 将 payload 绑定到请求授权哈希，并通过固定消息
-// 路径用卖方官方 BSV 私钥为生成的确定性交付条款签名。
-func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error)
-
-// VerifySignedContentDeliveryWithSeed 使用调用方持有的 seed 额外检查块归属
-// 和块长度。
-func VerifySignedContentDeliveryWithSeed(
+// 验证报价绑定、资金池参与方、买方对精确条款字节的签名、报价过期和交付期限。
+// VerifySignedContentRequestForOpening 为已携带 OpeningProof 的证据（007）
+// 只验证池绑定与买方签名。VerifySignedContentRequestWithSeed 额外证明每个
+// 请求的块哈希都存在于绑定报价的 seed 中。
+func VerifySignedContentRequest(
     request *SignedContentRequest,
-    delivery *SignedContentDelivery,
     quote *SignedFileQuote,
+    opening PoolOpeningEvidence,
+) (*ContentRequestTerms, error)
+
+// NewSignedContentDelivery 通过固定消息路径用卖方官方 BSV 私钥对精确 32 字节
+// 的付款授权哈希签名，并附上规范编码的有序 payload 批次。payload 通过所引用
+// 003 提交的哈希间接绑定。
+func NewSignedContentDelivery(
+    paymentAuthorizationHash []byte,
+    payloads [][]byte,
+    sellerKey *ec.PrivateKey,
+) (*SignedContentDelivery, error)
+
+// VerifyContentPayloads 针对被授权哈希验证交付批次：数量、顺序、逐项 SHA-256、
+// seed/block 归属与协议期望长度。整个批次原子成功或失败；返回成员校验实际
+// 使用的 seed，调用方可用它重算价格。
+func VerifyContentPayloads(
+    quoteTerms *FileQuoteTerms,
+    contentHashes, payloads [][]byte,
     seed []byte,
 ) ([]byte, error)
 ```

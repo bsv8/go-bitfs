@@ -175,8 +175,7 @@ before they can enter signed 001/003/004 terms or 002 pool evidence.
 
 These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests. Signing takes the caller-parsed official BSV private key directly (`ec.PrivateKey` from `github.com/bsv-blockchain/go-sdk/primitives/ec`; TypeScript uses the native `@bsv/sdk` `PrivateKey`). There are no signer or verifier callbacks.
 
-The signature path is fixed and identical for every credential: canonical CBOR
-is hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, while TypeScript's `PrivateKey.sign(message)` hashes internally — cross-language vectors must avoid double hashing. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
+The signature path is fixed and identical for every credential: the signed bytes (canonical terms CBOR, or for 004 the bare 32-byte authorization hash) are hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, while TypeScript's `PrivateKey.sign(message)` hashes internally — cross-language vectors must avoid double hashing. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
 
 ```go
 // package bitfs
@@ -200,22 +199,36 @@ func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
 // fixed single-SHA-256 message path.
 func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
-// VerifySignedContentRequest checks quote binding, the buyer signature,
-// arbiter selection, and the delivery deadline using system UTC read once at
-// entry and the fixed SDK verifiers.
-func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error)
-
-// NewSignedContentDelivery binds payload bytes to the request authorization
-// hash and signs the resulting deterministic delivery terms with the seller's
-// official BSV private key through the fixed message path.
-func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error)
-
-// VerifySignedContentDeliveryWithSeed additionally checks block membership
-// and block length derived from a caller-owned seed.
-func VerifySignedContentDeliveryWithSeed(
+// VerifySignedContentRequest checks quote binding, pool participants, the
+// buyer signature over the exact terms bytes, quote expiry, and the delivery
+// deadline using system UTC read once at entry and the fixed SDK verifiers.
+// VerifySignedContentRequestForOpening verifies only the pool binding and
+// buyer signature for evidence that already carries its OpeningProof (007).
+// VerifySignedContentRequestWithSeed additionally proves that every requested
+// block hash is present in the quote-bound seed.
+func VerifySignedContentRequest(
     request *SignedContentRequest,
-    delivery *SignedContentDelivery,
     quote *SignedFileQuote,
+    opening PoolOpeningEvidence,
+) (*ContentRequestTerms, error)
+
+// NewSignedContentDelivery signs the exact 32-byte payment authorization hash
+// with the seller's official BSV private key through the fixed message path
+// and attaches the canonically encoded ordered payload batch. Payloads are
+// bound indirectly via the hashes committed in the referenced 003.
+func NewSignedContentDelivery(
+    paymentAuthorizationHash []byte,
+    payloads [][]byte,
+    sellerKey *ec.PrivateKey,
+) (*SignedContentDelivery, error)
+
+// VerifyContentPayloads validates a delivered batch against the authorized
+// hashes: count, order, per-item SHA-256, seed/block membership, and protocol
+// expected lengths. The whole batch succeeds or fails atomically; it returns
+// the seed used for membership checks so callers can recompute pricing.
+func VerifyContentPayloads(
+    quoteTerms *FileQuoteTerms,
+    contentHashes, payloads [][]byte,
     seed []byte,
 ) ([]byte, error)
 ```

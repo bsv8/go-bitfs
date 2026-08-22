@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"bytes"
 	"context"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
@@ -38,9 +39,10 @@ func (adapter *MultisigPoolAdapter) VerifyOpening(proof *OpeningProof) error {
 }
 
 // VerifyArbitrationCandidate validates the seller's 007 candidate against the
-// standalone 003 authorization. It checks the opening proof, fee rate and next
-// sequence, matches seller amount and sequence in the unsigned transaction, and
-// verifies the seller's detached signature without constructing a replacement.
+// standalone 003 authorization. Roles and the fee rate come exclusively from
+// the opening proof; it checks the next sequence, matches seller amount and
+// sequence in the unsigned transaction, and verifies the seller's detached
+// signature without constructing a replacement.
 func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context, raw []byte, proof *OpeningProof, terms *bitfs.ContentRequestTerms, sellerSig []byte) (*UnsignedPayment, error) {
 	if adapter == nil || adapter.Engine == nil || terms == nil {
 		return nil, invalid("arbitration candidate inputs are incomplete")
@@ -48,14 +50,15 @@ func (adapter *MultisigPoolAdapter) VerifyArbitrationCandidate(_ context.Context
 	if err := adapter.Engine.VerifyOpening(proof); err != nil {
 		return nil, err
 	}
-	if terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB || terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 {
+	details, err := DeriveOpeningDetails(proof)
+	if err != nil || !bytes.Equal(terms.RefundTemplateTxID, details.RefundTemplateTxID[:]) || terms.PaymentSequence == 0 || terms.PaymentSequence > ^uint32(0)-1 {
 		return nil, invalid("arbitration candidate authorization is invalid")
 	}
 	unsigned, err := adapter.Engine.ParseUnsignedPayment(context.Background(), raw, proof)
 	if err != nil {
 		return nil, err
 	}
-	if unsigned.PaymentSequence != uint32(terms.PaymentSequenceAfter) || unsigned.SellerAmountSat != terms.SellerAmountAfterSat {
+	if unsigned.PaymentSequence != terms.PaymentSequence || unsigned.SellerAmountSat != terms.SellerAmountAfterSat {
 		return nil, invalid("arbitration candidate does not match authorization")
 	}
 	if unsigned.PaymentSequence == finalPoolSequence {

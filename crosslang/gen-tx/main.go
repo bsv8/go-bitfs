@@ -97,18 +97,18 @@ func main() {
 		panic(fmt.Sprintf("buyer signature self-verification failed: %v", err))
 	}
 	vector := map[string]any{
-		"algorithm":             "MultisigPool v4 transaction sighash: SHA-256d(BSV preimage), ForkID|All, low-S DER over the digest",
-		"unsignedTxHex":         hex.EncodeToString(proof.RefundTx),
-		"inputIndex":            0,
-		"sourceSatoshis":        details.PoolOutputSatoshis,
+		"algorithm":              "MultisigPool v4 transaction sighash: SHA-256d(BSV preimage), ForkID|All, low-S DER over the digest",
+		"unsignedTxHex":          hex.EncodeToString(proof.RefundTx),
+		"inputIndex":             0,
+		"sourceSatoshis":         details.PoolOutputSatoshis,
 		"sourceLockingScriptHex": hex.EncodeToString(details.PoolLockingScript),
-		"sighashFlag":           int(flag),
-		"preimageHex":           hex.EncodeToString(preimage),
-		"sighashDigestHex":      hex.EncodeToString(digest),
-		"buyerPubkeyHex":        hex.EncodeToString(buyer.PubKey().Compressed()),
-		"sellerPubkeyHex":       hex.EncodeToString(seller.PubKey().Compressed()),
-		"arbiterPubkeyHex":      hex.EncodeToString(arbiter.PubKey().Compressed()),
-		"goDerSignatureHex":     hex.EncodeToString(fullSig[:len(fullSig)-1]),
+		"sighashFlag":            int(flag),
+		"preimageHex":            hex.EncodeToString(preimage),
+		"sighashDigestHex":       hex.EncodeToString(digest),
+		"buyerPubkeyHex":         hex.EncodeToString(buyer.PubKey().Compressed()),
+		"sellerPubkeyHex":        hex.EncodeToString(seller.PubKey().Compressed()),
+		"arbiterPubkeyHex":       hex.EncodeToString(arbiter.PubKey().Compressed()),
+		"goDerSignatureHex":      hex.EncodeToString(fullSig[:len(fullSig)-1]),
 	}
 	out, _ := json.MarshalIndent(vector, "", "  ")
 	fmt.Println(string(out))

@@ -195,13 +195,13 @@ func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 	}
 
 	// 003: buyer builds the content request from explicit state.
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 004: seller delivers from caller-provided content bytes.
-	delivery, deliveryState, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)})
+	delivery, deliveryState, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(verified.Payload, f.seed) {
+	if len(verified.Payloads) != 1 || !bytes.Equal(verified.Payloads[0], f.seed) {
 		t.Fatal("verified payload mismatch")
 	}
 	// 005: seller merges signatures over the buyer update.
@@ -247,12 +247,12 @@ func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)}); err != nil {
+	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err != nil {
 		t.Fatal(err)
 	}
 	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, f.completed.Opening, request, f.completed.InitialPayment, f.facts())
@@ -305,12 +305,12 @@ func TestWrongSellerCannotPresignOrDeliverForAnotherSellersPool(t *testing.T) {
 		t.Fatal("wrong seller presigned another seller's opening")
 	}
 	f.openMainPool(t)
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := wrongSeller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)}); err == nil {
+	if _, _, err := wrongSeller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err == nil {
 		t.Fatal("wrong seller delivered content")
 	}
 }
@@ -319,7 +319,7 @@ func TestExpiredFactsRejectForwardOperationsButEnableRefundBuild(t *testing.T) {
 	expiry := uint32(time.Now().UTC().Add(-time.Hour).Unix())
 	f := newProtocolFixtureWithExpiry(t, expiry)
 	f.openMainPool(t)
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	if _, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input); err == nil {
 		t.Fatal("content request accepted after refund expiry")
 	}
@@ -343,7 +343,7 @@ func TestExpiredFactsRejectForwardOperationsButEnableRefundBuild(t *testing.T) {
 func TestStaleSequenceAndTamperedEvidenceAreRejected(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
@@ -351,11 +351,11 @@ func TestStaleSequenceAndTamperedEvidenceAreRejected(t *testing.T) {
 	stalePrevious := &pool.PaymentState{}
 	*stalePrevious = *f.completed.InitialPayment
 	stalePrevious.PaymentSequence--
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, stalePrevious, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)}); err == nil {
+	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, stalePrevious, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err == nil {
 		t.Fatal("stale previous state accepted for delivery")
 	}
 	// Tampered authorization hash must not be accepted at payment time.
-	delivery, deliveryState, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)})
+	delivery, deliveryState, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}

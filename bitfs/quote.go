@@ -2,6 +2,7 @@ package bitfs
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -354,45 +355,68 @@ func SanitizeRecommendedFilename(name string) string {
 	return name
 }
 
-// ContentPriceSat derives the buyer-signed amount from the verified quote and
-// the delivered content size. Full blocks use the quoted price. A tail block
-// is charged proportionally, rounded up, with the specified 10% seller
-// calculation allowance. The computation uses big integers so malformed
-// uint64 prices cannot overflow into a lower amount.
-func ContentPriceSat(terms *FileQuoteTerms, contentType ContentType, contentSize uint64) (uint64, error) {
-	if err := ValidateFileQuoteTerms(terms); err != nil {
+// ContentHashesPriceSat derives the aggregate buyer-signed amount for an
+// ordered batch of content hashes against the verified quote. Each hash equal
+// to the quote SeedHash is priced at SeedPriceSat; every other hash must be
+// found in the verified seed and is priced at its position's protocol expected
+// length (full blocks at FullBlockPriceSat, tail blocks with the proportional
+// round-up and the specified 10% seller allowance). Duplicate block positions
+// behind one hash are charged once; matches with conflicting expected lengths
+// reject the batch. The total is accumulated with checked addition so any
+// overflow fails before signing instead of wrapping.
+func ContentHashesPriceSat(terms *FileQuoteTerms, contentHashes [][]byte, seed []byte) (uint64, error) {
+	// 导出入口自身 fail-closed：数量上限、哈希宽度与重复检查不依赖调用方
+	// 先行经过 Encode/Decode。
+	if err := validateContentHashes(contentHashes); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	items, err := classifyContentHashes(context.Background(), terms, contentHashes, seed)
+	if err != nil {
 		return 0, err
 	}
-	switch contentType {
-	case ContentSeed:
-		return terms.SeedPriceSat, nil
-	case ContentBlock:
-		if contentSize == 0 || contentSize > BlockSize {
-			return 0, fmt.Errorf("invalid block content size %d", contentSize)
+	total := uint64(0)
+	for _, item := range items {
+		price := terms.SeedPriceSat
+		if !item.IsSeed {
+			price, err = blockPriceSat(terms.FullBlockPriceSat, item.BlockSize)
+			if err != nil {
+				return 0, err
+			}
 		}
-		if contentSize == BlockSize {
-			return terms.FullBlockPriceSat, nil
+		if total > ^uint64(0)-price {
+			return 0, fmt.Errorf("%w: aggregate content price overflows uint64", ErrInvalidEvidence)
 		}
-		if terms.FullBlockPriceSat == 0 {
-			return 0, nil
-		}
-		numerator := new(big.Int).SetUint64(terms.FullBlockPriceSat)
-		numerator.Mul(numerator, new(big.Int).SetUint64(contentSize))
-		numerator.Mul(numerator, big.NewInt(90))
-		denominator := new(big.Int).SetUint64(BlockSize)
-		denominator.Mul(denominator, big.NewInt(100))
-		price := new(big.Int).Add(numerator, new(big.Int).Sub(denominator, big.NewInt(1)))
-		price.Quo(price, denominator)
-		if price.Sign() == 0 {
-			price.SetUint64(1)
-		}
-		if !price.IsUint64() {
-			return 0, errors.New("content price overflows uint64")
-		}
-		return price.Uint64(), nil
-	default:
-		return 0, fmt.Errorf("unsupported content type %d", contentType)
+		total += price
 	}
+	return total, nil
+}
+
+// blockPriceSat prices one block by its protocol expected length using big
+// integers so malformed uint64 prices cannot overflow into a lower amount.
+func blockPriceSat(fullBlockPriceSat, blockSize uint64) (uint64, error) {
+	if blockSize == 0 || blockSize > BlockSize {
+		return 0, fmt.Errorf("invalid block expected size %d", blockSize)
+	}
+	if blockSize == BlockSize {
+		return fullBlockPriceSat, nil
+	}
+	if fullBlockPriceSat == 0 {
+		return 0, nil
+	}
+	numerator := new(big.Int).SetUint64(fullBlockPriceSat)
+	numerator.Mul(numerator, new(big.Int).SetUint64(blockSize))
+	numerator.Mul(numerator, big.NewInt(90))
+	denominator := new(big.Int).SetUint64(BlockSize)
+	denominator.Mul(denominator, big.NewInt(100))
+	price := new(big.Int).Add(numerator, new(big.Int).Sub(denominator, big.NewInt(1)))
+	price.Quo(price, denominator)
+	if price.Sign() == 0 {
+		price.SetUint64(1)
+	}
+	if !price.IsUint64() {
+		return 0, errors.New("content price overflows uint64")
+	}
+	return price.Uint64(), nil
 }
 
 func fileQuoteBlockCount(fileSize uint64) uint64 {

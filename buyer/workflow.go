@@ -3,12 +3,12 @@ package buyer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/internal/refundlock"
 	"github.com/bsv8/go-bitfs/pool"
@@ -203,7 +203,7 @@ func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, state *BuyerO
 		return nil, fmt.Errorf("%w: refund transaction is not the initial pool state", pool.ErrInvalidEvidence)
 	}
 	return &RefundPresignAcceptance{
-		Reference:      pool.Reference{RefundTemplateTxID: initial.RefundTemplateTxID, BasePaymentSequence: initial.PaymentSequence},
+		Reference:      pool.Reference{RefundTemplateTxID: initial.RefundTemplateTxID, PaymentSequence: initial.PaymentSequence},
 		Opening:        proof,
 		InitialPayment: initial,
 	}, nil
@@ -244,15 +244,18 @@ func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *p
 	return delivery, nil
 }
 
-// ContentRequestInput carries the content selection and deadline facts for a
-// 003 request. Quote, opening proof, previous payment state, time, and block
-// height are explicit method parameters.
+// ContentRequestInput carries the ordered content batch and deadline facts
+// for a 003 request. Quote, opening proof, previous payment state, time, and
+// block height are explicit method parameters.
 type ContentRequestInput struct {
-	Content          bitfs.ContentRef
-	ContentSize      uint64
+	// ContentHashes is the ordered batch of content hashes to purchase in one
+	// authorization. A hash equal to the quote SeedHash buys the seed; every
+	// other hash must be committed by that seed. Duplicates are rejected.
+	ContentHashes [][]byte
+	// DeliveryDeadline is the UTC delivery deadline carried by the 003 terms.
 	DeliveryDeadline bitfs.UnixSeconds
-	// Seed contains the raw verified seed bytes when the requested content is
-	// a block; it may be empty for seed-type content.
+	// Seed contains the raw verified seed bytes whenever the batch includes
+	// any block; it may be empty for a pure-seed batch.
 	Seed []byte
 	// BlockHeight is the caller-provided current block height, read only when
 	// the opening's refund uses a block-height locktime.
@@ -260,10 +263,14 @@ type ContentRequestInput struct {
 }
 
 // BuildContentRequest verifies the quote, opening ownership, previous payment
-// state, content reference context, price, and balance, then signs the 003
-// request with this workflow's private key. System UTC is read once at entry;
-// the block height arrives from the caller. It reads no content and changes no
-// pool state; whether base is the business-latest state is the caller's call.
+// state, batch membership context, aggregate price, and balance, then signs
+// the 003 request with this workflow's private key. System UTC is read once at
+// entry; the block height arrives from the caller. It reads no content and
+// changes no pool state; whether the supplied state is the business-latest one
+// is the caller's call. Content kinds are derived exclusively from evidence:
+// hashes equal to the quote SeedHash are seeds, all others must be committed
+// by the verified seed and are priced at their protocol expected lengths with
+// checked addition before any signature exists.
 func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, input ContentRequestInput) (*bitfs.SignedContentRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -290,7 +297,6 @@ func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.
 	if err := checkPoolNotExpired(opening, at, input.BlockHeight); err != nil {
 		return nil, errors.Join(bitfs.ErrInvalidEvidence, fmt.Errorf("verify pool refund is still available: %w", err))
 	}
-	contentHash := append([]byte(nil), input.Content.Hash...)
 	// 时间无关证据验证；过期判断使用本操作唯一一次读取的 at。
 	terms, err := bitfs.VerifyFileQuoteEvidence(localQuote)
 	if err != nil {
@@ -299,11 +305,16 @@ func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.
 	if !bytes.Equal(workflow.publicKey, terms.BuyerPubkey) {
 		return nil, fmt.Errorf("%w: signer does not match quote buyer", bitfs.ErrInvalidEvidence)
 	}
-	if len(contentHash) != masterseed.DigestSize {
-		return nil, fmt.Errorf("%w: content hash must be 32 bytes", bitfs.ErrInvalidEvidence)
-	}
 	if input.DeliveryDeadline <= bitfs.UnixSeconds(at.Unix()) {
 		return nil, fmt.Errorf("%w: delivery deadline is not in the future", bitfs.ErrDeliveryDeadline)
+	}
+	// 本操作唯一一次读取的 at 同时用于报价过期与"截止不超过报价"判断，
+	// 避免签出必然被卖方拒绝的过期授权。
+	if !at.Before(time.Unix(terms.QuoteExpiresAtUnix, 0)) {
+		return nil, fmt.Errorf("%w: file quote is expired", bitfs.ErrQuoteExpired)
+	}
+	if int64(input.DeliveryDeadline) > terms.QuoteExpiresAtUnix {
+		return nil, fmt.Errorf("%w: delivery deadline exceeds quote expiry", bitfs.ErrDeliveryDeadline)
 	}
 	if !bytes.Equal(opening.BuyerPubKey, terms.BuyerPubkey) || !bytes.Equal(opening.SellerPubKey, localQuote.SellerPubkey) {
 		return nil, fmt.Errorf("%w: verify pool participants", bitfs.ErrInvalidEvidence)
@@ -311,88 +322,59 @@ func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.
 	if !quoteAllowsArbiter(terms, opening.ArbiterPubKey) {
 		return nil, fmt.Errorf("%w: opening arbiter is not allowed by quote", bitfs.ErrInvalidEvidence)
 	}
-	if previous == nil || previous.RefundTemplateTxID != refundTemplateTxID {
+	if previous == nil || previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 == 0 {
 		return nil, bitfs.ErrStalePaymentSequence
 	}
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	if previous.PaymentSequence >= uint32(^uint32(0)-1) {
+	targetSequence := previous.PaymentSequence + 1
+	if previous.PaymentSequence >= ^uint32(0)-1 {
 		return nil, bitfs.ErrStalePaymentSequence
 	}
-	var seed []byte
-	if input.Content.Type != bitfs.ContentSeed {
-		if len(input.Seed) == 0 {
-			return nil, fmt.Errorf("%w: a verified seed is required before requesting a block", bitfs.ErrContentNotInSeed)
-		}
-		seed = append([]byte(nil), input.Seed...)
+	contentHashes := make([][]byte, len(input.ContentHashes))
+	for index, hash := range input.ContentHashes {
+		contentHashes[index] = append([]byte(nil), hash...)
 	}
-	if err := bitfs.VerifyContentReferenceContext(ctx, terms, input.Content.Type, contentHash, seed, false); err != nil {
+	contentHashesCBOR, err := bitfs.EncodeContentHashes(contentHashes)
+	if err != nil {
 		return nil, err
 	}
-	if input.Content.Type == bitfs.ContentBlock {
-		matches, err := bitfs.VerifyBlockReference(ctx, terms, contentHash, seed)
-		if err != nil {
-			return nil, err
-		}
-		if !contentSizeMatchesBlock(terms.FileSize, input.ContentSize, matches) {
-			return nil, fmt.Errorf("%w: content size %d does not match any committed block position", bitfs.ErrInvalidEvidence, input.ContentSize)
-		}
-	}
-	contentSize := input.ContentSize
-	if input.Content.Type == bitfs.ContentSeed {
-		contentSize = 1
-	}
-	price, err := bitfs.ContentPriceSat(terms, input.Content.Type, contentSize)
+	seed := append([]byte(nil), input.Seed...)
+	// 批量分类与定价：块成员资格、期望长度和逐项 checked-add 都在签名前完成。
+	price, err := bitfs.ContentHashesPriceSat(terms, contentHashes, seed)
 	if err != nil {
 		return nil, err
 	}
 	if previous.SellerAmountSat > ^uint64(0)-price {
 		return nil, bitfs.ErrInsufficientBalance
 	}
+	sellerAmountAfter := previous.SellerAmountSat + price
+	if err := engine.CheckPaymentCapacity(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: targetSequence, SellerAmountAfterSat: sellerAmountAfter}); err != nil {
+		return nil, err
+	}
 	quoteHash, err := bitfs.FileQuoteTermsHash(localQuote.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
 	requestTerms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:        quoteHash[:],
-		RefundTemplateTxID:    refundTemplateTxID[:],
-		BasePaymentSequence:   uint64(previous.PaymentSequence),
-		PaymentSequenceAfter:  uint64(previous.PaymentSequence + 1),
-		SellerAmountAfterSat:  previous.SellerAmountSat + price,
-		MinerFeeRateSatPerKB:  opening.MinerFeeRateSatPerKB,
-		BuyerPubkey:           append([]byte(nil), terms.BuyerPubkey...),
-		SellerPubkey:          append([]byte(nil), localQuote.SellerPubkey...),
-		SelectedArbiterPubkey: append([]byte(nil), opening.ArbiterPubKey...),
-		ContentType:           input.Content.Type,
-		ContentHash:           contentHash,
-		DeliveryDeadlineUnix:  int64(input.DeliveryDeadline),
+		QuoteTermsHash:       quoteHash[:],
+		RefundTemplateTxID:   refundTemplateTxID[:],
+		PaymentSequence:      targetSequence,
+		SellerAmountAfterSat: sellerAmountAfter,
+		ContentHashesCBOR:    contentHashesCBOR,
+		DeliveryDeadlineUnix: int64(input.DeliveryDeadline),
 	}
 	return bitfs.NewSignedContentRequest(requestTerms, workflow.privateKey)
 }
 
-// contentSizeMatchesBlock checks only real match endpoints returned by
-// MasterSeed. It intentionally never treats an index between FirstIndex and
-// LastIndex as a match when duplicate hashes are non-contiguous.
-func contentSizeMatchesBlock(fileSize, contentSize uint64, matches masterseed.BlockMatches) bool {
-	if matches.MatchCount == 0 {
-		return false
-	}
-	for _, index := range []uint64{matches.FirstIndex, matches.LastIndex} {
-		expected, err := masterseed.ExpectedBlockSize(fileSize, index)
-		if err == nil && expected == contentSize {
-			return true
-		}
-	}
-	return false
-}
-
-// VerifiedDelivery is the composite result of AcceptDelivery: Payload holds
-// the verified content bytes for the application to persist, and Update is
-// the signed 005 wire update to send to the seller.
+// VerifiedDelivery is the composite result of AcceptDelivery: Payloads holds
+// the verified content batch in authorized order for the application to
+// persist, and Update is the single signed 005 wire update for the whole batch.
 type VerifiedDelivery struct {
-	// Payload contains the verified content bytes returned by the SDK.
-	Payload []byte
+	// Payloads contains the verified payload bytes, ordered exactly like the
+	// hashes committed in the referenced 003.
+	Payloads [][]byte
 	// Update is the signed cumulative payment update (wire message).
 	Update *pool.PaymentUpdate
 }
@@ -400,18 +382,27 @@ type VerifiedDelivery struct {
 // ContentDeliveryInput carries the caller-provided verification inputs for a
 // 004 delivery beyond the wire messages themselves.
 type ContentDeliveryInput struct {
-	// Seed contains the raw seed bytes when the delivered content is a block;
-	// it may be empty for seed-type content.
+	// Seed contains the raw seed bytes when the delivered batch includes any
+	// block; it may be empty when a pure-seed batch itself carries the seed.
 	Seed []byte
 	// BlockHeight is the caller-provided current block height, read only when
 	// the opening's refund uses a block-height locktime.
 	BlockHeight uint32
 }
 
-// AcceptDelivery verifies the request linkage, seller signature, content hash,
-// size, and seed binding of the 004 delivery, then builds and signs the next
-// 005 cumulative payment update. System UTC is read once at entry; verified
-// content bytes are returned as data and saving them is the application's job.
+// AcceptDelivery verifies one complete 004 delivery against the exact original
+// 003 the application routed by PaymentAuthorizationHash. Before any payload
+// or payment work it re-validates the full time-independent 003 evidence:
+// quote signature, buyer signature over the exact TermsCBOR, QuoteTermsHash
+// match, and Buyer/Seller/Arbiter binding to the explicitly supplied
+// OpeningProof — a delivery whose authorization was never signed by this
+// buyer can never reach 005 here. It then re-computes and compares the
+// authorization hash, verifies the seller signature over the bare 32-byte
+// hash, and validates every payload's count, order, hash, membership, and
+// protocol length before recomputing the aggregate price, target sequence,
+// and absolute cumulative amount. Only when all items succeed does it build
+// and sign exactly one 005. System UTC is read once at entry; saving the
+// returned payloads is the application's job.
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, input ContentDeliveryInput) (*VerifiedDelivery, error) {
 	if workflow == nil {
 		return nil, errors.New("buyer workflow is required")
@@ -424,20 +415,7 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.Signe
 	opening = pool.CloneOpeningProof(opening)
 	previous = pool.ClonePaymentState(previous)
 	at := time.Now().UTC()
-	requestTerms, err := bitfs.DecodeContentRequestTerms(localRequest.TermsCBOR)
-	if err != nil {
-		return nil, err
-	}
 	localQuote := bitfs.CloneSignedFileQuote(quote)
-	quoteTerms, err := bitfs.DecodeFileQuoteTerms(localQuote.TermsCBOR)
-	if err != nil {
-		return nil, err
-	}
-	openingDetails, err := pool.DeriveOpeningDetails(opening)
-	if err != nil {
-		return nil, fmt.Errorf("derive pool opening details: %w", err)
-	}
-	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(requestTerms.RefundTemplateTxID))
 	if err := workflow.verifyOpeningOwnership(ctx, opening); err != nil {
 		return nil, err
 	}
@@ -451,52 +429,73 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.Signe
 	if err := checkPoolNotExpired(opening, at, input.BlockHeight); err != nil {
 		return nil, fmt.Errorf("verify pool refund is still available: %w", err)
 	}
-	if openingDetails.RefundTemplateTxID != refundTemplateTxID || requestTerms.MinerFeeRateSatPerKB != opening.MinerFeeRateSatPerKB {
+	// 完整时间无关证据验证：报价签名、池绑定、买方签名、报价哈希与角色绑定。
+	// 未获本买方签名的伪造 003 在此被拒绝，绝不进入 payload 校验或 005 构造。
+	requestTerms, quoteTerms, err := bitfs.VerifyContentRequestEvidence(localRequest, localQuote, opening)
+	if err != nil {
+		return nil, err
+	}
+	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(requestTerms.RefundTemplateTxID))
+	openingDetails, err := pool.DeriveOpeningDetails(opening)
+	if err != nil {
+		return nil, fmt.Errorf("derive pool opening details: %w", err)
+	}
+	if openingDetails.RefundTemplateTxID != refundTemplateTxID {
 		return nil, fmt.Errorf("%w: content request is not bound to opening proof", bitfs.ErrInvalidEvidence)
 	}
-	if !bytes.Equal(opening.BuyerPubKey, quoteTerms.BuyerPubkey) || !bytes.Equal(opening.SellerPubKey, localQuote.SellerPubkey) || !bytes.Equal(opening.ArbiterPubKey, requestTerms.SelectedArbiterPubkey) {
-		return nil, fmt.Errorf("%w: verify pool participants", bitfs.ErrInvalidEvidence)
+	// 本操作唯一一次读取的 at 同时用于报价过期与交付截止判断。
+	if err := checkRequestTimingLocal(requestTerms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	// 重新计算 003 授权哈希并逐字节比较；004 只携带这个 32 字节哈希。
+	requestHash, err := bitfs.PaymentAuthorizationHash(localRequest.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if len(localDelivery.PaymentAuthorizationHash) != sha256.Size || !bytes.Equal(localDelivery.PaymentAuthorizationHash, requestHash[:]) {
+		return nil, fmt.Errorf("%w: delivery does not reference supplied request", bitfs.ErrInvalidEvidence)
+	}
+	// 卖方签名只覆盖精确 32 字节授权哈希（裸消息签名路径）。
+	if err := bitfs.VerifySignature(opening.SellerPubKey, localDelivery.PaymentAuthorizationHash, localDelivery.SellerPaymentAuthorizationHashSignature); err != nil {
+		return nil, fmt.Errorf("%w: seller signature invalid: %v", bitfs.ErrInvalidEvidence, err)
+	}
+	contentHashes, err := bitfs.DecodeContentHashes(requestTerms.ContentHashesCBOR)
+	if err != nil {
+		return nil, err
+	}
+	payloads, err := bitfs.DecodeContentPayloads(localDelivery.ContentPayloadsCBOR)
+	if err != nil {
+		return nil, err
 	}
 	seed := append([]byte(nil), input.Seed...)
-	payload, requestTermsEvidence, _, err := bitfs.VerifyContentDeliveryEvidenceWithSeed(localRequest, localDelivery, localQuote, seed)
+	effectiveSeed, err := bitfs.VerifyContentPayloadsContext(ctx, quoteTerms, contentHashes, payloads, seed)
 	if err != nil {
 		return nil, err
 	}
-	// 交付验证返回的 quote terms 用于本操作唯一一次的时间判断。
-	quoteTermsEvidence, err := bitfs.VerifyFileQuoteEvidence(localQuote)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkRequestTimingLocal(requestTermsEvidence, quoteTermsEvidence, at); err != nil {
-		return nil, err
-	}
-	if previous == nil || previous.PaymentSequence != uint32(requestTerms.BasePaymentSequence) {
+	if previous == nil || previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 != requestTerms.PaymentSequence {
 		return nil, bitfs.ErrStalePaymentSequence
 	}
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	if requestTerms.PaymentSequenceAfter != uint64(previous.PaymentSequence+1) || requestTerms.PaymentSequenceAfter > uint64(^uint32(0)-1) || requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
-		return nil, bitfs.ErrStalePaymentSequence
-	}
-	if previous.PaymentSequence >= 0xfffffffe {
+	if previous.PaymentSequence >= ^uint32(0)-1 {
 		return nil, fmt.Errorf("%w: payment sequence exhausted", bitfs.ErrStalePaymentSequence)
+	}
+	price, err := bitfs.ContentHashesPriceSat(quoteTerms, contentHashes, effectiveSeed)
+	if err != nil {
+		return nil, err
+	}
+	if previous.SellerAmountSat > ^uint64(0)-price || requestTerms.SellerAmountAfterSat != previous.SellerAmountSat+price {
+		return nil, fmt.Errorf("%w: seller amount does not match aggregate content price", bitfs.ErrInvalidEvidence)
 	}
 	updateInput := pool.PaymentUpdateInput{
 		Opening:              opening,
 		Previous:             previous,
-		PaymentSequenceAfter: previous.PaymentSequence + 1,
+		PaymentSequence:      requestTerms.PaymentSequence,
 		SellerAmountAfterSat: requestTerms.SellerAmountAfterSat,
 	}
 	if err := engine.CheckPaymentCapacity(ctx, updateInput); err != nil {
 		return nil, err
-	}
-	price, err := bitfs.ContentPriceSat(quoteTerms, requestTerms.ContentType, uint64(len(payload)))
-	if err != nil {
-		return nil, err
-	}
-	if ^uint64(0)-previous.SellerAmountSat < price || requestTerms.SellerAmountAfterSat != previous.SellerAmountSat+price {
-		return nil, fmt.Errorf("%w: seller amount does not match content price", bitfs.ErrInvalidEvidence)
 	}
 	unsigned, err := engine.BuildPaymentUpdate(ctx, updateInput)
 	if err != nil {
@@ -512,18 +511,18 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.Signe
 	if unsigned == nil || unsigned.RefundTemplateTxID != refundTemplateTxID || unsigned.PaymentSequence <= previous.PaymentSequence {
 		return nil, fmt.Errorf("%w: signed payment state is stale", bitfs.ErrStalePaymentSequence)
 	}
-	requestHash, err := bitfs.PaymentAuthorizationHash(localRequest.TermsCBOR)
-	if err != nil {
-		return nil, err
-	}
 	update := &pool.PaymentUpdate{
 		Version:                   pool.MajorVersion,
 		RefundTemplateTxID:        refundTemplateTxID,
-		PaymentAuthorizationHash:  requestHash[:],
+		PaymentAuthorizationHash:  append([]byte(nil), requestHash[:]...),
 		UnsignedStateTxRaw:        append([]byte(nil), unsigned.RawTx...),
 		BuyerTransactionSignature: append([]byte(nil), buyerSig...),
 	}
-	return &VerifiedDelivery{Payload: append([]byte(nil), payload...), Update: update}, nil
+	verifiedPayloads := make([][]byte, len(payloads))
+	for index := range payloads {
+		verifiedPayloads[index] = append([]byte(nil), payloads[index]...)
+	}
+	return &VerifiedDelivery{Payloads: verifiedPayloads, Update: update}, nil
 }
 
 // BuildImmediateClose constructs the unsigned immediate-close candidate and

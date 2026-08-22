@@ -35,14 +35,14 @@ type Hash32 [sha256.Size]byte
 // 不能把所有 32 字节值混成资金池关联 ID。
 type RefundTemplateTxID [sha256.Size]byte
 
-// Reference 标识内容请求所使用的结算资金池以及请求建立在其上的付款序号。
+// Reference 标识内容请求所使用的结算资金池以及返回引用时的当前付款状态序号。
 type Reference struct {
 	// RefundTemplateTxID 是费用池的统一关联 ID，即未嵌入角色签名的规范退款
 	// 模板交易的交易 ID。后续付款状态和内容请求都必须属于该资金池。
 	RefundTemplateTxID RefundTemplateTxID
-	// BasePaymentSequence 是内容请求发起前已接受状态的付款序号。
-	// 内容交付产生的新付款通常必须以该序号为基准，并递增一个序号。
-	BasePaymentSequence uint32
+	// PaymentSequence 是返回引用时资金池已接受状态的付款序号。003 wire 只
+	// 携带本次目标序号；目标序号由接收方验证为该当前状态序号加一。
+	PaymentSequence uint32
 }
 
 // OpeningProof 保存买卖双方相互验证后、用于开立资金池的退款交易和资金交易证据。
@@ -227,8 +227,9 @@ type PaymentUpdateInput struct {
 	Opening *OpeningProof
 	// Previous 是上一笔已接受的付款状态；首次构造付款时可表示初始退款状态。
 	Previous *PaymentState
-	// PaymentSequenceAfter 是新付款状态的目标序号，通常必须为上一序号加 1。
-	PaymentSequenceAfter uint32
+	// PaymentSequence 是新付款状态的目标序号；普通内容交付更新必须为
+	// 上一序号恰好加 1，且不得使用保留的最终关闭序号。
+	PaymentSequence uint32
 	// SellerAmountAfterSat 是新状态中卖方的累计金额，单位为 satoshi。
 	SellerAmountAfterSat uint64
 }

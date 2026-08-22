@@ -1,6 +1,6 @@
-# 003：买家构造内容请求
+# 003：买家构造批量内容授权
 
-这一步回答“买家需要某个文件时，应该如何 build 报文”。买家使用已经开启的费用池和报价条款，为指定的内容引用生成 `SignedContentRequest`。
+这一步回答“买家需要某组内容时，应该如何 build 报文”。买家使用已经开启的费用池和报价条款，为一个**有序内容 hash 批次**生成一条 `SignedContentRequest`：一个付款序号授权一组内容 hash，价格逐项计算后安全累加。
 
 go-bitfs SDK 无状态：workflow 只持有买家官方 BSV 私钥。报价、开池证据和最新付款状态都由 fixture（调用方应用）显式持有并逐个传入；SDK 在操作入口自取一次 UTC，不读取任何内部存储。
 
@@ -16,31 +16,29 @@ go run ./demo/03_content_request/01_build_request
 request, err := buyerWorkflow.BuildContentRequest(ctx,
     quote, opening, previousPayment,
     buyer.ContentRequestInput{
-        Content:          bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: seedHash},
-        ContentSize:      1,
+        // 有序 hash 批次：等于报价 SeedHash 的项即 seed，其余必须是该 seed
+        // 提交过的块；类型由证据推导，不由调用方声明。
+        ContentHashes:    [][]byte{seedHash},
         DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix()),
-    },
-    now)
+    })
 ```
 
 伪代码表示为：
 
 ```text
-sequence = previousPayment.PaymentSequence + 1
-price    = quote.SeedPriceSat * ContentSize
-request  = ContentRequest{
-    QuoteTermsHash: QuoteTermsHash,
-    RefundTemplateTxID:   RefundTemplateTxID,
-    Sequence:       sequence,
-    ContentRef:     ContentRef,
-    ContentSize:    ContentSize,
-    Price:          price,
-    Deadline:       Deadline,
-    BuyerPubKey:    buyer.PublicKey,
-}
-signedRequest, err := buyer.BuildContentRequest(...) // SDK 用构造时传入的私钥签名
+hashes  = [seedHash]                      // 或 [blockHash0, blockHash1, ...]
+price   = sum(priceOf(h) for h in hashes) // 逐项 checked-add，绝不回绕
+terms   = [
+    quote_terms_hash,                     // 选择报价（费用池由 txid 选择）
+    refund_template_txid,                 // 选择费用池并恢复角色与费率
+    payment_sequence,                     // 本次目标序号 = 当前已接受序号 + 1
+    seller_amount_after_sat,              // 付款后卖方绝对累计金额
+    content_hashes_cbor,                  // 规范子 CBOR bstr：1..64 个有序 hash
+    delivery_deadline_unix,
+]
+request = [4, terms_cbor, buyer_signature] // Buyer 签名精确覆盖 terms_cbor
 ```
 
-标准输出的 `SIGNED_CONTENT_REQUEST_HEX` 就是买家要发送给卖家的需求报文。003 条款中的 `refund_template_txid` 是费用池统一关联 ID，Buyer 签名覆盖该字段。调试输出会把 terms hash、费用池关联 ID、内容引用、序号、大小、价格、截止时间、买家公钥、请求 hash 和买家签名逐项打印出来。
+标准输出的 `SIGNED_CONTENT_REQUEST_HEX` 就是买家要发送给卖家的授权报文。003 条款不再重复携带公钥或矿工费率——这些值由 `refund_template_txid` 对应且不可修改的 OpeningProof 唯一确定。调试输出会把 quote hash、费用池关联 ID、有序 hash 批次、目标序号、绝对累计金额和截止时间逐项打印出来。
 
-注意：这个请求表达的是“请交付这个内容”，不是付款交易本身。卖家验证请求后，下一步才会生成内容交付报文。
+注意：这条授权表达的是“请交付这一批内容”，不是付款交易本身。卖家验证整批请求后，下一步才会生成一个原子交付整个批次 payload 的 004。

@@ -1,13 +1,53 @@
-; 003 and 004 content credentials use major 4.
-content-request-terms = [4, quote-hash, refund-template-txid, uint, uint, uint, uint, buyer-pubkey, seller-pubkey, arbiter-pubkey, content-type, content-hash, deadline]
-content-delivery-terms = [4, refund-template-txid, payment-authorization-hash, content-bytes]
+; BitFS v4 003/004 content credentials — final post-switch shapes only.
+; Pre-switch v4 (13-element terms, inner version, single hash, 3-element
+; delivery, DeliveryTerms layer) is not accepted anywhere in v4.
+
+; 003 SignedContentRequest outer shell: the shell version does not enter the
+; buyer signature, which covers exactly content-request-terms-cbor.
+signed-content-request = [4, content-request-terms-cbor, buyer-signature]
+
+; The terms are an independent child document carried as a bstr and signed as
+; those exact bytes. They carry no inner version and no duplicated public keys
+; or fee rate: RefundTemplateTxID selects the pool whose OpeningProof uniquely
+; determines Buyer/Seller/Arbiter keys and the miner fee rate.
+content-request-terms-cbor = bstr .cbor content-request-terms
+content-request-terms = [quote-hash, refund-template-txid, payment-sequence,
+                         seller-amount-after, content-hashes-cbor, deadline]
 quote-hash = bstr .size 32
 refund-template-txid = bstr .size 32
-buyer-pubkey = bstr
-seller-pubkey = bstr
-arbiter-pubkey = bstr
-content-type = uint
+; Single target payment sequence of this authorization: receivers verify it
+; equals previous + 1, never 0 and never the reserved final-close sentinel.
+payment-sequence = 1..4294967294
+; Absolute cumulative seller amount after the batch payment, not an increment.
+seller-amount-after = uint
+
+; Ordered batch of 1..64 unique 32-byte content hashes, deterministically
+; CBOR-encoded and embedded as a bstr child document. Order is part of the
+; authorization; duplicates are rejected.
+content-hashes-cbor = bstr .cbor content-hashes
 content-hash = bstr .size 32
-deadline = int
+content-hashes = [1*64 content-hash]
+
+; UTC unix seconds; must be positive and within quote expiry.
+deadline = 1..9223372036854775807
+
+buyer-signature = bstr
+
+; 004 SignedContentDelivery outer shell: four elements. The shell version does
+; not enter the seller signature, which covers exactly the 32-byte
+; payment-authorization-hash through the fixed SignMessage path (one extra
+; SHA-256 inside signing). Payloads sit after the signature fields and are
+; bound indirectly via the hashes committed in the referenced 003.
+signed-content-delivery = [4, payment-authorization-hash,
+                           seller-payment-authorization-hash-signature,
+                           content-payloads-cbor]
+
 payment-authorization-hash = bstr .size 32
-content-bytes = bstr
+seller-payment-authorization-hash-signature = bstr
+
+; Ordered payload batch matching the 003 hashes one-to-one; deterministically
+; CBOR-encoded and embedded as a bstr child document. Every payload is non-empty
+; and at most one MasterSeed block (262144 bytes).
+content-payloads-cbor = bstr .cbor content-payloads
+content-payload = bstr .size (1..262144)
+content-payloads = [1*64 content-payload]

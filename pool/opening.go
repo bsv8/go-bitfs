@@ -109,6 +109,42 @@ func DeriveOpeningDetails(proof *OpeningProof) (*OpeningDetails, error) {
 	return engine.deriveOpeningDetails(proof)
 }
 
+// 以下 Opening* 方法实现 bitfs.PoolOpeningEvidence：bitfs 验证 003 池绑定
+// 时只需要角色公钥与统一关联 ID 的只读视图，bitfs 不反向依赖本包。
+// OpeningRefundTemplateTxID 在证据无效时返回 nil，由调用方按长度拒绝。
+
+func (proof *OpeningProof) OpeningBuyerPubKey() []byte {
+	if proof == nil {
+		return nil
+	}
+	return proof.BuyerPubKey
+}
+
+func (proof *OpeningProof) OpeningSellerPubKey() []byte {
+	if proof == nil {
+		return nil
+	}
+	return proof.SellerPubKey
+}
+
+func (proof *OpeningProof) OpeningArbiterPubKey() []byte {
+	if proof == nil {
+		return nil
+	}
+	return proof.ArbiterPubKey
+}
+
+func (proof *OpeningProof) OpeningRefundTemplateTxID() []byte {
+	if proof == nil {
+		return nil
+	}
+	details, err := DeriveOpeningDetails(proof)
+	if err != nil {
+		return nil
+	}
+	return append([]byte(nil), details.RefundTemplateTxID[:]...)
+}
+
 // parseCanonicalTransaction is the only parser used for protocol transaction
 // identities.  The wire bytes themselves are the transaction identity: a
 // parser that accepts an alternate CompactSize encoding must not silently

@@ -7,37 +7,35 @@ title: "003 · Content Retrieval Request Requirements"
 
 ## What Problem This Solves
 
-Once the buyer has selected a quote and has an available fee pool, the buyer needs to send a request to the seller saying "please deliver this specific content." The request must enable the seller to verify: which quote the buyer selected, which pool's current payment capacity is being used, which arbitrator was chosen, whether a seed or a specific block is requested, and the delivery deadline.
+Once the buyer has selected a quote and has an available fee pool, the buyer needs to send the seller a final payment authorization saying "please deliver this ordered batch of content." One payment sequence authorizes one group of content hashes; prices are derived item by item and safely accumulated. The request must enable the seller to verify: which quote the buyer selected, which fee pool is being used, which target payment state the authorization applies to, what content is requested, and the delivery deadline.
 
-This is not 005 transaction signing, but it already commits the final cumulative amount and target sequence number that must be executed after the buyer inspects the delivery; the buyer has not yet inspected the content, and the fee pool amount has not yet advanced.
+This is not 005 transaction signing, but it already commits the absolute cumulative seller amount and the target sequence number that must be executed after the buyer inspects the delivery; the buyer has not yet inspected the content, and the fee pool amount has not yet advanced. The whole batch succeeds or fails atomically: there is no partial delivery, partial payment, or prefix acceptance.
 
 ## How Content Is Addressed
 
-There are only two types of content requests:
+003 carries an ordered batch of 1–64 unique 32-byte content hashes (`ContentHashesCBOR`, a deterministic CBOR child document embedded as `bstr`). There is no sender-declared content type:
 
-- `Seed`: Request the seed corresponding to the quote; the content hash MUST equal the `SeedHash` in the quote.
-- `Block`: Request a file block; the content hash MUST exist in the block hash list provided by the already-obtained seed.
-
-The seed contains the file block hash list, so the block index, actual block size, and tail-block identity can all be derived from the seed. The request does not redundantly send the block index or size. Blocks may be requested in any order; "obtain the seed first" is a content-discovery convention, not a payment-sequence implication.
+- A hash equal to the quote's `SeedHash` is recognized as the seed, priced at `SeedPriceSat`.
+- Every other hash MUST be found in that seed's block hash list, priced at its position's protocol expected length (full blocks at `FullBlockPriceSat`; tail blocks with the proportional round-up and 10% seller calculation rule).
+- A hash found nowhere returns `ErrContentNotInSeed`.
+- Order is part of the authorization: hashes are never sorted, deduplicated, or reordered before acceptance. Duplicate entries are rejected outright.
+- If the same hash occurs at multiple seed positions, it is purchased once and reused for every identical position in file reconstruction. If those positions imply conflicting expected lengths, the evidence is ambiguous and the whole request is rejected.
+- When the batch includes any block, the buyer MUST already hold a verified seed whose hash equals the quote's `SeedHash`. Mixed seed+block batches are allowed only under that condition; buyers who do not have the seed purchase it alone first.
 
 ## How the Fee Pool Is Addressed
 
-The buyer selects an available pool and its current latest cumulative payment state:
+The buyer selects an available pool by `RefundTemplateTxID` and commits to a single target `PaymentSequence`: receivers verify `request.PaymentSequence == previous.PaymentSequence + 1` against their current accepted state, and the target never exceeds `0xfffffffe`.
 
-```text
-RefundTemplateTxID + BasePaymentSequence
-```
+`SellerAmountAfterSat` is the seller's absolute cumulative amount after the batch payment — never a per-batch increment. The aggregate batch price must equal exactly `SellerAmountAfterSat - previous.SellerAmountSat`, accumulated with checked addition before signing; overflow, insufficient capacity, or any single item failing classification fails the whole construction before any signature exists.
 
-`BasePaymentSequence` is the fee pool state version — it is not a block sequence number, not a request sequence number, and does not encode any ordering between seeds and blocks. The buyer may select any one of their available pools but MUST use that pool's current latest state.
+The same pool MUST NOT be accepted by the seller for multiple outstanding requests simultaneously; otherwise the same balance would be committed multiple times. This is a local operational constraint on the calling application (serialize batches per pool); the SDK validates only explicit inputs and adds no stores, mutexes, or leases.
 
-The same pool MUST NOT be accepted by the seller for multiple outstanding requests simultaneously; otherwise the same balance would be committed multiple times, and the buyer could pay only once after the seller delivers several contents. This is a local operational constraint on the calling application; it does not turn the database into the source of truth — the seller's saved signed payment state is the authoritative record. The SDK validates only explicit inputs; delivery-context serialization, persistence, and confirmation timing are the calling application's responsibilities, as described in 005.
+In 003, the buyer commits to the target sequence number and absolute cumulative amount; the seller is not required to countersign or acknowledge these fields. The seller may deliver per 004, or may refuse or take no action; if the seller cannot deliver normally and the buyer declines to sign 005, the seller may use this final authorization for arbitration per 007.
 
-In 003, the buyer commits to the sequence number, absolute cumulative amount, and fixed fee rate; the seller is not required to countersign or acknowledge these fields. The seller may deliver per 004, or may refuse or take no action; if the seller cannot submit normally and the buyer declines to sign 005, the seller may use this final authorization request for arbitration per 007.
+## Why Only References Are Carried
 
-## Why Only a Reference Is Carried
+The request carries no public keys and no miner fee rate: Buyer/Seller/Arbiter keys and the fee rate are uniquely determined by the immutable OpeningProof behind `RefundTemplateTxID`. Any cryptographic verification therefore requires the corresponding OpeningProof (`VerifySignedContentRequestForOpening`); 007 already carries one and uses this path. The quote is selected by `QuoteTermsHash` alone — the fee pool cannot replace the quote, because the same pool can buy different quotes for the same roles.
 
-The request carries `QuoteTermsHash` rather than repeating the full quote text. This hash enables the seller to precisely locate the selected terms among multiple quotes; the seller verifies the original quote and its signature before it can verify the buyer's request signature.
+The exact `TermsCBOR` then produces `PaymentAuthorizationHash = SHA-256(TermsCBOR)`. 004 uses it to reference the authorization, 005 uses it to associate payment with a specific batch pickup, and 007 submits only the complete 003 authorization along with fee pool execution material — the arbitrator is not required to read 001, 004, payloads, or the historical payment chain.
 
-The request itself then produces `PaymentAuthorizationHash`. 004 uses it to reference the authorization, 005 uses it to associate payment with a specific pickup, and 007 submits only the complete 003 authorization along with fee pool execution material — the arbitrator is not required to read 001, 004, the payload, or the historical payment chain.
-
-For specific fields and validation rules, see [Content Retrieval Request Specification](003-content-request-spec.md).
+For encoding details, see [Content Retrieval Request Specification](003-content-request-spec.md).

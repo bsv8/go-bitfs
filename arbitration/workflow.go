@@ -127,12 +127,11 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	if err != nil {
 		return nil, fmt.Errorf("decode payment authorization: %w", err)
 	}
-	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization)
+	// 007 携带 OpeningProof：身份、费率与池绑定全部从证据恢复，003 只需
+	// 通过池绑定与买方签名验证；仲裁不读取 004 或 payload。
+	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, proof)
 	if err != nil {
 		return nil, fmt.Errorf("verify payment authorization: %w", err)
-	}
-	if err := ensureAuthorizationPool(terms, proof); err != nil {
-		return nil, err
 	}
 	if _, err := poolAdapter.VerifyArbitrationCandidate(ctx, request.UnsignedStateTxRaw, proof, terms, request.SellerTransactionSignature); err != nil {
 		return nil, fmt.Errorf("verify arbitration candidate: %w", err)
@@ -151,9 +150,14 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	if len(arbiterSig) == 0 {
 		return nil, fmt.Errorf("%w: arbiter signature is empty", pool.ErrInvalidEvidence)
 	}
-	authHash := sha256.Sum256(request.PaymentAuthorizationCBOR)
+	// 唯一真值：PaymentAuthorizationHash = SHA-256(003 TermsCBOR)，
+	// 与 004/005 携带的授权哈希完全一致；绝不对完整 003 外壳取哈希。
+	authHash, err := bitfs.PaymentAuthorizationHash(authorization.TermsCBOR)
+	if err != nil {
+		return nil, fmt.Errorf("compute payment authorization hash: %w", err)
+	}
 	txHash := sha256.Sum256(request.UnsignedStateTxRaw)
-	return &ArbitrationResponse{Version: MajorVersion, RefundTemplateTxID: derivedRefundTemplateTxID, PaymentAuthorizationHash: authHash[:], UnsignedStateTxHash: txHash[:], ArbiterTransactionSignature: append([]byte(nil), arbiterSig...)}, nil
+	return &ArbitrationResponse{Version: MajorVersion, RefundTemplateTxID: derivedRefundTemplateTxID, PaymentAuthorizationHash: append([]byte(nil), authHash[:]...), UnsignedStateTxHash: txHash[:], ArbiterTransactionSignature: append([]byte(nil), arbiterSig...)}, nil
 }
 
 // MarshalRequest validates and encodes a six-field 007 arbitration request led
@@ -273,29 +277,6 @@ func ValidateResponse(response *ArbitrationResponse) error {
 		}
 	}
 	return fmt.Errorf("%w: arbitration refund_template_txid must not be all zero", pool.ErrInvalidEvidence)
-}
-
-func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.OpeningProof) error {
-	if terms == nil || proof == nil {
-		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
-	}
-	details, err := pool.DeriveOpeningDetails(proof)
-	if err != nil || !bytes.Equal(terms.RefundTemplateTxID, details.RefundTemplateTxID[:]) {
-		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
-	}
-	if len(proof.BuyerPubKey) != 0 && !bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) {
-		return fmt.Errorf("%w: buyer role mismatch", pool.ErrInvalidEvidence)
-	}
-	if len(proof.SellerPubKey) != 0 && !bytes.Equal(terms.SellerPubkey, proof.SellerPubKey) {
-		return fmt.Errorf("%w: seller role mismatch", pool.ErrInvalidEvidence)
-	}
-	if len(proof.ArbiterPubKey) != 0 && !bytes.Equal(terms.SelectedArbiterPubkey, proof.ArbiterPubKey) {
-		return fmt.Errorf("%w: arbiter role mismatch", pool.ErrInvalidEvidence)
-	}
-	if proof.MinerFeeRateSatPerKB != 0 && terms.MinerFeeRateSatPerKB != proof.MinerFeeRateSatPerKB {
-		return fmt.Errorf("%w: fee rate mismatch", pool.ErrInvalidEvidence)
-	}
-	return nil
 }
 
 func decodeArray(data []byte, length int) ([]cbor.RawMessage, error) {

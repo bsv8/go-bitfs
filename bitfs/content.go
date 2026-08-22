@@ -11,7 +11,6 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/internal/protoclock"
-	"github.com/bsv8/go-bitfs/protocol"
 )
 
 const contentProtocolVersion uint64 = 4
@@ -22,130 +21,195 @@ type Hash32 [sha256.Size]byte
 // UnixSeconds is the protocol's UTC Unix-seconds representation.
 type UnixSeconds int64
 
-// ContentType identifies the two kinds of content addressable by a request.
-type ContentType uint64
-
-const (
-	// ContentSeed selects the seed payload in a content reference.
-	ContentSeed ContentType = 0
-	// ContentBlock identifies a block payload.
-	ContentBlock ContentType = 1
-)
-
-// ContentRef is the only content choice exposed by the new request API.
-type ContentRef struct {
-	Type ContentType
-	Hash []byte
-}
-
 // ContentRequestTerms is the unsigned, signed-bytes portion of the canonical
-// 003 final payment authorization. The historical type name is retained so
-// callers do not accidentally create a second authorization model.
+// 003 final payment authorization. It carries no public keys or fee rates:
+// those are uniquely determined by RefundTemplateTxID's OpeningProof, and the
+// quote is selected by QuoteTermsHash alone.
 type ContentRequestTerms struct {
-	QuoteTermsHash        []byte
-	RefundTemplateTxID    []byte
-	BasePaymentSequence   uint64
-	PaymentSequenceAfter  uint64
-	SellerAmountAfterSat  uint64
-	MinerFeeRateSatPerKB  uint64
-	BuyerPubkey           []byte
-	SellerPubkey          []byte
-	SelectedArbiterPubkey []byte
-	ContentType           ContentType
-	ContentHash           []byte
-	DeliveryDeadlineUnix  int64
+	// QuoteTermsHash selects the quote this authorization purchases from.
+	QuoteTermsHash []byte
+	// RefundTemplateTxID selects the fee pool and, through its immutable
+	// OpeningProof, the Buyer/Seller/Arbiter roles and miner fee rate.
+	RefundTemplateTxID []byte
+	// PaymentSequence is the single target payment state sequence of this
+	// authorization; receivers verify it equals previous + 1.
+	PaymentSequence uint32
+	// SellerAmountAfterSat is the seller's absolute cumulative amount after
+	// the batch payment, never a per-batch increment.
+	SellerAmountAfterSat uint64
+	// ContentHashesCBOR is the deterministic CBOR child document holding the
+	// ordered batch of 1..MaxContentBatchItems content hashes.
+	ContentHashesCBOR []byte
+	// DeliveryDeadlineUnix is the UTC deadline after which delivery is late.
+	DeliveryDeadlineUnix int64
 }
 
-// SignedContentRequest is the complete 003 final payment authorization.
+// SignedContentRequest is the complete 003 final payment authorization. The
+// buyer signature covers exactly TermsCBOR.
 type SignedContentRequest struct {
 	TermsCBOR      []byte
 	BuyerSignature []byte
 }
 
-// ContentDeliveryTerms is the unsigned, signed-bytes portion of 004. The
-// seller signature covers the pool's RefundTemplateTxID so an independently
-// delivered credential routes directly to its fee pool.
-type ContentDeliveryTerms struct {
-	RefundTemplateTxID       []byte
-	PaymentAuthorizationHash []byte
-	ContentBytes             []byte
-}
-
-// SignedContentDelivery is the complete 004 credential.
+// SignedContentDelivery is the complete 004 credential. The seller signature
+// covers exactly the 32-byte PaymentAuthorizationHash through the fixed
+// SignMessage path; payloads are bound indirectly via the hashes committed in
+// the referenced 003 terms and are carried after the signature fields.
 type SignedContentDelivery struct {
-	TermsCBOR       []byte
-	SellerSignature []byte
+	// PaymentAuthorizationHash 是被引用 003 条款规范编码的 SHA-256，长度固定
+	// 为 32 字节。它是内容寻址与证据关联 ID，不是访问授权令牌。
+	PaymentAuthorizationHash []byte
+	// SellerPaymentAuthorizationHashSignature 是卖方对精确 32 字节
+	// PaymentAuthorizationHash 的普通消息签名（SignMessage：再哈希一次后输出
+	// low-S DER）。它不覆盖 004 外壳、payload 或任何 CBOR 包装。
+	SellerPaymentAuthorizationHashSignature []byte
+	// ContentPayloadsCBOR 是确定性 CBOR 子文档，按顺序承载与 003 哈希一一对应
+	// 的 payload 数组。
+	ContentPayloadsCBOR []byte
 }
 
-// EncodeContentRequestTerms returns the exact deterministic CBOR array signed by
-// the buyer for a 003 request. It rejects nil terms and invalid field lengths.
+// EncodeContentHashes returns the sole canonical representation of the 003
+// content_hashes child document: an array of 1..MaxContentBatchItems unique,
+// ordered 32-byte hashes encoded as a deterministic CBOR byte string.
+func EncodeContentHashes(hashes [][]byte) ([]byte, error) {
+	if err := validateContentHashes(hashes); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	return canonicalEnc.Marshal(cloneByteSlices(hashes))
+}
+
+// DecodeContentHashes strictly decodes the content_hashes child document. It
+// rejects indefinite lengths, tags, trailing data, non-canonical encodings,
+// wrong counts, wrong hash widths, duplicates, and reordering attempts by
+// requiring byte equality with the deterministic re-encoding. The returned
+// slices are deep copies owned by the caller.
+func DecodeContentHashes(raw []byte) ([][]byte, error) {
+	var hashes [][]byte
+	if err := strictDec.Unmarshal(raw, &hashes); err != nil {
+		return nil, fmt.Errorf("%w: decode content hashes: %v", ErrInvalidEvidence, err)
+	}
+	if err := validateContentHashes(hashes); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	canonical, err := canonicalEnc.Marshal(hashes)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, raw) {
+		return nil, fmt.Errorf("%w: content hashes are not deterministically encoded", ErrInvalidEvidence)
+	}
+	return cloneByteSlices(hashes), nil
+}
+
+// EncodeContentPayloads returns the sole canonical representation of the 004
+// content_payloads child document: an array of 1..MaxContentBatchItems
+// non-empty payloads, each at most masterseed.BlockSize bytes.
+func EncodeContentPayloads(payloads [][]byte) ([]byte, error) {
+	if err := validateContentPayloads(payloads); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	return canonicalEnc.Marshal(cloneByteSlices(payloads))
+}
+
+// DecodeContentPayloads strictly decodes the content_payloads child document
+// with the same canonicality rules as DecodeContentHashes, plus per-item
+// non-empty and maximum-length checks. Inputs above MaxContentPayloadsCBORBytes
+// are rejected before decoding so a hostile length cannot bypass the item
+// count limit. The returned slices are deep copies owned by the caller.
+func DecodeContentPayloads(raw []byte) ([][]byte, error) {
+	if len(raw) == 0 || len(raw) > MaxContentPayloadsCBORBytes {
+		return nil, fmt.Errorf("%w: content payloads exceed the protocol size limit", ErrInvalidEvidence)
+	}
+	var payloads [][]byte
+	if err := strictDec.Unmarshal(raw, &payloads); err != nil {
+		return nil, fmt.Errorf("%w: decode content payloads: %v", ErrInvalidEvidence, err)
+	}
+	if err := validateContentPayloads(payloads); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	canonical, err := canonicalEnc.Marshal(payloads)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, raw) {
+		return nil, fmt.Errorf("%w: content payloads are not deterministically encoded", ErrInvalidEvidence)
+	}
+	return cloneByteSlices(payloads), nil
+}
+
+func validateContentHashes(hashes [][]byte) error {
+	if len(hashes) == 0 || len(hashes) > MaxContentBatchItems {
+		return fmt.Errorf("content hash count must be between 1 and %d", MaxContentBatchItems)
+	}
+	for index, hash := range hashes {
+		if len(hash) != sha256.Size {
+			return fmt.Errorf("content hash #%d must be %d bytes", index+1, sha256.Size)
+		}
+		for previous := 0; previous < index; previous++ {
+			if bytes.Equal(hashes[previous], hash) {
+				return fmt.Errorf("content hash #%d duplicates #%d", index+1, previous+1)
+			}
+		}
+	}
+	return nil
+}
+
+func validateContentPayloads(payloads [][]byte) error {
+	if len(payloads) == 0 || len(payloads) > MaxContentBatchItems {
+		return fmt.Errorf("content payload count must be between 1 and %d", MaxContentBatchItems)
+	}
+	for index, payload := range payloads {
+		if len(payload) == 0 {
+			return fmt.Errorf("content payload #%d must not be empty", index+1)
+		}
+		if uint64(len(payload)) > masterseed.BlockSize {
+			return fmt.Errorf("content payload #%d exceeds %d bytes", index+1, masterseed.BlockSize)
+		}
+	}
+	return nil
+}
+
+// EncodeContentRequestTerms returns the exact deterministic CBOR bytes signed
+// by the buyer for a 003 request: the six-element versionless terms array.
 func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	if err := ValidateContentRequestTerms(terms); err != nil {
 		return nil, fmt.Errorf("%w: content request terms: %v", ErrInvalidEvidence, err)
 	}
 	return canonicalEnc.Marshal([]any{
-		contentProtocolVersion,
 		bstr(terms.QuoteTermsHash),
 		bstr(terms.RefundTemplateTxID),
-		terms.BasePaymentSequence,
-		terms.PaymentSequenceAfter,
+		terms.PaymentSequence,
 		terms.SellerAmountAfterSat,
-		terms.MinerFeeRateSatPerKB,
-		bstr(terms.BuyerPubkey),
-		bstr(terms.SellerPubkey),
-		bstr(terms.SelectedArbiterPubkey),
-		terms.ContentType,
-		bstr(terms.ContentHash),
+		bstr(terms.ContentHashesCBOR),
 		terms.DeliveryDeadlineUnix,
 	})
 }
 
-// DecodeContentRequestTerms accepts only canonical 003 terms CBOR, checks the
-// fixed array shape and field encodings, and returns an independently owned value.
+// DecodeContentRequestTerms accepts only canonical six-element 003 terms CBOR.
+// Legacy thirteen-element terms, inner versions, single-hash requests, missing
+// or extra fields, and non-canonical encodings all return ErrInvalidEvidence.
 func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
-	values, err := decodeArray(data, 13)
+	values, err := decodeArray(data, 6)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode content request terms: %v", ErrInvalidEvidence, err)
 	}
 	terms := new(ContentRequestTerms)
-	var version uint64
-	if err := decode(values[0], &version); err != nil || version != contentProtocolVersion {
-		return nil, fmt.Errorf("%w: unsupported content request terms version", ErrInvalidEvidence)
-	}
-	if err := decode(values[1], &terms.QuoteTermsHash); err != nil {
+	if err := decode(values[0], &terms.QuoteTermsHash); err != nil {
 		return nil, fmt.Errorf("%w: quote_terms_hash: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[2], &terms.RefundTemplateTxID); err != nil {
+	if err := decode(values[1], &terms.RefundTemplateTxID); err != nil {
 		return nil, fmt.Errorf("%w: refund_template_txid: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[3], &terms.BasePaymentSequence); err != nil {
-		return nil, fmt.Errorf("%w: base_payment_sequence: %v", ErrInvalidEvidence, err)
+	if err := decode(values[2], &terms.PaymentSequence); err != nil {
+		return nil, fmt.Errorf("%w: payment_sequence: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[4], &terms.PaymentSequenceAfter); err != nil {
-		return nil, fmt.Errorf("%w: payment_sequence_after: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[5], &terms.SellerAmountAfterSat); err != nil {
+	if err := decode(values[3], &terms.SellerAmountAfterSat); err != nil {
 		return nil, fmt.Errorf("%w: seller_amount_after_sat: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[6], &terms.MinerFeeRateSatPerKB); err != nil {
-		return nil, fmt.Errorf("%w: miner_fee_rate_sat_per_kb: %v", ErrInvalidEvidence, err)
+	if err := decode(values[4], &terms.ContentHashesCBOR); err != nil {
+		return nil, fmt.Errorf("%w: content_hashes_cbor: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[7], &terms.BuyerPubkey); err != nil {
-		return nil, fmt.Errorf("%w: buyer_pubkey: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[8], &terms.SellerPubkey); err != nil {
-		return nil, fmt.Errorf("%w: seller_pubkey: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[9], &terms.SelectedArbiterPubkey); err != nil {
-		return nil, fmt.Errorf("%w: selected_arbiter_pubkey: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[10], &terms.ContentType); err != nil {
-		return nil, fmt.Errorf("%w: content_type: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[11], &terms.ContentHash); err != nil {
-		return nil, fmt.Errorf("%w: content_hash: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[12], &terms.DeliveryDeadlineUnix); err != nil {
+	if err := decode(values[5], &terms.DeliveryDeadlineUnix); err != nil {
 		return nil, fmt.Errorf("%w: delivery_deadline_unix: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateContentRequestTerms(terms); err != nil {
@@ -161,7 +225,8 @@ func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	return cloneContentRequestTerms(terms), nil
 }
 
-// PaymentAuthorizationHash validates canonical request terms and returns their SHA-256 digest.
+// PaymentAuthorizationHash validates canonical request terms and returns their
+// SHA-256 digest. It is defined exclusively over the 003 TermsCBOR.
 func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	if _, err := DecodeContentRequestTerms(termsCBOR); err != nil {
 		return Hash32{}, err
@@ -171,16 +236,12 @@ func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 
 // NewSignedContentRequest deterministically encodes request terms and signs
 // those exact bytes with the official BSV private key through the fixed
-// single-SHA-256 message path. The derived public key must match
-// terms.BuyerPubkey, and the fixed verifier re-checks the signature before the
-// credential is returned. The private key never enters any wire message,
-// local result, log, or persisted structure.
+// single-SHA-256 message path. The signature is later verified against the
+// BuyerPubKey restored from the referenced OpeningProof; the private key never
+// enters any wire message, local result, log, or persisted structure.
 func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error) {
 	if buyerKey == nil {
 		return nil, errors.New("buyer private key is required")
-	}
-	if !bytes.Equal(buyerKey.PubKey().Compressed(), terms.BuyerPubkey) {
-		return nil, fmt.Errorf("%w: buyer private key does not match request terms pubkey", ErrInvalidEvidence)
 	}
 	termsCBOR, err := EncodeContentRequestTerms(terms)
 	if err != nil {
@@ -199,8 +260,8 @@ func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey
 	}, nil
 }
 
-// EncodeSignedContentRequest encodes the complete 003 credential, including the
-// original terms bytes, buyer key, and signature, without re-signing it.
+// EncodeSignedContentRequest encodes the complete 003 credential:
+// [version, terms_cbor, buyer_signature].
 func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
 		return nil, errors.New("signed content request and buyer signature are required")
@@ -216,7 +277,7 @@ func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 }
 
 // DecodeSignedContentRequest decodes a canonical 003 credential and rejects
-// malformed array shape, versions, and byte fields before returning a copy.
+// malformed array shapes, versions, and byte fields before returning a copy.
 func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	values, err := decodeArray(data, 3)
 	if err != nil {
@@ -243,123 +304,61 @@ func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 	return cloneSignedContentRequest(request), nil
 }
 
-// EncodeContentDeliveryTerms returns the deterministic 004 terms bytes that bind
-// delivery content to a previously authorized request and seller identity.
-func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
-	if err := ValidateContentDeliveryTerms(terms); err != nil {
-		return nil, fmt.Errorf("%w: content delivery terms: %v", ErrInvalidEvidence, err)
-	}
-	return canonicalEnc.Marshal([]any{
-		contentProtocolVersion,
-		bstr(terms.RefundTemplateTxID),
-		bstr(terms.PaymentAuthorizationHash),
-		bstr(terms.ContentBytes),
-	})
-}
-
-// DecodeContentDeliveryTerms decodes canonical 004 terms and validates its fixed
-// array shape and byte-field lengths.
-func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
-	values, err := decodeArray(data, 4)
-	if err != nil {
-		return nil, fmt.Errorf("%w: decode content delivery terms: %v", ErrInvalidEvidence, err)
-	}
-	terms := new(ContentDeliveryTerms)
-	var version uint64
-	if err := decode(values[0], &version); err != nil || version != contentProtocolVersion {
-		return nil, fmt.Errorf("%w: unsupported content delivery terms version", ErrInvalidEvidence)
-	}
-	if err := decode(values[1], &terms.RefundTemplateTxID); err != nil {
-		return nil, fmt.Errorf("%w: refund_template_txid: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[2], &terms.PaymentAuthorizationHash); err != nil {
-		return nil, fmt.Errorf("%w: payment_authorization_hash: %v", ErrInvalidEvidence, err)
-	}
-	if err := decode(values[3], &terms.ContentBytes); err != nil {
-		return nil, fmt.Errorf("%w: content bytes: %v", ErrInvalidEvidence, err)
-	}
-	if err := ValidateContentDeliveryTerms(terms); err != nil {
-		return nil, fmt.Errorf("%w: content delivery terms: %v", ErrInvalidEvidence, err)
-	}
-	canonical, err := EncodeContentDeliveryTerms(terms)
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: content delivery terms are not deterministically encoded", ErrInvalidEvidence)
-	}
-	return cloneContentDeliveryTerms(terms), nil
-}
-
-// ContentDeliveryTermsHash validates canonical delivery terms and returns their SHA-256 digest.
-func ContentDeliveryTermsHash(termsCBOR []byte) (Hash32, error) {
-	if _, err := DecodeContentDeliveryTerms(termsCBOR); err != nil {
-		return Hash32{}, err
-	}
-	return Hash32(sha256.Sum256(termsCBOR)), nil
-}
-
-// NewSignedContentDelivery binds payload bytes to the request authorization
-// hash and signs the resulting deterministic delivery terms with the official
-// BSV private key through the fixed single-SHA-256 message path. The derived
-// public key must match the seller key committed by the request, and the fixed
-// verifier re-checks the signature before the credential is returned.
-func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error) {
+// NewSignedContentDelivery signs the exact 32-byte payment authorization hash
+// with the official BSV private key through the fixed SignMessage path and
+// attaches the canonically encoded payload batch. Callers must fully verify
+// the referenced 003, the quote, the opening proof, and every payload before
+// invoking this constructor.
+func NewSignedContentDelivery(paymentAuthorizationHash []byte, payloads [][]byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error) {
 	if sellerKey == nil {
 		return nil, errors.New("seller private key is required")
 	}
-	if request == nil {
-		return nil, errors.New("signed content request is required")
+	if len(paymentAuthorizationHash) != sha256.Size {
+		return nil, fmt.Errorf("%w: payment_authorization_hash must be 32 bytes", ErrInvalidEvidence)
 	}
-	requestHash, err := PaymentAuthorizationHash(request.TermsCBOR)
+	payloadsCBOR, err := EncodeContentPayloads(payloads)
 	if err != nil {
 		return nil, err
 	}
-	requestTerms, err := DecodeContentRequestTerms(request.TermsCBOR)
+	signature, err := SignMessage(sellerKey, paymentAuthorizationHash)
 	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(sellerKey.PubKey().Compressed(), requestTerms.SellerPubkey) {
-		return nil, fmt.Errorf("%w: seller private key does not match request terms pubkey", ErrInvalidEvidence)
-	}
-	terms, err := EncodeContentDeliveryTerms(&ContentDeliveryTerms{
-		RefundTemplateTxID:       append([]byte(nil), requestTerms.RefundTemplateTxID...),
-		PaymentAuthorizationHash: requestHash[:],
-		ContentBytes:             append([]byte(nil), payload...),
-	})
-	if err != nil {
-		return nil, err
-	}
-	signature, err := SignMessage(sellerKey, terms)
-	if err != nil {
-		return nil, fmt.Errorf("sign content delivery terms: %w", err)
+		return nil, fmt.Errorf("sign payment authorization hash: %w", err)
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("seller signature is required")
 	}
-	return &SignedContentDelivery{TermsCBOR: terms, SellerSignature: append([]byte(nil), signature...)}, nil
+	return &SignedContentDelivery{
+		PaymentAuthorizationHash:                append([]byte(nil), paymentAuthorizationHash...),
+		SellerPaymentAuthorizationHashSignature: append([]byte(nil), signature...),
+		ContentPayloadsCBOR:                     payloadsCBOR,
+	}, nil
 }
 
-// EncodeSignedContentDelivery encodes the complete seller-signed 004 credential;
-// it preserves the supplied terms bytes and detached seller signature exactly.
+// EncodeSignedContentDelivery encodes the complete 004 credential:
+// [version, payment_authorization_hash, seller_signature, content_payloads_cbor].
 func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error) {
-	if delivery == nil || len(delivery.SellerSignature) == 0 {
+	if delivery == nil || len(delivery.SellerPaymentAuthorizationHashSignature) == 0 {
 		return nil, errors.New("signed content delivery and seller signature are required")
 	}
-	if _, err := DecodeContentDeliveryTerms(delivery.TermsCBOR); err != nil {
+	if len(delivery.PaymentAuthorizationHash) != sha256.Size {
+		return nil, fmt.Errorf("%w: payment_authorization_hash must be 32 bytes", ErrInvalidEvidence)
+	}
+	if _, err := DecodeContentPayloads(delivery.ContentPayloadsCBOR); err != nil {
 		return nil, err
 	}
 	return canonicalEnc.Marshal([]any{
 		contentProtocolVersion,
-		bstr(delivery.TermsCBOR),
-		bstr(delivery.SellerSignature),
+		bstr(delivery.PaymentAuthorizationHash),
+		bstr(delivery.SellerPaymentAuthorizationHashSignature),
+		bstr(delivery.ContentPayloadsCBOR),
 	})
 }
 
-// DecodeSignedContentDelivery decodes canonical 004 credential bytes and rejects
-// malformed shape or fields before returning an independently owned value.
+// DecodeSignedContentDelivery decodes canonical 004 credential bytes. The
+// four-element shell is mandatory: legacy three-element deliveries, pool IDs
+// inside 004, and payloads inside signed terms all fail here.
 func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
-	values, err := decodeArray(data, 3)
+	values, err := decodeArray(data, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode signed content delivery: %v", ErrInvalidEvidence, err)
 	}
@@ -368,11 +367,14 @@ func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	if err := decode(values[0], &version); err != nil || version != contentProtocolVersion {
 		return nil, fmt.Errorf("%w: unsupported signed content delivery version", ErrInvalidEvidence)
 	}
-	if err := decode(values[1], &delivery.TermsCBOR); err != nil {
-		return nil, fmt.Errorf("%w: delivery terms: %v", ErrInvalidEvidence, err)
+	if err := decode(values[1], &delivery.PaymentAuthorizationHash); err != nil {
+		return nil, fmt.Errorf("%w: payment_authorization_hash: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[2], &delivery.SellerSignature); err != nil {
-		return nil, fmt.Errorf("%w: seller signature: %v", ErrInvalidEvidence, err)
+	if err := decode(values[2], &delivery.SellerPaymentAuthorizationHashSignature); err != nil {
+		return nil, fmt.Errorf("%w: seller_payment_authorization_hash_signature: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[3], &delivery.ContentPayloadsCBOR); err != nil {
+		return nil, fmt.Errorf("%w: content_payloads_cbor: %v", ErrInvalidEvidence, err)
 	}
 	canonical, err := EncodeSignedContentDelivery(delivery)
 	if err != nil {
@@ -384,168 +386,224 @@ func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	return cloneSignedContentDelivery(delivery), nil
 }
 
-// refundTemplateTxIDIsZero reports whether a decoded hash is the all-zero "unset"
-// sentinel, which must never enter encoding, storage, or network paths.
-func refundTemplateTxIDIsZero(raw []byte) bool {
-	for _, b := range raw {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
+// PoolOpeningEvidence is the minimal opening-proof view needed to bind a 003
+// to its fee pool without importing the pool package. *pool.OpeningProof
+// implements it with exported helper methods.
+type PoolOpeningEvidence interface {
+	OpeningBuyerPubKey() []byte
+	OpeningSellerPubKey() []byte
+	OpeningArbiterPubKey() []byte
+	OpeningRefundTemplateTxID() []byte
 }
 
-// ValidateContentRequestTerms checks the 003 version, quote hash, pool reference,
-// content selector, arbiter key, size, and delivery deadline before signing.
-func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
-	if terms == nil {
-		return errors.New("content request terms are required")
+// VerifySignedContentRequestForOpening verifies the pool binding and buyer
+// signature of a 003 for evidence that already carries its OpeningProof, such
+// as the 007 arbitration submission. It derives the RefundTemplateTxID from
+// the supplied opening, requires an exact match, and verifies the buyer
+// signature against the opening's buyer key over the exact TermsCBOR. Quote,
+// content, and timing facts are intentionally out of scope here.
+func VerifySignedContentRequestForOpening(request *SignedContentRequest, opening PoolOpeningEvidence) (*ContentRequestTerms, error) {
+	if request == nil || len(request.BuyerSignature) == 0 {
+		return nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
 	}
-	if len(terms.QuoteTermsHash) != sha256.Size {
-		return errors.New("quote_terms_hash must be 32 bytes")
+	if opening == nil {
+		return nil, fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)
 	}
-	if len(terms.RefundTemplateTxID) != sha256.Size {
-		return errors.New("refund_template_txid must be 32 bytes")
+	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
+	if err != nil {
+		return nil, err
 	}
-	if refundTemplateTxIDIsZero(terms.RefundTemplateTxID) {
-		return errors.New("refund_template_txid must not be all zero")
+	derived := opening.OpeningRefundTemplateTxID()
+	if len(derived) != sha256.Size || !bytes.Equal(derived, terms.RefundTemplateTxID) {
+		return nil, fmt.Errorf("%w: content request is not bound to supplied opening proof", ErrInvalidEvidence)
 	}
-	if terms.PaymentSequenceAfter == 0 || terms.BasePaymentSequence == ^uint64(0) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) {
-		return errors.New("payment_sequence_after must equal base_payment_sequence plus one")
+	if err := VerifySignature(opening.OpeningBuyerPubKey(), request.TermsCBOR, request.BuyerSignature); err != nil {
+		return nil, fmt.Errorf("%w: buyer authorization signature invalid: %v", ErrInvalidEvidence, err)
 	}
-	if err := protocol.ValidateCompressedPubKey(terms.BuyerPubkey); err != nil {
-		return fmt.Errorf("buyer_pubkey: %w", err)
-	}
-	if err := protocol.ValidateCompressedPubKey(terms.SellerPubkey); err != nil {
-		return fmt.Errorf("seller_pubkey: %w", err)
-	}
-	if err := protocol.ValidateCompressedPubKey(terms.SelectedArbiterPubkey); err != nil {
-		return fmt.Errorf("selected_arbiter_pubkey: %w", err)
-	}
-	if terms.ContentType != ContentSeed && terms.ContentType != ContentBlock {
-		return fmt.Errorf("unsupported content_type %d", terms.ContentType)
-	}
-	if len(terms.ContentHash) != masterseed.DigestSize {
-		return errors.New("content_hash must be 32 bytes")
-	}
-	if terms.DeliveryDeadlineUnix <= 0 {
-		return errors.New("delivery_deadline_unix is required")
-	}
-	return nil
+	return terms, nil
 }
 
-// ValidateContentDeliveryTerms checks the 004 version, authorization hash, seller
-// key, content hash, and declared payload length before delivery is accepted.
-func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
-	if terms == nil {
-		return errors.New("content delivery terms are required")
-	}
-	if len(terms.RefundTemplateTxID) != sha256.Size {
-		return errors.New("refund_template_txid must be 32 bytes")
-	}
-	if refundTemplateTxIDIsZero(terms.RefundTemplateTxID) {
-		return errors.New("refund_template_txid must not be all zero")
-	}
-	if len(terms.PaymentAuthorizationHash) != sha256.Size {
-		return errors.New("payment_authorization_hash must be 32 bytes")
-	}
-	if len(terms.ContentBytes) > masterseed.BlockSize {
-		return fmt.Errorf("content_bytes exceeds %d bytes", BlockSize)
-	}
-	return nil
+// VerifyContentRequestEvidence 是时间无关的 003 完整证据验证：报价证据与
+// 卖方签名、池绑定、买方对精确 TermsCBOR 的签名、QuoteTermsHash 比对以及
+// Buyer/Seller/Arbiter 与开池证据的绑定。它不检查报价过期或交付截止时间；
+// 角色工作流用它保证整个操作只读取一次系统 UTC，再对返回值自行做时间比较。
+func VerifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*ContentRequestTerms, *FileQuoteTerms, error) {
+	return verifyContentRequestEvidence(request, quote, opening)
 }
 
-// VerifyContentReference verifies the relationship between a quote and a
-// requested content hash. Seed requests are self-contained; block requests
-// additionally require the raw seed previously obtained by the buyer or held
-// by the seller.
-func VerifyContentReference(quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, seed []byte, requireBlockMembership bool) error {
-	return VerifyContentReferenceContext(context.Background(), quoteTerms, contentType, contentHash, seed, requireBlockMembership)
+// VerifySignedContentRequest verifies the quote binding, pool participants,
+// buyer signature, quote expiry, and request deadline. It reads system UTC
+// exactly once at entry and uses only the fixed SDK verifiers.
+func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*ContentRequestTerms, error) {
+	at := protoclock.Now()
+	terms, quoteTerms, err := verifyContentRequestEvidence(request, quote, opening)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	return terms, nil
 }
 
-// VerifyContentReferenceContext is the context-aware content reference verifier.
-func VerifyContentReferenceContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, seed []byte, requireBlockMembership bool) error {
+// VerifySignedContentRequestWithSeed additionally proves that every requested
+// block hash is present in the quote-bound seed and derives each item's
+// protocol expected length. It reads system UTC once at entry like every other
+// public verification entry point.
+func VerifySignedContentRequestWithSeed(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence, seed []byte) (*ContentRequestTerms, error) {
+	at := protoclock.Now()
+	terms, quoteTerms, err := verifyContentRequestEvidence(request, quote, opening)
+	if err != nil {
+		return nil, err
+	}
+	hashes, err := DecodeContentHashes(terms.ContentHashesCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := classifyContentHashes(context.Background(), quoteTerms, hashes, seed); err != nil {
+		return nil, err
+	}
+	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	return terms, nil
+}
+
+// VerifyContentPayloadsContext 验证交付批次：数量严格等于授权哈希数量、顺序
+// 一一对应、逐项 SHA-256、seed/block 归属与协议期望长度。当批次内携带与报价
+// SeedHash 对应的 seed payload 时，先完整验证它，再用它做块成员校验；返回值
+// 是实际用于成员校验的 seed 深复制，调用方可用它继续计算聚合价格。
+func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// 导出入口自身 fail-closed：外部直接调用时同样强制协议数组约束
+	//（1..64、32 字节宽度、不重复；payload 非空且不超过一个块长）。
+	if err := validateContentHashes(contentHashes); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+	}
+	if err := validateContentPayloads(payloads); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
-		return fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
+		return nil, fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
 	}
-	if len(contentHash) != masterseed.DigestSize {
-		return fmt.Errorf("%w: content hash must be 32 bytes", ErrInvalidEvidence)
+	if len(contentHashes) == 0 || len(contentHashes) > MaxContentBatchItems {
+		return nil, fmt.Errorf("%w: authorized content hash count must be between 1 and %d", ErrInvalidEvidence, MaxContentBatchItems)
 	}
-	switch contentType {
-	case ContentSeed:
-		if !bytes.Equal(contentHash, quoteTerms.SeedHash) {
-			return fmt.Errorf("%w: requested seed does not match quote", ErrInvalidEvidence)
-		}
-		return nil
-	case ContentBlock:
-		if !requireBlockMembership {
-			return nil
-		}
-		_, err := VerifyBlockReference(ctx, quoteTerms, contentHash, seed)
-		return err
-	default:
-		return fmt.Errorf("%w: unsupported content type %d", ErrInvalidEvidence, contentType)
+	if len(payloads) != len(contentHashes) {
+		return nil, fmt.Errorf("%w: payload count %d does not match authorized hash count %d", ErrInvalidEvidence, len(payloads), len(contentHashes))
 	}
-}
-
-// VerifyContentPayload verifies a delivered payload against the quoted
-// content reference. For a block it also enforces the exact full/tail length
-// derivable from the block's position in the seed.
-func VerifyContentPayload(quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, payload, seed []byte, requireBlockMembership bool) error {
-	return VerifyContentPayloadContext(context.Background(), quoteTerms, contentType, contentHash, payload, seed, requireBlockMembership)
-}
-
-// VerifyContentPayloadContext verifies payload bytes and, for block payloads,
-// combines block hashing, membership and protocol-size checks in one pass.
-func VerifyContentPayloadContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentType ContentType, contentHash, payload, seed []byte, requireBlockMembership bool) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := VerifyContentReferenceContext(ctx, quoteTerms, contentType, contentHash, seed, requireBlockMembership && contentType == ContentSeed); err != nil {
-		return err
-	}
-	switch contentType {
-	case ContentSeed:
-		digest, err := masterseed.DigestFromBytes(contentHash)
+	digests := make([]masterseed.Digest, len(contentHashes))
+	seedItemIndex := -1
+	requiresBlocks := false
+	for index, hash := range contentHashes {
+		digest, err := masterseed.DigestFromBytes(hash)
 		if err != nil {
-			return mapMasterSeedError(err)
+			return nil, mapMasterSeedError(err)
 		}
-		if _, err := masterseed.VerifySeedForSourceSize(ctx, bytes.NewReader(payload), digest, quoteTerms.FileSize); err != nil {
-			return mapMasterSeedError(err)
+		digests[index] = digest
+		payloadDigest := masterseed.Sum256(payloads[index])
+		if !bytes.Equal(payloadDigest.Bytes(), hash) {
+			return nil, fmt.Errorf("%w: payload #%d does not match authorized content hash", ErrInvalidEvidence, index+1)
 		}
-	case ContentBlock:
-		if len(payload) == 0 {
-			return fmt.Errorf("%w: block payload cannot be empty", ErrInvalidEvidence)
-		}
-		digest, err := masterseed.DigestFromBytes(contentHash)
-		if err != nil {
-			return mapMasterSeedError(err)
-		}
-		if _, err := masterseed.VerifyBlock(ctx, payload, digest); err != nil {
-			return mapMasterSeedError(err)
-		}
-		if requireBlockMembership {
-			seedDigest, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
-			if err != nil {
-				return mapMasterSeedError(err)
+		if bytes.Equal(hash, quoteTerms.SeedHash) {
+			if _, err := masterseed.VerifySeedForSourceSize(ctx, bytes.NewReader(payloads[index]), digest, quoteTerms.FileSize); err != nil {
+				return nil, mapMasterSeedError(err)
 			}
-			if _, err := masterseed.VerifyBlockInSeed(ctx, bytes.NewReader(seed), seedDigest, quoteTerms.FileSize, payload); err != nil {
-				return mapMasterSeedError(err)
+			seedItemIndex = index
+		} else {
+			requiresBlocks = true
+		}
+	}
+	effectiveSeed := seed
+	if len(effectiveSeed) == 0 && seedItemIndex >= 0 {
+		effectiveSeed = append([]byte(nil), payloads[seedItemIndex]...)
+	}
+	if requiresBlocks && len(effectiveSeed) == 0 {
+		return nil, fmt.Errorf("%w: a verified seed is required to validate block payloads", ErrContentNotInSeed)
+	}
+	if requiresBlocks {
+		seedDigest, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
+		if err != nil {
+			return nil, mapMasterSeedError(err)
+		}
+		for index, hash := range contentHashes {
+			if bytes.Equal(hash, quoteTerms.SeedHash) {
+				continue
+			}
+			if _, err := masterseed.VerifyBlock(ctx, payloads[index], digests[index]); err != nil {
+				return nil, mapMasterSeedError(err)
+			}
+			if _, err := masterseed.VerifyBlockInSeed(ctx, bytes.NewReader(effectiveSeed), seedDigest, quoteTerms.FileSize, payloads[index]); err != nil {
+				return nil, mapMasterSeedError(err)
 			}
 		}
 	}
-	return nil
+	if len(effectiveSeed) == 0 {
+		return nil, nil
+	}
+	return append([]byte(nil), effectiveSeed...), nil
 }
 
-// VerifyBlockReference verifies a block digest against a quote-bound seed and
-// returns all matching positions (including duplicate and tail occurrences).
-func VerifyBlockReference(ctx context.Context, quoteTerms *FileQuoteTerms, blockHash, seed []byte) (masterseed.BlockMatches, error) {
+// VerifyContentPayloads is the context-free wrapper of VerifyContentPayloadsContext.
+func VerifyContentPayloads(quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
+	return VerifyContentPayloadsContext(context.Background(), quoteTerms, contentHashes, payloads, seed)
+}
+
+// classifiedContent records the evidence-derived kind and expected protocol
+// length of one requested content hash. The kind is never sender-declared.
+type classifiedContent struct {
+	IsSeed    bool
+	BlockSize uint64
+}
+
+// classifyContentHashes derives the kind and price-relevant expected length of
+// each ordered content hash from the quote and the verified seed. A hash equal
+// to the quote SeedHash is the seed; every other hash must appear in the seed's
+// block list, priced at that position's protocol length. Duplicate positions
+// are charged once, but matches implying conflicting expected lengths are an
+// ambiguous-evidence conflict and reject the whole batch.
+func classifyContentHashes(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes [][]byte, seed []byte) ([]classifiedContent, error) {
+	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
+		return nil, fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
+	}
+	result := make([]classifiedContent, len(contentHashes))
+	for index, hash := range contentHashes {
+		if len(hash) != sha256.Size {
+			return nil, fmt.Errorf("%w: content hash #%d must be %d bytes", ErrInvalidEvidence, index+1, sha256.Size)
+		}
+		if bytes.Equal(hash, quoteTerms.SeedHash) {
+			result[index] = classifiedContent{IsSeed: true}
+			continue
+		}
+		matches, err := findBlockMatches(ctx, quoteTerms, hash, seed)
+		if err != nil {
+			return nil, fmt.Errorf("content hash #%d: %w", index+1, err)
+		}
+		firstSize, err := masterseed.ExpectedBlockSize(quoteTerms.FileSize, matches.FirstIndex)
+		if err != nil {
+			return nil, mapMasterSeedError(err)
+		}
+		lastSize, err := masterseed.ExpectedBlockSize(quoteTerms.FileSize, matches.LastIndex)
+		if err != nil {
+			return nil, mapMasterSeedError(err)
+		}
+		if firstSize != lastSize {
+			return nil, fmt.Errorf("%w: content hash #%d matches positions with conflicting expected lengths", ErrInvalidEvidence, index+1)
+		}
+		result[index] = classifiedContent{BlockSize: firstSize}
+	}
+	return result, nil
+}
+
+// findBlockMatches locates all seed positions of one block hash. It scans the
+// full seed so integrity, source-size binding, and membership are proven in a
+// single pass before any pricing or delivery decision.
+func findBlockMatches(ctx context.Context, quoteTerms *FileQuoteTerms, blockHash, seed []byte) (masterseed.BlockMatches, error) {
 	var result masterseed.BlockMatches
-	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
-		return result, invalidEvidence(err)
+	if len(seed) == 0 {
+		return result, fmt.Errorf("%w: the verified seed is required for block content", ErrContentNotInSeed)
 	}
 	digest, err := masterseed.DigestFromBytes(blockHash)
 	if err != nil {
@@ -565,49 +623,43 @@ func VerifyBlockReference(ctx context.Context, quoteTerms *FileQuoteTerms, block
 	return result, nil
 }
 
-func invalidEvidence(err error) error { return errors.Join(ErrInvalidEvidence, err) }
-
-func mapMasterSeedError(err error) error {
-	if err == nil {
-		return nil
+// refundTemplateTxIDIsZero reports whether a decoded hash is the all-zero "unset"
+// sentinel, which must never enter encoding, storage, or network paths.
+func refundTemplateTxIDIsZero(raw []byte) bool {
+	for _, b := range raw {
+		if b != 0 {
+			return false
+		}
 	}
-	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	return true
+}
+
+// ValidateContentRequestTerms checks the 003 field widths, pool reference,
+// target payment sequence bounds, canonical content-hash batch, and delivery
+// deadline before signing.
+func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
+	if terms == nil {
+		return errors.New("content request terms are required")
+	}
+	if len(terms.QuoteTermsHash) != sha256.Size {
+		return errors.New("quote_terms_hash must be 32 bytes")
+	}
+	if len(terms.RefundTemplateTxID) != sha256.Size {
+		return errors.New("refund_template_txid must be 32 bytes")
+	}
+	if refundTemplateTxIDIsZero(terms.RefundTemplateTxID) {
+		return errors.New("refund_template_txid must not be all zero")
+	}
+	if terms.PaymentSequence == 0 || terms.PaymentSequence > ^uint32(0)-1 {
+		return errors.New("payment_sequence must be between 1 and 4294967294")
+	}
+	if _, err := DecodeContentHashes(terms.ContentHashesCBOR); err != nil {
 		return err
 	}
-	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
-		return errors.Join(ErrContentNotInSeed, err)
+	if terms.DeliveryDeadlineUnix <= 0 {
+		return errors.New("delivery_deadline_unix is required")
 	}
-	return errors.Join(ErrInvalidEvidence, err)
-}
-
-// VerifySignedContentRequest verifies the quote binding, buyer signature,
-// arbiter selection, quote expiry, and request deadline. It reads system UTC
-// exactly once at entry and uses only the fixed SDK verifiers.
-func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error) {
-	at := protoclock.Now()
-	terms, quoteTerms, err := verifyContentRequestEvidence(context.Background(), request, quote, nil, false)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
-		return nil, err
-	}
-	return terms, nil
-}
-
-// VerifySignedContentRequestWithSeed additionally proves that a block hash is
-// present in the quote's seed. It reads UTC once at entry like every other
-// public verification entry point.
-func VerifySignedContentRequestWithSeed(request *SignedContentRequest, quote *SignedFileQuote, seed []byte) (*ContentRequestTerms, error) {
-	at := protoclock.Now()
-	terms, quoteTerms, err := verifyContentRequestEvidence(context.Background(), request, quote, seed, true)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
-		return nil, err
-	}
-	return terms, nil
+	return nil
 }
 
 // checkContentRequestTiming 应用 003 请求的两项当前时间比较：报价过期与交付
@@ -626,142 +678,6 @@ func checkContentRequestTiming(terms *ContentRequestTerms, quoteTerms *FileQuote
 	return nil
 }
 
-// VerifySignedContentRequestStandalone verifies the self-contained buyer
-// authorization used by arbitration with the fixed SDK verifier. It
-// deliberately does not load or validate a quote, delivery, payload, or
-// payment history.
-func VerifySignedContentRequestStandalone(request *SignedContentRequest) (*ContentRequestTerms, error) {
-	if request == nil {
-		return nil, errors.New("signed content request is required")
-	}
-	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) || len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
-		return nil, fmt.Errorf("%w: final payment authorization economic fields are incomplete", ErrInvalidEvidence)
-	}
-	if err := VerifySignature(terms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
-		return nil, fmt.Errorf("%w: buyer authorization signature invalid: %v", ErrInvalidEvidence, err)
-	}
-	return terms, nil
-}
-
-// VerifyContentRequestEvidence 验证时间无关的 003 证据：结构、报价绑定、
-// 参与方密钥、仲裁者选择、内容引用和买方签名。它不检查报价过期或交付截止
-// 时间；调用方用返回的 terms 与报价 terms 结合自己读取的一次时间判断。
-func VerifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, *FileQuoteTerms, error) {
-	return verifyContentRequestEvidence(context.Background(), request, quote, nil, false)
-}
-
-func VerifyContentRequestEvidenceWithSeed(request *SignedContentRequest, quote *SignedFileQuote, seed []byte) (*ContentRequestTerms, *FileQuoteTerms, error) {
-	return verifyContentRequestEvidence(context.Background(), request, quote, seed, true)
-}
-
-func VerifyContentDeliveryEvidence(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
-	return verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, nil, false)
-}
-
-func VerifyContentDeliveryEvidenceWithSeed(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
-	return verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, seed, true)
-}
-
-// verifyContentRequestEvidence 是时间无关的 003 纯证据验证。
-func verifyContentRequestEvidence(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, *FileQuoteTerms, error) {
-	if request == nil || len(request.BuyerSignature) == 0 {
-		return nil, nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
-	}
-	quoteTerms, err := VerifyFileQuoteEvidence(quote)
-	if err != nil {
-		return nil, nil, err
-	}
-	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
-	if err != nil {
-		return nil, nil, err
-	}
-	quoteHash, _ := FileQuoteTermsHash(quote.TermsCBOR)
-	if !bytes.Equal(terms.QuoteTermsHash, quoteHash[:]) {
-		return nil, nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
-	}
-	if !bytes.Equal(terms.BuyerPubkey, quoteTerms.BuyerPubkey) || !bytes.Equal(terms.SellerPubkey, quote.SellerPubkey) {
-		return nil, nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
-	}
-	if err := VerifyContentReferenceContext(ctx, quoteTerms, terms.ContentType, terms.ContentHash, seed, requireBlockMembership); err != nil {
-		return nil, nil, err
-	}
-	if !containsBytes(quoteTerms.SupportedArbiterPubkeysCBOR, terms.SelectedArbiterPubkey) {
-		return nil, nil, fmt.Errorf("%w: selected arbiter is not allowed by quote", ErrInvalidEvidence)
-	}
-	if err := VerifySignature(quoteTerms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
-		return nil, nil, fmt.Errorf("%w: buyer signature invalid: %v", ErrInvalidEvidence, err)
-	}
-	return terms, quoteTerms, nil
-}
-
-// verifyContentDeliveryEvidence 是时间无关的 004 纯证据验证；payload 校验中
-// 的块扫描保持不变，但所有"是否已过期/超时"的比较都留给公开入口或调用方。
-func verifyContentDeliveryEvidence(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, requireBlockMembership bool) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
-	if delivery == nil || len(delivery.SellerSignature) == 0 {
-		return nil, nil, nil, fmt.Errorf("%w: signed content delivery is required", ErrInvalidEvidence)
-	}
-	requestSeed := seed
-	requestMembership := requireBlockMembership
-	if requireBlockMembership {
-		requestSeed, requestMembership = nil, false
-	}
-	requestTerms, quoteTerms, err := verifyContentRequestEvidence(ctx, request, quote, requestSeed, requestMembership)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	deliveryTerms, err := DecodeContentDeliveryTerms(delivery.TermsCBOR)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if !bytes.Equal(deliveryTerms.RefundTemplateTxID, requestTerms.RefundTemplateTxID) {
-		return nil, nil, nil, fmt.Errorf("%w: delivery refund_template_txid does not reference supplied request", ErrInvalidEvidence)
-	}
-	requestHash, _ := PaymentAuthorizationHash(request.TermsCBOR)
-	if !bytes.Equal(deliveryTerms.PaymentAuthorizationHash, requestHash[:]) {
-		return nil, nil, nil, fmt.Errorf("%w: delivery does not reference supplied request", ErrInvalidEvidence)
-	}
-	if err := VerifySignature(quote.SellerPubkey, delivery.TermsCBOR, delivery.SellerSignature); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: seller signature invalid: %v", ErrInvalidEvidence, err)
-	}
-	if err := VerifyContentPayloadContext(ctx, quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, deliveryTerms.ContentBytes, seed, requireBlockMembership); err != nil {
-		return nil, nil, nil, err
-	}
-	return append([]byte(nil), deliveryTerms.ContentBytes...), requestTerms, quoteTerms, nil
-}
-
-// VerifySignedContentDelivery verifies the exact request reference, seller
-// signature, content binding and the 003 timing facts (quote expiry, delivery
-// deadline) with system UTC read exactly once at entry.
-func VerifySignedContentDelivery(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote) ([]byte, error) {
-	at := protoclock.Now()
-	payload, requestTerms, quoteTerms, err := verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, nil, false)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkContentRequestTiming(requestTerms, quoteTerms, at); err != nil {
-		return nil, err
-	}
-	return payload, nil
-}
-
-// VerifySignedContentDeliveryWithSeed additionally validates block membership
-// and the exact full/tail block size derived from a caller-owned seed.
-func VerifySignedContentDeliveryWithSeed(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte) ([]byte, error) {
-	at := protoclock.Now()
-	payload, requestTerms, quoteTerms, err := verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, seed, true)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkContentRequestTiming(requestTerms, quoteTerms, at); err != nil {
-		return nil, err
-	}
-	return payload, nil
-}
-
 func containsBytes(encodedPubkeys []byte, wanted []byte) bool {
 	pubkeys, err := DecodeSupportedArbiterPubkeys(encodedPubkeys)
 	if err != nil {
@@ -775,6 +691,48 @@ func containsBytes(encodedPubkeys []byte, wanted []byte) bool {
 	return false
 }
 
+func invalidEvidence(err error) error { return errors.Join(ErrInvalidEvidence, err) }
+
+func mapMasterSeedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
+		return errors.Join(ErrContentNotInSeed, err)
+	}
+	return errors.Join(ErrInvalidEvidence, err)
+}
+
+// verifyContentRequestEvidence 是时间无关的 003 纯证据验证：结构、池绑定、
+// 报价绑定、参与方一致性与买方签名。它不检查报价过期或交付截止时间。
+func verifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*ContentRequestTerms, *FileQuoteTerms, error) {
+	quoteTerms, err := VerifyFileQuoteEvidence(quote)
+	if err != nil {
+		return nil, nil, err
+	}
+	terms, err := VerifySignedContentRequestForOpening(request, opening)
+	if err != nil {
+		return nil, nil, err
+	}
+	quoteHash, err := FileQuoteTermsHash(quote.TermsCBOR)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !bytes.Equal(terms.QuoteTermsHash, quoteHash[:]) {
+		return nil, nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
+	}
+	if !bytes.Equal(opening.OpeningBuyerPubKey(), quoteTerms.BuyerPubkey) || !bytes.Equal(opening.OpeningSellerPubKey(), quote.SellerPubkey) {
+		return nil, nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
+	}
+	if !containsBytes(quoteTerms.SupportedArbiterPubkeysCBOR, opening.OpeningArbiterPubKey()) {
+		return nil, nil, fmt.Errorf("%w: opening arbiter is not allowed by quote", ErrInvalidEvidence)
+	}
+	return terms, quoteTerms, nil
+}
+
 func cloneContentRequestTerms(terms *ContentRequestTerms) *ContentRequestTerms {
 	if terms == nil {
 		return nil
@@ -782,10 +740,7 @@ func cloneContentRequestTerms(terms *ContentRequestTerms) *ContentRequestTerms {
 	cloned := *terms
 	cloned.QuoteTermsHash = append([]byte(nil), terms.QuoteTermsHash...)
 	cloned.RefundTemplateTxID = append([]byte(nil), terms.RefundTemplateTxID...)
-	cloned.BuyerPubkey = append([]byte(nil), terms.BuyerPubkey...)
-	cloned.SellerPubkey = append([]byte(nil), terms.SellerPubkey...)
-	cloned.SelectedArbiterPubkey = append([]byte(nil), terms.SelectedArbiterPubkey...)
-	cloned.ContentHash = append([]byte(nil), terms.ContentHash...)
+	cloned.ContentHashesCBOR = append([]byte(nil), terms.ContentHashesCBOR...)
 	return &cloned
 }
 
@@ -796,16 +751,13 @@ func cloneSignedContentRequest(request *SignedContentRequest) *SignedContentRequ
 	return &SignedContentRequest{TermsCBOR: append([]byte(nil), request.TermsCBOR...), BuyerSignature: append([]byte(nil), request.BuyerSignature...)}
 }
 
-func cloneContentDeliveryTerms(terms *ContentDeliveryTerms) *ContentDeliveryTerms {
-	if terms == nil {
-		return nil
-	}
-	return &ContentDeliveryTerms{RefundTemplateTxID: append([]byte(nil), terms.RefundTemplateTxID...), PaymentAuthorizationHash: append([]byte(nil), terms.PaymentAuthorizationHash...), ContentBytes: append([]byte(nil), terms.ContentBytes...)}
-}
-
 func cloneSignedContentDelivery(delivery *SignedContentDelivery) *SignedContentDelivery {
 	if delivery == nil {
 		return nil
 	}
-	return &SignedContentDelivery{TermsCBOR: append([]byte(nil), delivery.TermsCBOR...), SellerSignature: append([]byte(nil), delivery.SellerSignature...)}
+	return &SignedContentDelivery{
+		PaymentAuthorizationHash:                append([]byte(nil), delivery.PaymentAuthorizationHash...),
+		SellerPaymentAuthorizationHashSignature: append([]byte(nil), delivery.SellerPaymentAuthorizationHashSignature...),
+		ContentPayloadsCBOR:                     append([]byte(nil), delivery.ContentPayloadsCBOR...),
+	}
 }

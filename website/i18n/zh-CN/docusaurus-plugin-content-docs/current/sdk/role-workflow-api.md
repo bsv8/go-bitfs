@@ -39,15 +39,15 @@ type PoolOpeningPreparation struct {
 
 // RefundPresignAcceptance 是 AcceptRefundPresign 的复合结果。
 type RefundPresignAcceptance struct {
-    Reference      pool.Reference     // 池 ID + 基准序号
+    Reference      pool.Reference     // 池 ID + 当前已接受序号
     Opening        *pool.OpeningProof // 含 FundingTx 的完整 proof（本地）
     InitialPayment *pool.PaymentState // 初始退款状态（本地）
 }
 
 // VerifiedDelivery 是 AcceptDelivery 的复合结果。
 type VerifiedDelivery struct {
-    Payload []byte              // 已验证内容字节（本地，需保存）
-    Update  *pool.PaymentUpdate // 发送给卖方的 wire 报文
+    Payloads [][]byte            // 已验证的 payload 批次，顺序与 003 hashes 一致（本地，需保存）
+    Update   *pool.PaymentUpdate // 整个批次唯一的 wire 付款更新
 }
 
 // AcceptQuote 在入口处读取一次系统 UTC 来验证签名、条款和有效期。
@@ -68,13 +68,16 @@ func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, state *BuyerO
 // 调用方显式传入 proof；SDK 不按哈希加载任何东西。
 func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTxDelivery, error)
 
-// BuildContentRequest 验证报价/开池/上一状态的绑定、价格与余额，
-// 然后用本 workflow 的私钥签名 003 请求。
-// 系统 UTC 在入口处读取一次；区块高度由输入提供。不读取内容。
+// BuildContentRequest 验证报价/开池归属/上一状态的绑定、批次成员上下文、
+// 聚合价格与余额，然后用本 workflow 的私钥签名 003 请求。
+// 系统 UTC 在入口处读取一次；区块高度由输入提供。不读取内容；
+// 内容类型完全由证据推导，批量价格逐项 checked-add。
 func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, input ContentRequestInput) (*bitfs.SignedContentRequest, error)
 
-// AcceptDelivery 验证请求关联、卖方签名、内容哈希与大小、seed 绑定；
-// 返回已验证 payload 与签名的 005 更新。
+// AcceptDelivery 按授权哈希路由到原始 003 后验证整个 004：重算并比较授权哈希、
+// 从 OpeningProof 重derive 池绑定、验证卖方对裸 32 字节哈希的签名，
+// 再逐项校验 payload 数量/顺序/哈希/归属/长度并重算聚合价格与目标序号，
+// 最后构造唯一的 005。
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, input ContentDeliveryInput) (*VerifiedDelivery, error)
 
 // BuildImmediateClose 从调用方选定的基准状态和调用方选择的目标卖方金额构造
@@ -96,15 +99,14 @@ func (workflow *Workflow) BuildRefundAfterExpiry(ctx context.Context, opening *p
 
 ```go
 type ContentRequestInput struct {
-    Content          bitfs.ContentRef
-    ContentSize      uint64
+    ContentHashes    [][]byte // 有序内容哈希批次（1..64 个，不重复）
     DeliveryDeadline bitfs.UnixSeconds
-    Seed             []byte // 请求块内容时必填
+    Seed             []byte // 批次包含任何块时必填
     BlockHeight      uint32 // 仅块高锁定的退款使用
 }
 
 type ContentDeliveryInput struct {
-    Seed        []byte // 接受块交付时必填
+    Seed        []byte // 验收包含块的批次时必填
     BlockHeight uint32
 }
 ```
@@ -134,14 +136,14 @@ type PoolFundingAcceptance struct {
     FundingTx      []byte             // 通过你自己的节点适配器广播
 }
 
-// ContentDeliveryState 记录验证某次交付对应买方 005 更新所需的协议上下文。
+// ContentDeliveryState 记录验证该交付批次的买方 005 更新所需的协议上下文：
+// 费用池 ID、授权哈希、目标序号和绝对累计卖方金额。
 // 它不携带 owner/lease/acquire/held/release/expiry 语义——串行化由调用方负责。
 type ContentDeliveryState struct {
-    RefundTemplateTxID            pool.RefundTemplateTxID
-    ContentRequestHash      pool.Hash32
-    BasePaymentSequence     uint32
-    BaseSellerAmountSat     uint64
-    ExpectedSellerAmountSat uint64
+    RefundTemplateTxID       pool.RefundTemplateTxID
+    PaymentAuthorizationHash pool.Hash32
+    PaymentSequence          uint32
+    SellerAmountAfterSat     uint64
 }
 
 // CreateQuote 在入口处读取一次系统 UTC 并以此签名确定性 001 条款。
@@ -156,8 +158,9 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 // SDK 不提交任何东西：自己广播返回的 FundingTx，再持久化 Opening 与 InitialPayment。
 func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTxDelivery) (*PoolFundingAcceptance, error)
 
-// BuildContentDelivery 用显式报价/开池/上一状态以及调用方提供的内容字节验证 003，
-// 然后签名 004。发送交付前先保存返回的 ContentDeliveryState。
+// BuildContentDelivery 用显式报价/开池/上一状态验证整批 003 授权，
+// 逐项校验 payload 后对裸授权哈希签名并编码四元 004。
+// 发送交付前先保存返回的 ContentDeliveryState。
 func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error)
 
 // AcceptPayment 用显式开池证据、上一状态和保存的 ContentDeliveryState 验证 005 更新；
@@ -262,7 +265,7 @@ journal.Record(request) // 留痕供 007 使用
 
 delivery, deliveryState, err := sellerWorkflow.BuildContentDelivery(ctx,
     quote, opening, latest, request,
-    seller.ContentDeliveryInput{Content: contentBytes, Seed: seedBytes})
+    seller.ContentDeliveryInput{ContentPayloads: contentBatch, Seed: seedBytes})
 journal.SaveDeliveryState(deliveryState) // 发送前先保存
 send(delivery)
 ```
@@ -272,7 +275,7 @@ send(delivery)
 ```go
 verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, request,
     delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
-save(verified.Payload) // 保存是应用的职责
+for _, payload := range verified.Payloads { save(payload) } // 保存是应用的职责
 send(verified.Update)
 
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,

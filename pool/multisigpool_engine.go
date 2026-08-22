@@ -688,7 +688,7 @@ func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input 
 	if input.SellerAmountAfterSat < input.Previous.SellerAmountSat || input.SellerAmountAfterSat > details.PoolOutputSatoshis {
 		return ErrInsufficientBalance
 	}
-	if input.PaymentSequenceAfter <= input.Previous.PaymentSequence || input.PaymentSequenceAfter == finalPoolSequence {
+	if input.PaymentSequence <= input.Previous.PaymentSequence || input.PaymentSequence == finalPoolSequence {
 		return ErrStalePaymentSequence
 	}
 	return nil
@@ -712,7 +712,7 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 			return nil, invalid("previous payment is not a valid proof-bound accepted state")
 		}
 	}
-	if input.Previous.PaymentSequence == finalPoolSequence || input.PaymentSequenceAfter != input.Previous.PaymentSequence+1 || input.PaymentSequenceAfter == finalPoolSequence {
+	if input.Previous.PaymentSequence == finalPoolSequence || input.PaymentSequence != input.Previous.PaymentSequence+1 || input.PaymentSequence == finalPoolSequence {
 		return nil, ErrStalePaymentSequence
 	}
 	if err := engine.CheckPaymentCapacity(ctx, input); err != nil {
@@ -723,11 +723,11 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 		return nil, err
 	}
 	setPoolSource(previous, details.PoolOutputSatoshis, details.PoolLockingScript)
-	state, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: input.PaymentSequenceAfter, SellerAmount: input.SellerAmountAfterSat, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatPerKB), PaymentProof: nil})
+	state, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: input.PaymentSequence, SellerAmount: input.SellerAmountAfterSat, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatPerKB), PaymentProof: nil})
 	if err != nil {
 		return nil, err
 	}
-	return unsignedFromTx(state, details, input.PaymentSequenceAfter), nil
+	return unsignedFromTx(state, details, input.PaymentSequence), nil
 }
 
 // SignBuyerPayment produces the buyer's detached signature over an unsigned pool transaction.

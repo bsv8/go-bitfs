@@ -8,6 +8,7 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // Golden bytes freeze the 001/003/004/005 wire encoders and decoders against
@@ -68,6 +69,15 @@ func TestGoldenWireBytes001(t *testing.T) {
 	}
 }
 
+func goldenContentHashes(t *testing.T, values ...[]byte) []byte {
+	t.Helper()
+	raw, err := bitfs.EncodeContentHashes(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestGoldenWireBytes003(t *testing.T) {
 	quoteHash, err := bitfs.FileQuoteTermsHash(goldenQuote(t).TermsCBOR)
 	if err != nil {
@@ -75,18 +85,12 @@ func TestGoldenWireBytes003(t *testing.T) {
 	}
 	contentHash := bytes.Repeat([]byte{5}, 32)
 	terms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:        quoteHash[:],
-		RefundTemplateTxID:    bytes.Repeat([]byte{9}, 32),
-		BasePaymentSequence:   2,
-		PaymentSequenceAfter:  3,
-		SellerAmountAfterSat:  1100,
-		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           mustGoldenKey(t, "44").PubKey().Compressed(),
-		SellerPubkey:          mustGoldenKey(t, "22").PubKey().Compressed(),
-		SelectedArbiterPubkey: mustGoldenKey(t, "33").PubKey().Compressed(),
-		ContentType:           bitfs.ContentBlock,
-		ContentHash:           contentHash,
-		DeliveryDeadlineUnix:  1999999000,
+		QuoteTermsHash:       quoteHash[:],
+		RefundTemplateTxID:   bytes.Repeat([]byte{9}, 32),
+		PaymentSequence:      3,
+		SellerAmountAfterSat: 1100,
+		ContentHashesCBOR:    goldenContentHashes(t, contentHash),
+		DeliveryDeadlineUnix: 1999999000,
 	}
 	request, err := bitfs.NewSignedContentRequest(terms, mustGoldenKey(t, "44"))
 	if err != nil {
@@ -97,37 +101,45 @@ func TestGoldenWireBytes003(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := hex.EncodeToString(raw)
-	const want = "830458dd8d04582096f04221834fb5f0fd57eef01d2ec1463cc363960b3fbd49d5faf0a1b60282d458200909090909090909090909090909090909090909090909090909090909090909020319044c015821032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991582102466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f275821023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b101582005050505050505050505050505050505050505050505050505050505050505051a7735901858473045022100e6dcb003c84727bdb643fc5c220ae6c0f5e54a17e975634ccefd53ccbb7b5f8e022035ce6849f7afce412c7b0e6d306b5c4fa94ce264950e9032fecaeb1c555b03d7"
+	const want = "8304587386582096f04221834fb5f0fd57eef01d2ec1463cc363960b3fbd49d5faf0a1b60282d4582009090909090909090909090909090909090909090909090909090909090909090319044c582381582005050505050505050505050505050505050505050505050505050505050505051a7735901858473045022100dd13ad289dfc0f41c7817c5808d647114af1a695682a8f5ead3b6ba472badaab022032c69f4f0f4b3858b03c7ef9c268ee5045e0cb0972291ec06a13ab61d9de1cb2"
 	if got != want {
 		t.Fatalf("golden 003 mismatch:\n got %s\nwant %s", got, want)
+	}
+	decoded, err := UnmarshalContentRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := MarshalContentRequest(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatal("003 decode/encode round trip changed bytes")
 	}
 }
 
 func TestGoldenWireBytes004(t *testing.T) {
-	quote := goldenQuote(t)
-	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
+	quoteHash, err := bitfs.FileQuoteTermsHash(goldenQuote(t).TermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	terms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:        quoteHash[:],
-		RefundTemplateTxID:    bytes.Repeat([]byte{9}, 32),
-		BasePaymentSequence:   2,
-		PaymentSequenceAfter:  3,
-		SellerAmountAfterSat:  100,
-		MinerFeeRateSatPerKB:  1,
-		BuyerPubkey:           mustGoldenKey(t, "44").PubKey().Compressed(),
-		SellerPubkey:          mustGoldenKey(t, "22").PubKey().Compressed(),
-		SelectedArbiterPubkey: mustGoldenKey(t, "33").PubKey().Compressed(),
-		ContentType:           bitfs.ContentSeed,
-		ContentHash:           bytes.Repeat([]byte{6}, 32),
-		DeliveryDeadlineUnix:  1999999000,
+		QuoteTermsHash:       quoteHash[:],
+		RefundTemplateTxID:   bytes.Repeat([]byte{9}, 32),
+		PaymentSequence:      3,
+		SellerAmountAfterSat: 100,
+		ContentHashesCBOR:    goldenContentHashes(t, bytes.Repeat([]byte{6}, 32)),
+		DeliveryDeadlineUnix: 1999999000,
 	}
 	request, err := bitfs.NewSignedContentRequest(terms, mustGoldenKey(t, "44"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(request, []byte("seed-payload"), mustGoldenKey(t, "22"))
+	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := bitfs.NewSignedContentDelivery(authHash[:], [][]byte{[]byte("seed-payload")}, mustGoldenKey(t, "22"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,9 +148,63 @@ func TestGoldenWireBytes004(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := hex.EncodeToString(raw)
-	const want = "83045853840458200909090909090909090909090909090909090909090909090909090909090909582075e8f6695392a904ccb444cfdcd7b4ae86e11516851059630583488e01ae67004c736565642d7061796c6f61645846304402203f2558b3cc3a7c61797be17bfba82cea17d9bc5649c059f29d13d7917faeaaac022055313d72acbc25f5c1e43a5b23ab4db40f708728e14faf01bef4d55291e5e435"
+	const want = "8404582025c7b4b292d34033fdd4e8f9ebe3ea91d0fb17c808eece35a7ca414612bd2bf25846304402206772cc6f65f82e5b0a9c6baba6a7a53ab645125331f3dc91859d7993db91511f022046a4705175c322c5825a2aaeb5519119efe949f688a98169d4ad06342775a2074e814c736565642d7061796c6f6164"
 	if got != want {
 		t.Fatalf("golden 004 mismatch:\n got %s\nwant %s", got, want)
+	}
+	decoded, err := UnmarshalContentDelivery(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := MarshalContentDelivery(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatal("004 decode/encode round trip changed bytes")
+	}
+}
+
+// Pre-switch v4 bytes must be rejected outright: the old thirteen-element
+// terms, the old three-element 003 shell, and the old three-element 004 shell
+// all carry removed fields or signatures over removed structures.
+func canonicalGoldenMarshal(values []any) ([]byte, error) {
+	enc, err := cbor.CoreDetEncOptions().EncMode()
+	if err != nil {
+		return nil, err
+	}
+	return enc.Marshal(values)
+}
+
+func goldenBstr(value []byte) []byte {
+	if value == nil {
+		return []byte{}
+	}
+	return value
+}
+func TestGoldenWireBytesRejectPreSwitchShapes(t *testing.T) {
+	hash32 := bytes.Repeat([]byte{1}, 32)
+	signature := bytes.Repeat([]byte{7}, 70)
+	legacyTerms, err := canonicalGoldenMarshal([]any{
+		uint64(4), goldenBstr(hash32), goldenBstr(hash32), uint64(2), uint64(3), uint64(10),
+		uint64(1), goldenBstr(mustGoldenKey(t, "44").PubKey().Compressed()), goldenBstr(mustGoldenKey(t, "22").PubKey().Compressed()),
+		goldenBstr(mustGoldenKey(t, "33").PubKey().Compressed()), uint64(0), goldenBstr(hash32), int64(1999999000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRequestShell, err := canonicalGoldenMarshal([]any{uint64(4), goldenBstr(legacyTerms), goldenBstr(signature)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalContentRequest(legacyRequestShell); err == nil {
+		t.Fatal("legacy thirteen-element 003 terms were accepted")
+	}
+	legacyDeliveryShell, err := canonicalGoldenMarshal([]any{uint64(4), goldenBstr(hash32), goldenBstr(signature)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalContentDelivery(legacyDeliveryShell); err == nil {
+		t.Fatal("legacy three-element 004 shell was accepted")
 	}
 }
 

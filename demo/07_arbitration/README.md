@@ -32,6 +32,6 @@ ArbitrationRequest{
 }
 ```
 
-007 请求和响应都显式携带同一 `RefundTemplateTxID` 关联 ID。仲裁人的职责是核对 request hash、开池证据派生 hash、003 授权 hash 字段和 unsigned state 解析结果全部一致后，在授权金额范围内签署付款；`arbitration.SignPayment` 验证证据后只添加仲裁方签名。它不重新定价、不读取文件内容，也不凭空构造一笔替代买家授权的付款。卖家收到响应时还必须把响应 hash 与原 007 request 再绑定，再通过 `CompleteArbitratedPayment` 合并出完整的已签付款交易；保存与广播这笔交易同样是调用方的职责，SDK 不提交任何内容。
+007 请求和响应都显式携带同一 `RefundTemplateTxID` 关联 ID。仲裁人的职责是从 OpeningProof 恢复角色与费率，核对 request hash、开池证据派生的 RefundTemplateTxID、003 池绑定与买方签名以及 unsigned state 解析出的目标序号/金额全部一致后，在授权金额范围内签署付款；`arbitration.SignPayment` 验证证据后只添加仲裁方签名。它不重新定价、不读取文件内容，也不凭空构造一笔替代买家授权的付款。卖家收到响应时还必须把响应 hash 与原 007 request 再绑定，再通过 `CompleteArbitratedPayment` 合并出完整的已签付款交易；保存与广播这笔交易同样是调用方的职责，SDK 不提交任何内容。
 
 调试输出会显示授权 hash、交付证明与候选交易的字节数、仲裁请求和响应 hex、仲裁人公钥以及双方签名。

@@ -24,7 +24,7 @@ func main() {
 	debug("=== Step 003: Build Content Request ===")
 	debug("[state] quote terms hash: %s", hex.EncodeToString(f.QuoteHash[:]))
 	debug("[state] RefundTemplateTxID: %s", hex.EncodeToString(f.Reference.RefundTemplateTxID[:]))
-	debug("[state] base payment sequence: %d", f.Reference.BasePaymentSequence)
+	debug("[state] current accepted payment sequence: %d", f.Reference.PaymentSequence)
 
 	now := time.Now().UTC()
 	request, err := f.BuildSeedRequest(ctx, now)
@@ -43,11 +43,16 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	debug("[request] ContentType: %d (0 = seed, 1 = block)", terms.ContentType)
-	debug("[request] ContentHash: %s", hex.EncodeToString(terms.ContentHash))
-	debug("[request] base sequence: %d", terms.BasePaymentSequence)
-	debug("[request] next sequence: %d", terms.PaymentSequenceAfter)
-	debug("[request] seller amount after: %d satoshis", terms.SellerAmountAfterSat)
+	contentHashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
+	if err != nil {
+		fail(err)
+	}
+	debug("[request] content hashes batch: %d item(s)", len(contentHashes))
+	for index, hash := range contentHashes {
+		debug("[request] content hash #%d: %s", index+1, hex.EncodeToString(hash))
+	}
+	debug("[request] target payment sequence: %d (current + 1)", terms.PaymentSequence)
+	debug("[request] seller amount after: %d satoshis (absolute cumulative)", terms.SellerAmountAfterSat)
 	debug("[request] delivery deadline: %d", terms.DeliveryDeadlineUnix)
 	debug("[request] buyer signature: %s", hex.EncodeToString(request.BuyerSignature))
 	debug("[request] PaymentAuthorizationHash: %s", hex.EncodeToString(authHash[:]))

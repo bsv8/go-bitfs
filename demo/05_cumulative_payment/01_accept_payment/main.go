@@ -52,7 +52,7 @@ func main() {
 		fail(err)
 	}
 	debug("[payment] request terms bytes: %d", len(request.TermsCBOR))
-	debug("[payment] delivery terms bytes: %d", len(delivery.TermsCBOR))
+	debug("[payment] delivery payload batch bytes: %d", len(delivery.ContentPayloadsCBOR))
 	debug("[accepted] sequence: %d", accepted.PaymentSequence)
 	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSat)
 	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSat)

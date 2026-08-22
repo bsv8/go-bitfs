@@ -46,15 +46,15 @@ type PoolOpeningPreparation struct {
 
 // RefundPresignAcceptance is the composite result of AcceptRefundPresign.
 type RefundPresignAcceptance struct {
-    Reference      pool.Reference     // pool ID + base sequence
+    Reference      pool.Reference     // pool ID + current accepted sequence
     Opening        *pool.OpeningProof // complete proof incl. FundingTx (local)
     InitialPayment *pool.PaymentState // initial refund state (local)
 }
 
 // VerifiedDelivery is the composite result of AcceptDelivery.
 type VerifiedDelivery struct {
-    Payload []byte              // verified content bytes (local, save them)
-    Update  *pool.PaymentUpdate // wire message to send to the seller
+    Payloads [][]byte            // verified payload batch, in 003 hash order (local, save them)
+    Update   *pool.PaymentUpdate // the single wire update for the whole batch
 }
 
 // AcceptQuote verifies signature, terms, and expiry using system UTC read once
@@ -108,15 +108,14 @@ Supporting input types:
 
 ```go
 type ContentRequestInput struct {
-    Content          bitfs.ContentRef
-    ContentSize      uint64
+    ContentHashes    [][]byte // ordered batch of 1..64 unique content hashes
     DeliveryDeadline bitfs.UnixSeconds
-    Seed             []byte // required when requesting a block
+    Seed             []byte // required when the batch includes any block
     BlockHeight      uint32 // used only for height-locked refunds
 }
 
 type ContentDeliveryInput struct {
-    Seed        []byte // required when accepting a block delivery
+    Seed        []byte // required when accepting a batch that includes blocks
     BlockHeight uint32
 }
 ```
@@ -150,14 +149,15 @@ type PoolFundingAcceptance struct {
 }
 
 // ContentDeliveryState records the protocol context for validating the buyer's
-// 005 update for one delivery. It carries no owner/lease/acquire/held/release/
-// expiry semantics — serialization is the caller's job.
+// 005 update for one delivery batch: the pool ID, authorization hash, target
+// payment sequence, and absolute cumulative seller amount. It carries no
+// owner/lease/acquire/held/release/expiry semantics — serialization is the
+// caller's job.
 type ContentDeliveryState struct {
-    RefundTemplateTxID            pool.RefundTemplateTxID
-    ContentRequestHash      pool.Hash32
-    BasePaymentSequence     uint32
-    BaseSellerAmountSat     uint64
-    ExpectedSellerAmountSat uint64
+    RefundTemplateTxID        pool.RefundTemplateTxID
+    PaymentAuthorizationHash  pool.Hash32
+    PaymentSequence           uint32
+    SellerAmountAfterSat      uint64
 }
 
 // CreateQuote signs deterministic 001 terms using system UTC read once at
@@ -289,7 +289,7 @@ journal.Record(request) // retain for 007
 
 delivery, deliveryState, err := sellerWorkflow.BuildContentDelivery(ctx,
     quote, opening, latest, request,
-    seller.ContentDeliveryInput{Content: contentBytes, Seed: seedBytes})
+    seller.ContentDeliveryInput{ContentPayloads: contentBatch, Seed: seedBytes})
 journal.SaveDeliveryState(deliveryState) // save BEFORE sending
 send(delivery)
 ```
@@ -299,7 +299,7 @@ send(delivery)
 ```go
 verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, request,
     delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
-save(verified.Payload) // saving is the application's responsibility
+for _, payload := range verified.Payloads { save(payload) } // saving is the application's responsibility
 send(verified.Update)
 
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,

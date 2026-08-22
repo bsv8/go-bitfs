@@ -98,16 +98,16 @@ func TestCrossPoolContentAndArbitrationEvidenceAreRefused(t *testing.T) {
 	f := newProtocolFixture(t)
 	poolA := f.openNamedPool(t, 100000)
 	poolB := f.openNamedPool(t, 110000)
-	input := buyer.ContentRequestInput{Content: bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()}, ContentSize: 1, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
 	requestA, err := f.buyer.BuildContentRequest(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A request bound to pool A must not be delivered against pool B's state.
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolB.sellerAcc.Opening, poolB.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)}); err == nil {
+	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolB.sellerAcc.Opening, poolB.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err == nil {
 		t.Fatal("content request crossed pools")
 	}
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{Content: append([]byte(nil), f.seed...)}); err != nil {
+	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err != nil {
 		t.Fatalf("in-pool delivery failed: %v", err)
 	}
 	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, poolA.sellerAcc.Opening, requestA, poolA.sellerAcc.InitialPayment, f.facts())

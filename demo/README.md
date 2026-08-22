@@ -14,9 +14,9 @@ go-bitfs SDK 是无状态的 BitFS v4 协议库：workflow 对象只持有官方
 |---|---|---|
 | 001 | [`01_quote`](./01_quote/) | 生成并解析 `SignedFileQuote` 报价单 |
 | 002 | [`02_pool_opening`](./02_pool_opening/) | 买卖双方开启费用池 |
-| 003 | [`03_content_request`](./03_content_request/) | 买家构造文件内容请求 |
-| 004 | [`04_content_delivery`](./04_content_delivery/) | 卖家根据请求交付内容 |
-| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家确认交付并完成累计付款 |
+| 003 | [`03_content_request`](./03_content_request/) | 买家构造批量内容授权（一个付款序号授权一组内容 hash） |
+| 004 | [`04_content_delivery`](./04_content_delivery/) | 卖家对裸授权哈希签名并原子交付整批 payload |
+| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款（一个批次只生成一个 005） |
 | 006 | [`06_pool_close`](./06_pool_close/) | 双方协商关闭费用池 |
 | 007 | [`07_arbitration`](./07_arbitration/) | 发生争议时由仲裁人签署付款 |
 
@@ -32,4 +32,4 @@ cp demo/.env.example demo/.env
 
 除 002 外，每个命令会重新创建一套内存 fixture：fixture 扮演调用方应用，显式持有报价、开池证据、最新付款状态、内容字节等全部状态，并在每次 SDK 调用时逐个显式传入，因此可以从任意一步单独运行；SDK 不保存其中任何一项。002 的细分命令则把跨进程需要的开池证据保存在各自的 JSON checkpoint 中，同样由 demo 而不是 SDK 持有。
 
-建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何表达文件需求，最后看 004–007 如何交付、付款、关闭和仲裁。
+建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何用一个付款序号授权一组内容 hash，最后看 004–007 如何原子交付批次、按序号恰好推进一次的累计付款、关闭和仲裁。007 中仲裁人只凭 OpeningProof、003 授权和候选交易恢复角色与费率，不读取 004 或 payload。

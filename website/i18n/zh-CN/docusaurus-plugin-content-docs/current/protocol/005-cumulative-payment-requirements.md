@@ -35,6 +35,7 @@ title: 005 · 累计支付需求
 
 因此 BitFS v4 的卖方行为是：
 
+1. 收到 003 时，针对其 OpeningProof 和费用池当前最新已接受状态验证该授权（目标 `PaymentSequence` = 当前序号 + 1，绝对累计金额），并确认池内不存在进行中的请求。
 2. 调用方应用在自己的数据库中原子地保存该进行中请求，再交付 004。
 3. 接收 005 时，显式 `RefundTemplateTxID` 关联 ID 必须与 OpeningProof 派生的 `RefundTemplateTxID`、应用保存的 003 授权和解析后的 unsigned payment 全部一致；随后再校验交易金额、买方签名、输入和更高序号。`RefundTemplateTxID` 不替代授权哈希、交易内容、序号、金额或买方签名验证。
 4. 应用检测到进行中请求未完成或序号过时/重复时，拒绝新的 003。买方要并行购买，应新开费用池。

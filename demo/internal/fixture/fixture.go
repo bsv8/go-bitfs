@@ -158,30 +158,110 @@ func New(ctx context.Context) (*Fixture, error) {
 	}, nil
 }
 
-// BuildSeedRequest 构造一条请求 seed 内容的 003 报文。报价、开池证据和最新
+// BlockCount 返回报价文件按协议块长划分的块数（含尾块）。
+func (f *Fixture) BlockCount() uint64 {
+	return masterseed.BlockCountForSourceSize(uint64(len(f.FileBytes)))
+}
+
+// BlockPayload 返回文件第 index 个块（0 起）的原始字节；尾块为剩余字节。
+func (f *Fixture) BlockPayload(index uint64) ([]byte, error) {
+	count := f.BlockCount()
+	if index >= count {
+		return nil, fmt.Errorf("block index %d outside fixture file (%d blocks)", index, count)
+	}
+	start := index * masterseed.BlockSize
+	end := start + masterseed.BlockSize
+	if end > uint64(len(f.FileBytes)) {
+		end = uint64(len(f.FileBytes))
+	}
+	return append([]byte(nil), f.FileBytes[start:end]...), nil
+}
+
+// BlockHashes 返回前 count 个块的有序哈希列表，与 seed 中对应位置一致。
+func (f *Fixture) BlockHashes(count int) ([][]byte, error) {
+	if uint64(count) > f.BlockCount() {
+		return nil, fmt.Errorf("requested %d blocks exceed fixture file (%d blocks)", count, f.BlockCount())
+	}
+	hashes := make([][]byte, 0, count)
+	for index := 0; index < count; index++ {
+		payload, err := f.BlockPayload(uint64(index))
+		if err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, masterseed.Sum256(payload).Bytes())
+	}
+	return hashes, nil
+}
+
+// BuildSeedRequest 构造一条只请求 seed 内容的 003 报文。报价、开池证据和最新
 // 付款状态都从 fixture 字段显式传入，并设置一个相对当前时间的交付截止时间。
 func (f *Fixture) BuildSeedRequest(ctx context.Context, at time.Time) (*bitfs.SignedContentRequest, error) {
 	input := buyer.ContentRequestInput{
-		Content:          bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: f.SeedHash.Bytes()},
-		ContentSize:      1,
+		ContentHashes:    [][]byte{append([]byte(nil), f.SeedHash.Bytes()...)},
 		DeliveryDeadline: bitfs.UnixSeconds(at.Add(30 * time.Minute).Unix()),
 	}
 	return f.Buyer.BuildContentRequest(ctx, f.Quote, f.Opening, f.LatestPayment, input)
 }
 
-// DeliverAndBuildPayment 串起一次完整的内容交付和支付更新：买方请求、卖方
-// 构造交付（fixture 保存返回的 ContentDeliveryState）、买方验收并构造
-// PaymentUpdate。返回值保留协议对象供测试断言。
+// BuildBlockBatchRequest 构造一条批量请求前 count 个内容块的 003 报文。
+// fixture 的买方在初始化时已取得有效 seed，满足"包含任何块的批次必须先持有
+// 可验证 seed"的约束。
+func (f *Fixture) BuildBlockBatchRequest(ctx context.Context, at time.Time, count int) (*bitfs.SignedContentRequest, error) {
+	hashes, err := f.BlockHashes(count)
+	if err != nil {
+		return nil, err
+	}
+	input := buyer.ContentRequestInput{
+		ContentHashes:    hashes,
+		DeliveryDeadline: bitfs.UnixSeconds(at.Add(30 * time.Minute).Unix()),
+		Seed:             append([]byte(nil), f.Seed...),
+	}
+	return f.Buyer.BuildContentRequest(ctx, f.Quote, f.Opening, f.LatestPayment, input)
+}
+
+// deliver 串起一次完整的批量内容交付：卖方构造交付并保存返回的
+// ContentDeliveryState，买方验收并构造整个批次唯一的 PaymentUpdate。
+func (f *Fixture) deliver(ctx context.Context, request *bitfs.SignedContentRequest, payloads [][]byte) (*bitfs.SignedContentDelivery, *seller.ContentDeliveryState, *buyer.VerifiedDelivery, error) {
+	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, seller.ContentDeliveryInput{ContentPayloads: payloads})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	verified, err := f.Buyer.AcceptDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, delivery, buyer.ContentDeliveryInput{})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return delivery, deliveryState, verified, nil
+}
+
+// DeliverAndBuildPayment 串起一次完整的内容交付和支付更新：买方请求 seed、
+// 卖方交付、买方验收。返回值保留协议对象供测试断言。
 func (f *Fixture) DeliverAndBuildPayment(ctx context.Context, at time.Time) (*bitfs.SignedContentRequest, *bitfs.SignedContentDelivery, *seller.ContentDeliveryState, *buyer.VerifiedDelivery, error) {
 	request, err := f.BuildSeedRequest(ctx, at)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, seller.ContentDeliveryInput{Content: append([]byte(nil), f.Seed...)})
+	delivery, deliveryState, verified, err := f.deliver(ctx, request, [][]byte{append([]byte(nil), f.Seed...)})
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	verified, err := f.Buyer.AcceptDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, delivery, buyer.ContentDeliveryInput{})
+	return request, delivery, deliveryState, verified, nil
+}
+
+// DeliverBlockBatch 对 BuildBlockBatchRequest 生成的授权执行批量交付。
+func (f *Fixture) DeliverBlockBatch(ctx context.Context, at time.Time, count int) (*bitfs.SignedContentRequest, *bitfs.SignedContentDelivery, *seller.ContentDeliveryState, *buyer.VerifiedDelivery, error) {
+	request, err := f.BuildBlockBatchRequest(ctx, at, count)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	payloads := make([][]byte, 0, count)
+	for index := 0; index < count; index++ {
+		payload, err := f.BlockPayload(uint64(index))
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		payloads = append(payloads, payload)
+	}
+	delivery, deliveryState, verified, err := f.deliver(ctx, request, payloads)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

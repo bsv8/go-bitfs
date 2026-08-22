@@ -13,7 +13,7 @@ The seller MUST submit complete raw credentials and raw signatures.
 
 ## What the arbiter does
 
-The arbiter does not decide again whether a file block was delivered or recalculate the quote or amount due. By signing the final authorization in 003, the buyer has already committed to the target payment sequence, absolute cumulative seller amount, pool roles, and fee rate.
+The arbiter does not decide again whether a file block was delivered or recalculate the quote or amount due. By signing the final authorization in 003, the buyer has already committed to the target payment sequence and absolute cumulative seller amount; the pool roles and fee rate are recovered exclusively from the submitted OpeningProof, which also supplies the key used to verify the buyer's signature over the exact 003 terms bytes (the authorization itself carries no public keys or fee rate).
 
 The arbiter checks that this state is executable and then signs that exact transaction.
 

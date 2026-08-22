@@ -37,7 +37,8 @@ belongs to this key's role before computing anything.
 There is no `pool.Signer` interface to implement and no wallet, HSM, or remote
 signing service adapter to provide. The SDK never accepts a seed,
 key-export callback, or signature-verifier callback either. Every message
-signature follows one fixed path: canonical 001/003/004 CBOR is hashed once
+signature follows one fixed path: the signed bytes (canonical 001/003 terms
+CBOR, or for 004 the exact 32-byte payment authorization hash) are hashed once
 with SHA-256, the official private key signs that pre-computed digest, and the
 low-S DER result is re-verified by a fixed internal verifier before it can be
 returned. In Go, `(*ec.PrivateKey).Sign` receives the already-computed digest;
@@ -65,14 +66,18 @@ results, and deduplication is an application responsibility.
 
 ## Content bytes are caller-supplied
 
-The seller reads seed/block bytes from its own storage and passes them via
-`seller.ContentDeliveryInput`; the buyer passes verified seeds via
-`buyer.ContentRequestInput.Seed` / `buyer.ContentDeliveryInput.Seed`. The
-workflows verify hashes, seed structure, block membership, content size, quote
-terms, and request/delivery signatures against those explicit bytes.
-AcceptDelivery returns the verified payload as data (`buyer.VerifiedDelivery.Payload`);
-saving it to final storage is the application's job, and a failed save means the
-business step must not be treated as complete.
+The seller reads seed/block payload bytes from its own storage and passes them
+as an ordered batch via `seller.ContentDeliveryInput.ContentPayloads`; the
+buyer passes ordered content hashes via `buyer.ContentRequestInput.ContentHashes`
+and verified seeds via `Seed`. The workflows derive every content kind from
+evidence (a hash equal to the quote SeedHash is the seed, everything else must
+be committed by that seed), verify hashes, seed structure, block membership,
+expected lengths, quote terms, and request/delivery signatures against those
+explicit bytes, and accept or reject the whole batch atomically.
+AcceptDelivery returns the verified payload batch as data
+(`buyer.VerifiedDelivery.Payloads`, in 003 hash order); saving it to final
+storage is the application's job, and a failed save means the business step
+must not be treated as complete.
 
 ## Time and height facts
 
@@ -103,10 +108,12 @@ The role APIs accept protocol-shaped data and return computed results:
   FundingTx\}; broadcasting FundingTx is the application's node adapter's job.
 - seller.BuildContentDelivery returns the wire delivery plus
   ContentDeliveryState — the lock-free protocol context (refund correlation ID,
-  request hash, base sequence, base seller amount, expected delta) needed later
-  by AcceptPayment. It carries no owner, lease, or expiry semantics.
-- buyer.AcceptDelivery returns VerifiedDelivery\{Payload, Update\}: verified
-  content bytes plus the signed 005 wire update.
+  authorization hash, target payment sequence, absolute cumulative seller
+  amount) needed later by AcceptPayment. It carries no owner, lease, or expiry
+  semantics.
+- buyer.AcceptDelivery returns VerifiedDelivery\{Payloads, Update\}: the
+  verified payload batch in 003 hash order plus the single signed 005 wire
+  update for the whole batch.
 - pool.PaymentUpdate, pool.UnsignedPayment, and pool.SignedPayment distinguish
   unsigned state, detached signatures, and complete transactions. Build/Verify/
   Accept methods return raw transactions for the application to broadcast;

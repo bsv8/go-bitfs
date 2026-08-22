@@ -72,7 +72,7 @@ func main() {
 	// stdout 只输出标量字段：0204 仅凭 REFUND_TEMPLATE_TXID_HEX 就能从买方
 	// checkpoint 加载 proof 并构造交付报文；OpeningProof 不作为进程间交接物。
 	fmt.Printf("REFUND_TEMPLATE_TXID_HEX=%s\n", hex.EncodeToString(acceptance.Reference.RefundTemplateTxID[:]))
-	fmt.Printf("BASE_PAYMENT_SEQUENCE=%d\n", acceptance.Reference.BasePaymentSequence)
+	fmt.Printf("BASE_PAYMENT_SEQUENCE=%d\n", acceptance.Reference.PaymentSequence)
 }
 
 // debug 将运行轨迹写入 stderr，保证 stdout 可以安全地作为下一步输入。

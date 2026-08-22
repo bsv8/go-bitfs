@@ -107,10 +107,9 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	opening := f.completed.Opening
 	previous := f.completed.InitialPayment
 
-	// 003 (README §6.2): buyer.ContentRequestInput with BlockHeight field.
+	// 003 (README §6.2): buyer.ContentRequestInput with an ordered hash batch.
 	input := buyer.ContentRequestInput{
-		Content:          bitfs.ContentRef{Type: bitfs.ContentSeed, Hash: masterseed.Sum256(f.seed).Bytes()},
-		ContentSize:      1,
+		ContentHashes:    [][]byte{masterseed.Sum256(f.seed).Bytes()},
 		DeliveryDeadline: bitfs.UnixSeconds(time.Now().UTC().Add(30 * time.Minute).Unix()),
 		Seed:             nil,
 		BlockHeight:      blockHeight,
@@ -132,9 +131,9 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 
 	// 004 (README §6.2): seller.BuildContentDelivery returns wire + state.
 	delivery, deliveryState, err := f.seller.BuildContentDelivery(ctx, f.quote, opening, previous, decodedRequest, seller.ContentDeliveryInput{
-		Content:     append([]byte(nil), f.seed...),
-		Seed:        nil,
-		BlockHeight: blockHeight,
+		ContentPayloads: [][]byte{append([]byte(nil), f.seed...)},
+		Seed:            nil,
+		BlockHeight:     blockHeight,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -101,7 +101,7 @@ SDK 没有 signer 接口或注入点：私钥是 workflow 的构造参数，而�
 buyerWorkflow, _ := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: buyerKey})
 ```
 
-所有签名走 SDK 固定路径：001/003/004 的 canonical CBOR 用 SHA-256 哈希一次，
+所有签名走 SDK 固定路径：被签字节（001/003 的 canonical 条款 CBOR，或 004 的精确 32 字节授权哈希）用 SHA-256 哈希一次，
 `(*ec.PrivateKey).Sign` 对这份已算好的摘要签名（Go 侧接收预计算 digest；TS 侧
 `PrivateKey.sign(message)` 会自行哈希，跨语言向量必须避免双哈希），返回 low-S DER
 并由固定验证器按派生角色公钥复验。资金池交易签名使用固定的 MultisigPool sighash
@@ -165,8 +165,8 @@ func (b *NodeBroadcaster) CurrentBlockHeight(ctx context.Context) (uint32, error
 //
 //   pools(refund_template_txid PRIMARY KEY, role, opening_proof, latest_payment, ...)
 //   buyer_openings(refund_template_txid PRIMARY KEY, request_cbor, funding_tx)
-//   delivery_states(refund_template_txid PRIMARY KEY, request_hash,
-//                   base_sequence, base_seller_sat, expected_seller_sat)
+//   delivery_states(refund_template_txid PRIMARY KEY, auth_hash,
+//                   target_sequence, seller_amount_after_sat)
 //   journal(id, refund_template_txid, kind, cbor/raw, created_at)
 type PurchaseJournal struct{ /* ... */ }
 
@@ -299,13 +299,13 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     opening := journal.LoadOpening("buyer")
     previous := journal.LoadLatestPayment("buyer") // 上一步保存的已合并状态
 
-    // 003：引用、价格、余额、序号全部基于显式传入的状态校验。
+    // 003：引用、批量价格、余额、序号全部基于显式传入的状态校验。
+    // 一个付款序号授权一组有序内容 hash；类型由证据推导，不由调用方声明。
     input := buyer.ContentRequestInput{
-        Content:          bitfs.ContentRef{Type: wantedType, Hash: wantedHash},
-        ContentSize:      wantedSize,
+        ContentHashes:    wantedHashes, // 1..64 个有序 hash；含块时必须携带已验证 seed
         // SDK 在操作入口自取一次 UTC；deadline 相对当前时间设置即可。
         DeliveryDeadline: bitfs.UnixSeconds(time.Now().UTC().Add(30 * time.Minute).Unix()),
-        Seed:             buyerSeedForBlock, // 购买块时必须携带已验证 seed
+        Seed:             buyerSeedForBlock, // 批次包含任何块时必须提供
         BlockHeight:      blockHeight,       // 仅块高锁定的退款使用
     }
     request, err := buyerWorkflow.BuildContentRequest(ctx, quote, opening, previous, input)
@@ -317,13 +317,13 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     journal.RecordOutbox("content_request", rawRequest) // 发送前留痕：007 需要
     sendToSeller(rawRequest)
 
-    // 004：卖方验证请求，读取自己的内容仓库，签名交付。
+    // 004：卖方验证整批授权，逐项校验 payload 后对裸授权哈希签名，原子交付。
     delivery, deliveryState, err := sellerWorkflow.BuildContentDelivery(ctx,
         sellerQuote, sellerOpening, sellerPrevious, decodedRequest,
         seller.ContentDeliveryInput{
-            Content:     loadedContent,
-            Seed:        repoSeed,
-            BlockHeight: blockHeight,
+            ContentPayloads: loadedPayloadBatch, // 顺序与 003 hashes 一一对应
+            Seed:            repoSeed,           // 批次包含任何块时必须提供
+            BlockHeight:     blockHeight,
         },
     )
     if err != nil { return err }
@@ -332,7 +332,8 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     if err != nil { return err }
     sendToBuyer(rawDelivery)
 
-    // 买家验证交付；payload 是数据，落盘由应用完成。
+    // 买家按 PaymentAuthorizationHash 路由 004 到本地保存的原始 003 后全量
+    // 验收；payload 批次是数据，落盘由应用完成。
     verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, previous,
         decodedRequest, decodedDelivery,
         buyer.ContentDeliveryInput{
@@ -341,9 +342,11 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
         },
     )
     if err != nil { return err }
-    if err := contentStore.SaveVerifiedContent(wantedHash, verified.Payload); err != nil {
-        // 保存失败时不得声称业务已完成；可复用同一验证结果重新落盘。
-        return err
+    for index, payload := range verified.Payloads {
+        if err := contentStore.SaveVerifiedContent(wantedHashes[index], payload); err != nil {
+            // 任一项保存失败都不得声称业务已完成；可复用同一验证结果重新落盘。
+            return err
+        }
     }
 
     // 005：卖方凭保存的 ContentDeliveryState 验证金额与序号，合并完整交易。

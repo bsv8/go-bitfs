@@ -5,63 +5,52 @@ title: 核心边界重构施工单
 
 # 核心边界重构施工单
 
-本施工单是本次 SDK 边界重构的验收合同。001–007 协议规范仍然是报文字节和协议行为的最高依据。
+本页记录已完成的核心边界硬切换的验收契约，并废止此前所有"workflow 可注入 stores/content/backend"的旧真值。协议规范 001–007 仍是 wire 字节与协议行为的权威；v4 wire 形态、CDDL、签名域与 `RefundTemplateTxID` 算法保持不变。
 
-## 产品定位
+## 产品定义
 
-`go-bitfs` 是 BitFS 协议的可执行规范，也是 Buyer、Seller、Arbiter 三方的角色 SDK。它负责确定性报文构建、严格读取、语义验证、协议计算以及 001–007 状态转换。
+`go-bitfs` 是**无状态、无基础设施副作用**的可执行 BitFS 协议规范，同时是买方、卖方和仲裁方实现的角色 SDK。给定显式协议输入和显式前序状态，它严格判断输入是否合法，并计算下一份协议报文、交易、签名材料或本地角色状态。
 
-应用只负责基础设施：
+以下能力全部属于应用：
 
-- 持久化与原子存储操作；
-- 查询公钥，以及对 SDK 给出的准确字节或摘要执行签名；不绑定任何密钥托管产品，也不要求导出私钥；
-- 完全位于 SDK 外部的对端消息传输；
-- 通过窄提交后端连接具体 BSV 节点；
-- 通过 seed/block source 与 sink 接口保存内容字节。
+- 数据库、文件、事务、锁、CAS 与唯一约束；
+- 按 `RefundTemplateTxID` 的并发串行化（SDK 无 mutex 或租约）；
+- 重试、幂等、崩溃恢复与 outbox；
+- 点对点传输、路由、超时策略；
+- 节点广播、链上查询与结果对账——只有应用的节点适配器可以声明广播被接受；
+- 区块高度来源，以 `blockHeight uint32` 参数显式提供；SDK 在每个公开入口内部读取一次系统 UTC，并用这些事实验证锁定规则；
+- 内容仓库：调用前读取字节并传入，验证后的字节作为数据返回并由应用落盘；
+- 多租户授权（`RefundTemplateTxID` 是路由 ID 不是授权令牌）。
 
-MasterSeed 是固定的内容证明实现。MultisigPool v4 是固定的 BSV 费用池交易实现。二者都不是应用插件，也不是可替换的工作流端口。
+MasterSeed 仍是固定的内容证明实现，MultisigPool v4 仍是固定的 BSV 池交易实现。两者都不是应用插件。
 
-## 必须形成的公开边界
+## 必须遵守的公开边界
 
-角色工作流构造器可以接收存储、签名器、内容 source/sink 与 BSV 提交后端，但不得接收下列能力的可替换实现：
+角色 workflow 构造器只接受一种能力：
 
-- deterministic CBOR 编码和严格解码；
-- 签名验证；
-- 参与者验证；
-- 交易 ID 计算；
-- MultisigPool 交易构造、解析、费用计算、签名角色校验、签名合并、费用池容量检查和退款到期规则；
-- BitFS 定价、授权哈希、序号推导和状态机决策。
+~~~go
+type WorkflowConfig struct {
+    PrivateKey *ec.PrivateKey // 官方 BSV Go SDK 私钥
+}
+~~~
 
-普通 Buyer、Seller、Arbiter 构造器不得公开 `Clock`。生产工作流使用 SDK 固定的 UTC Unix 秒规则和系统时间。为历史重放、一致性向量和边界测试，可以保留显式的纯 `...At` 验证函数。
+不存在 store、quote store、pending-request store、content sink/source、backend、node adapter、clock、signer 端口、verifier 策略或 locker 字段。每个方法都显式接收业务输入（报价、开池证据、上一笔付款状态、交付上下文、内容字节、seed、区块高度），只返回计算得到的 wire 报文、原始交易、已验证证据以及本地角色状态（如 `buyer.BuyerOpeningState`、`seller.ContentDeliveryState`）。方法从不加载、保存、发送、广播或标记不确定结果。
 
-签名钩子只是基础操作，不得返回私钥。SDK 或 MultisigPool adapter 构造准确的报文字节或交易摘要，调用钩子签名，自行补充协议要求的 sighash 标志，并在接受、保存、合并或提交前验证返回签名。
+签名不是钩子：所有签名都通过 SDK 的固定实现、用构造时传入的官方 BSV 私钥完成。消息签名把规范 CBOR 用 SHA-256 哈希一次，用 `(*ec.PrivateKey).Sign` 对已算好的摘要签名，规范化为 low-S DER，并在离开方法前由固定验证器对照派生角色公钥复验；交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。不需要签名的纯 Build/Read/Verify 函数继续作为公开纯函数存在，不会被强迫经过 Workflow。
 
-角色工作流不得知道 HTTP、WebSocket、libp2p、消息队列、CLI 或浏览器传输。它只生成和消费类型化协议报文及现有确定性 wire 编码。BSV 提交钩子表达的是验收语义，而不是传输协议；SDK 必须验证提交前的交易和提交后返回的验收身份。
+## 验收检查
 
-## 实施任务
+- `buyer.WorkflowConfig`、`seller.WorkflowConfig`、`arbitration.WorkflowConfig` 除 `PrivateKey` 外无任何字段，且构造器拒绝 nil 私钥。
+- SDK 内不存在按 `RefundTemplateTxID` 自动加载状态的代码路径；由调用方提供。
+- 没有任何方法执行持久化、网络发送或广播；原始交易作为返回值交给应用提交。
+- 在历史文档之外的全仓静态搜索找不到 `FileStore`、`MemoryStore`、`FileQuoteStore`、`PoolStore`、`PendingRequestStore`、租约类型、进程锁或 backend 适配器。
+- 001–007 wire fixture 与 MultisigPool 交易 fixture 在切换前后逐字节一致；`MajorVersion == 4`，无 v5。
+- stale sequence、wrong opening/role/hash、金额倒退和到期违规仍被拒绝。
+- 英文与简体中文文档与编译后的 API 一致。
 
-1. 使用外部基础 `Signer` 操作取代 `PrivateKeyProvider` 交易签名。任何导出的生产 API 都不得返回 `*ec.PrivateKey`。
-2. 角色工作流根据当前报价、开池请求或开池证明中的参与者公钥，自行构造并使用仓库内的具体 MultisigPool engine/adapter。从工作流配置中删除可注入的 Buyer/Seller/Arbiter 交易端口和参与者 verifier。
-3. 将开池验证与交易 ID 计算收回具体引擎。把开池聚合 hooks 拆回存储和 BSV 提交依赖。每个新生成签名和完整 proof 都必须在保存或返回前由核心验证。
-4. 将标准 ECDSA 验签变成核心实现细节。从角色工作流配置中删除报价、内容和授权 verifier 回调；必要时保留面向协议用户的纯低层验证 API。
-5. 删除公开工作流 `Clock` 配置；保留确定性的 `At` 验证入口，并用它覆盖精确到期边界测试，不扩大生产构造器表面。
-6. 继续不实现对端消息传输。保持 BSV backend 足够窄，并保证核心在提交前验证交易字节，在非最终验收后核对 txid、spend 锚点和 sequence。
-7. 保持 001–007 全部报文的严格 Build/Read/Verify 行为。价格、序号、参与者、费用和哈希若能从已验证证据推导，输入不得要求应用重复填写。
-8. 更新集成测试、包测试、示例、生成 API 注释及中英文网站；删除所有把交易引擎或 verifier 描述成外部 hook 的生产文档。
+## 不在范围内
 
-## 验收条件
-
-- `go test ./...` 全部通过，覆盖正常购买、重试、关闭、退款和 Seller+Arbiter 结算。
-- 测试签名器只实现 `PublicKey` 与 `Sign` 即可完成全流程，永不暴露 EC 私钥。
-- Buyer、Seller、Arbiter 工作流配置中不存在 `Clock`、通用签名 verifier、参与者 verifier、开池聚合 hook 或可替换交易引擎端口。
-- 即使存储和 BSV backend 宽松，畸形开池、付款、关闭和仲裁字节仍会被固定核心拒绝。
-- 签名钩子的返回值在返回、保存、合并或提交前已按预期角色验证。
-- 公开协议和角色工作流 API 中没有对端传输实现或传输专用字段。
-- 英文和简体中文文档与编译后的 API 一致。
-
-## 不在本次范围
-
-- 实现 HTTP、WebSocket、libp2p、消息队列、CLI 或浏览器传输。
-- 将签名钩子绑定到 KeyHold 或其他托管产品。
-- 允许应用配置替换 MasterSeed 或 MultisigPool。
-- 设计新 wire 协议；除非当前实现错误，否则不改变 001–007 的规范业务行为。
+- 把未来的数据库/文件适配器列为 SDK 工作：持久化按设计属于应用技术栈。
+- 任何形式的传输实现。
+- 通过应用配置替换 MasterSeed 或 MultisigPool。
+- 修改 001–007 的规范性 wire 行为。

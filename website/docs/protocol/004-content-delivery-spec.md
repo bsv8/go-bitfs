@@ -5,4 +5,4 @@ title: 004 · v4 Content delivery credential specification
 
 # 004 · v4 Content delivery credential specification
 
-004 uses protocol major 4, references the `PaymentAuthorizationHash` from 003, and carries the content bytes. The seller signs deterministic CBOR delivery terms. Before constructing the unsigned 005 state or producing its detached signature, the buyer MUST verify the content hash, quoted price, expiry, and seller identity.
+004 uses protocol major 4, carries the pool `RefundTemplateTxID` correlation ID, references the `PaymentAuthorizationHash` from 003, and carries the content bytes. The seller signs deterministic CBOR delivery terms whose first business field is `refund_template_txid`, so an independently delivered credential routes directly to its fee pool. Before constructing the unsigned 005 state or producing its detached signature, the buyer MUST verify the content hash, quoted price, expiry, and seller identity.

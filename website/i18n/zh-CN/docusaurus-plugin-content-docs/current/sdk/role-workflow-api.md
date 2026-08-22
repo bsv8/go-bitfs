@@ -1,432 +1,309 @@
 ---
 id: role-workflow-api
-title: 03 · 角色工作流 API
+title: 03 · 角色 workflow API
 ---
 
-# 03 · 角色工作流 API
+# 03 · 角色 workflow API
 
-返回 [SDK API 框架入口](sdk-api-framework-design.md)。
+每个 workflow 只持有构造时传入的官方 BSV 私钥。方法从不加载或保存状态、从不发送报文、从不广播交易、也从不查询节点；每个公开入口在内部读取一次系统 UTC，并把区块高度作为显式参数传入。下文对每个方法列出其 wire 输入、本地输入、wire 输出、本地输出与无副作用保证。应用以 `RefundTemplateTxID` 为键持久化每个返回的本地值，按池串行化并发工作，发送 wire 报文，并通过自己的节点适配器广播原始交易。
 
-当前实现入口分别是 `buyer.NewWorkflow(buyer.WorkflowConfig{...})`、`seller.NewWorkflow(seller.WorkflowConfig{...})` 和 `arbitration.NewWorkflow(arbitration.WorkflowConfig{...})`。下文保留为角色级调用顺序说明；细节以包中的实际类型和方法为准。
+每个步骤都遵循的应用侧推荐顺序：
 
-本页描述面向应用开发者的角色门面。它们不持有网络连接：每个方法返回应由应用发送给下一参与方的结构化报文或原始交易。签名、存储、节点等依赖见[外部钩子与数据类型](external-hooks-and-data-types.md)。
+```
+load（按 RefundTemplateTxID） → SDK compute/verify → persist intent/result
+→ send/broadcast → record outcome
+```
 
-## 买方 API
+## Buyer API
 
 ```go
 // package buyer
-// Workflow 只依赖注入的端口。NewWorkflow 必须验证所有必需端口非 nil。
-type Workflow struct { /* 未公开字段 */ }
-
 type WorkflowConfig struct {
-    Signer      pool.Signer
-    Quotes      QuoteStore
-    Pools       pool.PoolStore
-    Backend     pool.NonFinalPoolBackend
-    ContentSink ContentSink
-    SeedSource  SeedSource
+    PrivateKey *ec.PrivateKey // 官方 BSV Go SDK 私钥
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// AcceptQuote 验证 001 并保存原始报价。之后 RequestContent 和 AcceptDelivery 才能按哈希取回它。
-func (workflow *buyer.Workflow) AcceptQuote(
-    ctx context.Context,
-    quote *bitfs.SignedFileQuote,
-) (*bitfs.FileQuoteTerms, error)
+// BuyerOpeningState 是买方私有本地状态（wire：无；local：全部）。
+type BuyerOpeningState struct {
+    RefundTemplateTxID pool.RefundTemplateTxID
+    Request      *pool.RefundPresignRequest
+    FundingTx    []byte // 绝不进入 FundingTxDelivery 以外的任何报文
+}
 
-// PreparePoolOpening 接受买方钱包准备好的 FundingTx，构造初始远期 RefundTx 并签出买方退款签名。
-// 返回的请求是 002 的 PoolRefundPresignRequest，应发送给卖方；此时绝不可广播 FundingTx。
-func (workflow *buyer.Workflow) PreparePoolOpening(
-    ctx context.Context,
-    input pool.OpeningInput,
-) (*pool.RefundPresignRequest, error)
+// PoolOpeningPreparation 是 PreparePoolOpening 的复合结果。
+type PoolOpeningPreparation struct {
+    Request *pool.RefundPresignRequest // 发送给卖方的 wire 报文
+    State   *BuyerOpeningState         // 发送前必须保存的本地状态
+}
 
-// AcceptRefundPresign 验证卖方退款签名、保存完整开池证明，并记录初始退款状态。
-// 成功意味着买方侧开池完成；卖方尚未必然提交 FundingTx。
-func (workflow *buyer.Workflow) AcceptRefundPresign(
-    ctx context.Context,
-    request *pool.RefundPresignRequest,
-    response *pool.RefundPresignResponse,
-    fundingTx []byte,
-) (*pool.Reference, error)
+// RefundPresignAcceptance 是 AcceptRefundPresign 的复合结果。
+type RefundPresignAcceptance struct {
+    Reference      pool.Reference     // 池 ID + 基准序号
+    Opening        *pool.OpeningProof // 含 FundingTx 的完整 proof（本地）
+    InitialPayment *pool.PaymentState // 初始退款状态（本地）
+}
 
-// BuildFundingTxDelivery 在买方保存完整开池证明后，生成可发送给卖方的 002 报文。
-func (workflow *buyer.Workflow) BuildFundingTxDelivery(
-    fundingTx []byte,
-) (*pool.FundingTxDelivery, error)
+// VerifiedDelivery 是 AcceptDelivery 的复合结果。
+type VerifiedDelivery struct {
+    Payload []byte              // 已验证内容字节（本地，需保存）
+    Update  *pool.PaymentUpdate // 发送给卖方的 wire 报文
+}
 
-// RequestContent 选择一份已验证报价、一个可用池和一个内容哈希，创建 003。
-// 它只读取该池的最后已接受状态。卖方是否存在进行中请求由卖方在处理 003 时判定。
-func (workflow *buyer.Workflow) RequestContent(
-    ctx context.Context,
-    input ContentRequestInput,
-) (*bitfs.SignedContentRequest, error)
+// AcceptQuote 在入口处读取一次系统 UTC 来验证签名、条款和有效期。
+// wire 输入：签名的 001。本地输出：接受的条款。不持久化。
+func (workflow *Workflow) AcceptQuote(ctx context.Context, quote *bitfs.SignedFileQuote) (*bitfs.FileQuoteTerms, error)
 
-// AcceptDelivery 验证并可选保存 004 内容，然后按报价价格构造、签署 005。
-// 返回的 PaymentUpdate 应发送给卖方；本函数不自行把 update 提交到节点。
-func (workflow *buyer.Workflow) AcceptDelivery(
-    ctx context.Context,
-    request *bitfs.SignedContentRequest,
-    delivery *bitfs.SignedContentDelivery,
-) (*pool.PaymentUpdate, error)
+// PreparePoolOpening 构造并签名通用 002 退款证据。
+// wire 输入：无。本地输入：pool.OpeningInput。
+// 同时返回 wire 请求与必须先保存的私有状态。
+func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.OpeningInput) (*PoolOpeningPreparation, error)
 
-// RefundAfterExpiry 将开池证明中分离保存的双方签名合并到退款交易后提交。
-// 若节点已保存更高付款状态，节点会拒绝该旧退款；这不是 SDK 可绕过的失败。
-func (workflow *buyer.Workflow) RefundAfterExpiry(ctx context.Context, spendTxID pool.Hash32) (pool.Hash32, error)
+// AcceptRefundPresign 用显式提供的已保存开池状态验证 0202 响应；
+// 重新派生 RefundTemplateTxID 并拒绝任何错配。
+// wire 输入：0202 响应。本地输入：保存的 BuyerOpeningState。
+func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, state *BuyerOpeningState, response *pool.RefundPresignResponse) (*RefundPresignAcceptance, error)
 
-// BuildImmediateClose 构造空解锁协商关闭交易并返回 Buyer detached signature。
-// 交易的 nSequence 与 nLockTime 都为 0xffffffff；它不适用于单方到期退款。
-func (workflow *buyer.Workflow) BuildImmediateClose(
-    ctx context.Context,
-    spendTxID pool.Hash32,
-) (*pool.UnsignedPayment, []byte, error)
+// BuildFundingTxDelivery 把已验证 proof 携带的资金交易打包为 0204 wire 交付。
+// 调用方显式传入 proof；SDK 不按哈希加载任何东西。
+func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTxDelivery, error)
 
-// SubmitImmediateClose 提交卖方已补足签名的最终交易，将最终状态保存为最新池状态，
-// 并清除持久化 closing 保护。若保存后清理失败，重试会验证已保存的最终状态，
-// 只重试清理，不会再次提交最终交易。
-func (workflow *buyer.Workflow) SubmitImmediateClose(
-    ctx context.Context,
-    close *pool.SignedPayment,
-) (pool.Hash32, error)
+// BuildContentRequest 验证报价/开池/上一状态的绑定、价格与余额，
+// 然后用本 workflow 的私钥签名 003 请求。
+// 系统 UTC 在入口处读取一次；区块高度由输入提供。不读取内容。
+func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, input ContentRequestInput) (*bitfs.SignedContentRequest, error)
+
+// AcceptDelivery 验证请求关联、卖方签名、内容哈希与大小、seed 绑定；
+// 返回已验证 payload 与签名的 005 更新。
+func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, input ContentDeliveryInput) (*VerifiedDelivery, error)
+
+// BuildImmediateClose 从调用方选定的基准状态和调用方选择的目标卖方金额构造
+// 未签名最终关闭候选和买方分离签名。SDK 不声称 base 是业务最新状态。
+// 把两个值都发送给卖方。
+func (workflow *Workflow) BuildImmediateClose(ctx context.Context, opening *pool.OpeningProof, base *pool.PaymentState, targetSellerAmountSat uint64, blockHeight uint32) (*pool.UnsignedPayment, []byte, error)
+
+// CompleteImmediateClose 只验证完整签名的关闭交易对开池证据协议合法；
+// 是否匹配业务预期、何时广播都是应用的决定。
+func (workflow *Workflow) CompleteImmediateClose(ctx context.Context, opening *pool.OpeningProof, close *pool.SignedPayment) (*pool.SignedPayment, error)
+
+// BuildRefundAfterExpiry 用入口处读取一次的系统 UTC 加调用方提供的高度验证到期，
+// 把保存的退款签名合并为可广播交易。SDK 不因存在某笔本地付款状态而拒绝构造。
+// 广播是应用的职责；SDK 绝不提交任何东西。
+func (workflow *Workflow) BuildRefundAfterExpiry(ctx context.Context, opening *pool.OpeningProof, blockHeight uint32) ([]byte, *pool.PaymentState, error)
 ```
 
-`ContentRequestInput` 包含已验证报价、`SpendTxID`、`ContentRef` 和交付期限。工作流自行从已验证存储加载 OpeningProof 和当前状态，推导 base sequence 与仲裁者；调用者不能重复或覆盖这些协议字段。
+配套输入类型：
 
-## 卖方 API
+```go
+type ContentRequestInput struct {
+    Content          bitfs.ContentRef
+    ContentSize      uint64
+    DeliveryDeadline bitfs.UnixSeconds
+    Seed             []byte // 请求块内容时必填
+    BlockHeight      uint32 // 仅块高锁定的退款使用
+}
 
-卖方 API 把最危险的“先交付、后付款”窗口封装在一个调用中：先验证 003，再原子加门闩，最后读取内容并签出 004。调用者不得绕过 `DeliverRequestedContent` 而自行交付。
+type ContentDeliveryInput struct {
+    Seed        []byte // 接受块交付时必填
+    BlockHeight uint32
+}
+```
+
+## Seller API
+
+Seller API 没有租约或 pending-request store：`BuildContentDelivery` 返回无锁的 `ContentDeliveryState`，精确记录后续所需协议上下文；应用保存它并在 `AcceptPayment` 时重新传入。
 
 ```go
 // package seller
 type WorkflowConfig struct {
-    Signer  pool.Signer
-    Quotes  QuoteStore
-    Pools   pool.PoolStore
-    Pending pool.PendingRequestStore
-    Content ContentSource
-    Backend pool.PoolBackend
+    PrivateKey *ec.PrivateKey // 官方 BSV Go SDK 私钥
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// CreateQuote 创建、签署并保存 001。
-// 返回值可经任意调用方网络通道发送给指定买方。
-func (workflow *seller.Workflow) CreateQuote(
-    ctx context.Context,
-    draft bitfs.FileQuoteTerms,
-    recommendedFilename string,
-) (*bitfs.SignedFileQuote, error)
+// SellerPresignResult 是 PresignPoolOpening 的复合结果。
+type SellerPresignResult struct {
+    Response *pool.RefundPresignResponse // 回传买方的 wire 报文
+    Opening  *pool.OpeningProof          // 本地预签证据；先保存
+}
 
-// PresignPoolOpening 验证 002 请求、签署初始退款交易并先保存待激活开池证明。
-// 返回响应后，卖方仍没有资金池，不能据此交付内容。
-func (workflow *seller.Workflow) PresignPoolOpening(
-    ctx context.Context,
-    request *pool.RefundPresignRequest,
-) (*pool.RefundPresignResponse, error)
+// PoolFundingAcceptance 是 AcceptPoolFunding 的复合结果。
+type PoolFundingAcceptance struct {
+    Opening        *pool.OpeningProof // 含 FundingTx 的完整 proof（本地）
+    InitialPayment *pool.PaymentState // 初始退款状态（本地）
+    FundingTx      []byte             // 通过你自己的节点适配器广播
+}
 
-// AcceptPoolFunding 验证 FundingTx 与已保存证明一致，保存完整证明并提交 FundingTx。
-// 只有节点提交成功后，卖方才把池视为可用于 003。若节点已接受但本地初始状态
-// 保存失败，工作流会标记池状态不确定；重试要求后端按相同原始交易幂等返回规范
-// txid，并直接对账恢复，不会先做普通重复保存。
-func (workflow *seller.Workflow) AcceptPoolFunding(
-    ctx context.Context,
-    delivery *pool.FundingTxDelivery,
-) (*pool.OpeningProof, error)
+// ContentDeliveryState 记录验证某次交付对应买方 005 更新所需的协议上下文。
+// 它不携带 owner/lease/acquire/held/release/expiry 语义——串行化由调用方负责。
+type ContentDeliveryState struct {
+    RefundTemplateTxID            pool.RefundTemplateTxID
+    ContentRequestHash      pool.Hash32
+    BasePaymentSequence     uint32
+    BaseSellerAmountSat     uint64
+    ExpectedSellerAmountSat uint64
+}
 
-// DeliverRequestedContent 验证 003、报价、池、公钥、仲裁者、余额和当前序号。
-// 它先原子获得该池门闩，之后读取内容、计算哈希、签出 004 并返回。
-// 已有门闩时返回 ErrPoolBusy；请求序号不是最新时返回 ErrStalePaymentSequence。
-func (workflow *seller.Workflow) DeliverRequestedContent(
-    ctx context.Context,
-    request *bitfs.SignedContentRequest,
-) (*bitfs.SignedContentDelivery, error)
+// CreateQuote 在入口处读取一次系统 UTC 并以此签名确定性 001 条款。
+// 保存返回凭证是应用的职责。
+func (workflow *Workflow) CreateQuote(ctx context.Context, draft bitfs.FileQuoteTerms, recommendedFilename string) (*bitfs.SignedFileQuote, error)
 
-// AcceptPayment 验证 005 的原始交易、买方签名、输入、递增 nSequence 和累计金额；
-// 卖方签名并提交到非最终交易池。仅节点确认接受后才保存新状态并释放对应门闩。
-// 返回值是提交后的状态，不是发送给买方的额外确认报文。
-func (workflow *seller.Workflow) AcceptPayment(
-    ctx context.Context,
-    payment *pool.PaymentUpdate,
-) (*pool.PaymentState, error)
+// PresignPoolOpening 验证 0201 并返回卖方退款签名与预签形态 proof。
+// 发送 Response 之前先保存 Opening。
+func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.RefundPresignRequest) (*SellerPresignResult, error)
 
-// SignImmediateClose 验证空解锁关闭交易和 Buyer detached signature，持久化 closing 保护，
-// 使用工作流配置中的卖方签名能力补足 Seller detached signature，
-// 并返回可立即提交但不会广播的完整交易。该方法只使用工作流配置中的签名能力。
-func (workflow *seller.Workflow) SignImmediateClose(
-    ctx context.Context,
-    close *pool.UnsignedPayment,
-    buyerSignature []byte,
-) (*pool.SignedPayment, error)
+// AcceptPoolFunding 用显式提供的预签证据检查 FundingTx 并计算初始退款状态。
+// SDK 不提交任何东西：自己广播返回的 FundingTx，再持久化 Opening 与 InitialPayment。
+func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTxDelivery) (*PoolFundingAcceptance, error)
 
-// BuildArbitrationRequestFromAuthorization 依据最终 003 授权和当前状态构造空解锁候选，并签 Seller。
-func (workflow *seller.Workflow) BuildArbitrationRequestFromAuthorization(
-    ctx context.Context,
-    authorization *bitfs.SignedContentRequest,
-) (*arbitration.ArbitrationRequest, error)
+// BuildContentDelivery 用显式报价/开池/上一状态以及调用方提供的内容字节验证 003，
+// 然后签名 004。发送交付前先保存返回的 ContentDeliveryState。
+func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error)
 
-// SubmitArbitratedPayment 合并仲裁者签名，并通过非最终节点提交同一累计状态。
-func (workflow *seller.Workflow) SubmitArbitratedPayment(
-    ctx context.Context,
-    request *arbitration.ArbitrationRequest,
-    response *arbitration.ArbitrationResponse,
-) (*pool.PaymentState, error)
+// AcceptPayment 用显式开池证据、上一状态和保存的 ContentDeliveryState 验证 005 更新；
+// 添加卖方签名并合并完整交易。RawTx 由你自己广播。
+func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, deliveryState *ContentDeliveryState, update *pool.PaymentUpdate, blockHeight uint32) (*pool.SignedPayment, error)
+
+// SignImmediateClose 针对开池证据验证候选结构与协议金额边界，用固定验证器检查
+// 买方角色签名，然后添加卖方签名并合并，但不广播。
+// 它不判断候选是否匹配任何待处理请求或业务最新金额。
+func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.OpeningProof, unsigned *pool.UnsignedPayment, buyerSig []byte, blockHeight uint32) (*pool.SignedPayment, error)
+
+// BuildArbitrationRequest 验证保存的 003 授权与基准状态，构造被授权候选并签名，
+// 打包成 007 证据请求。绝不发送任何东西。
+func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, base *pool.PaymentState, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
+
+// CompleteArbitratedPayment 用显式证据验证 007 响应哈希与仲裁方签名，合并卖方+仲裁方签名。
+// 广播是应用的职责。
+func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
 ```
 
-## 仲裁者 API
+## Arbiter API
 
-仲裁者接收完整证据而非内部查询买卖双方。它不裁定文件是否交付，也不重算报价金额。
+仲裁方接收完整证据，而不是查询买方或卖方的状态；它不判断内容是否已交付，也不重新计算报价金额。
 
 ```go
 // package arbitration
 type WorkflowConfig struct {
-    Signer pool.Signer
+    PrivateKey *ec.PrivateKey // 官方 BSV Go SDK 私钥
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// 这是应用层适配器，不是 SDK 类型；卖方应用可以通过 HTTP、消息队列或本地调用实现。
+// 应用本地的适配器，不是 SDK 类型。卖家应用可以用 HTTP、队列或本地调用实现该传输。
 type ArbiterClient interface {
     SignPayment(ctx context.Context, request *arbitration.ArbitrationRequest) (*arbitration.ArbitrationResponse, error)
 }
 
-// SignPayment 验证 007 证据包中的开池证明、最终授权和空解锁候选交易。
-// 校验通过后只返回对该精确交易的仲裁者签名；不返回批准状态、金额或数据库 ID。
+// SignPayment 检查完整开池证明、最终授权与未签名候选。
+// 它只针对这些确切字节返回仲裁方签名，而不是批准状态、金额或数据库 ID。
 func (workflow *arbitration.Workflow) SignPayment(
     ctx context.Context,
     request *arbitration.ArbitrationRequest,
 ) (*arbitration.ArbitrationResponse, error)
 ```
 
-## 完整业务流程示例
+## 完整业务流程
 
-下面用一次“买方购买卖方文件”的完整流程串起主要 API。代码是应用层伪代码；钱包、数据库、内容源和窄原始 BSV 后端由应用实现，工作流在内部构造经验证的节点边界和具体 MultisigPool 适配器。
+### 1. 为每个角色创建一套能力
 
-### 1. 为三个角色创建各自的能力
-
-一个 `Signer` 只代表一个角色，并在 SDK 外部保管私钥。固定核心从报价、003 授权和开池证明中读取公钥，并自行完成报价、内容、开池、参与者和支付验证。
+每个 workflow 只需要一把官方 BSV 私钥，没有其他可构造项。
 
 ```go
-buyerSigner   := app.BuyerSigner()   // implements pool.Signer
-sellerSigner  := app.SellerSigner()  // implements pool.Signer
-arbiterSigner := app.ArbiterSigner() // implements pool.Signer
-
-buyerWorkflow, err := buyer.NewWorkflow(buyer.WorkflowConfig{
-    Signer:            buyerSigner,
-    Quotes:            buyerQuotes,
-    Pools:             buyerPools,
-    Backend:           buyerBackend,
-    ContentSink:       buyerContentSink,
-    SeedSource:        buyerSeedSource,
-})
-must(err)
-
-sellerWorkflow, err := seller.NewWorkflow(seller.WorkflowConfig{
-    Signer:            sellerSigner,
-    Quotes:            sellerQuotes,
-    Pools:             sellerPools,
-    Pending:           sellerPending,
-    Content:           sellerContent,
-    Backend:           sellerBackend,
-})
-must(err)
-
-arbiterWorkflow, err := arbitration.NewWorkflow(arbitration.WorkflowConfig{
-    Signer:                arbiterSigner,
-})
-must(err)
+buyerWorkflow, _ := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: buyerKey})
+sellerWorkflow, _ := seller.NewWorkflow(seller.WorkflowConfig{PrivateKey: sellerKey})
+arbiterWorkflow, _ := arbitration.NewWorkflow(arbitration.WorkflowConfig{PrivateKey: arbiterKey})
 ```
 
-应用传输层只负责携带路由 `Kind` 和原始 CBOR。下面的辅助函数表示这条规则；真实应用可以把返回值放进 HTTP、WebSocket、消息队列或本地 RPC。
+### 2. 卖家创建报价、买家接受报价
 
 ```go
-func makePacket(kind wire.Kind, value any) wire.Packet {
-    packet, err := wire.Marshal(kind, value)
-    must(err)
-    return packet
-}
+quote, err := sellerWorkflow.CreateQuote(ctx, draftTerms, "file.bin")
+save(quote) // 卖方侧持久化
 
-func transmit(packet wire.Packet) (wire.Kind, []byte) {
-    // Send both values through the application transport. The receiver uses
-    // the Kind to select the matching typed Unmarshal helper.
-    return packet.Kind, append([]byte(nil), packet.CBOR...)
-}
+terms, err := buyerWorkflow.AcceptQuote(ctx, quote)
 ```
 
-### 2. 卖方创建报价，买方验收报价
+### 3. 买卖双方完成资金池开户
 
 ```go
-quote, err := sellerWorkflow.CreateQuote(ctx, quoteDraft, "report.pdf")
-must(err)
+// 0201：计算 request + 私有状态；发送 Request 之前先保存 State。
+preparation, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{ /* ... */ })
+journal.SaveBuyerOpeningState(preparation.State)
+send(preparation.Request)
 
-_, quoteCBOR := transmit(makePacket(wire.Quote, quote))
-receivedQuote, err := wire.UnmarshalQuote(quoteCBOR)
-must(err)
+// 0202：验证并预签；发送 Response 之前先保存 Opening。
+result, err := sellerWorkflow.PresignPoolOpening(ctx, receivedRequest)
+journal.SaveSellerPresignProof(result.Opening)
+send(result.Response)
 
-quoteTerms, err := buyerWorkflow.AcceptQuote(ctx, receivedQuote)
-must(err)
-quoteHashRaw, err := bitfs.FileQuoteTermsHash(receivedQuote.TermsCBOR)
-must(err)
-quoteHash := bitfs.Hash32(quoteHashRaw)
-_ = quoteTerms // 已验证的报价条款；后续请求按 quoteHash 引用它。
+// 0203：按 RefundTemplateTxID 加载保存的状态并显式传入。
+state := journal.LoadBuyerOpeningState(response.RefundTemplateTxID)
+acceptance, err := buyerWorkflow.AcceptRefundPresign(ctx, state, response)
+journal.SaveOpening("buyer", acceptance.Opening)
+journal.SaveLatestPayment("buyer", acceptance.InitialPayment)
+
+// 0204：打包已验证 proof 的资金交易。
+delivery, err := buyerWorkflow.BuildFundingTxDelivery(ctx, acceptance.Opening)
+send(delivery)
+
+// 0205：用保存的预签证据验证资金交付。
+opened, err := sellerWorkflow.AcceptPoolFunding(ctx, savedPresignProof, receivedDelivery)
+journal.SaveOpening("seller", opened.Opening)
+journal.SaveLatestPayment("seller", opened.InitialPayment)
+broadcast(opened.FundingTx) // 你的节点适配器声明接受结果
 ```
 
-卖方 `Signer` 创建报价，买方工作流使用固定协议验证器核对报价中的卖方公钥。应用不再注入验证回调，也不需要拥有卖方私钥。
-
-### 3. 买方和卖方完成费用池开立
-
-`fundingTx` 是买方钱包准备好的原始资金交易。此时只能先预签退款交易，不能提前广播资金交易。
+### 4. 买家请求内容、卖家交付内容
 
 ```go
-arbiterPubkey, err := arbiterSigner.PublicKey(ctx)
-must(err)
+request, err := buyerWorkflow.BuildContentRequest(ctx, quote, opening, latest, input)
+journal.Record(request) // 留痕供 007 使用
 
-fundingTx := app.BuildFundingTx()
-presign, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{
-    FundingTx:            fundingTx,
-    ExpiryLockTime:       app.RefundExpiryLockTime(),
-    MinerFeeRateSatPerKB: app.MinerFeeRate(),
-    SellerPubKey:         receivedQuote.SellerPubkey,
-    ArbiterPubKey:        arbiterPubkey,
-})
-must(err)
-
-// 资金池锁定输出固定为 FundingTx 的第 0 个输出。FundingTxID、资金池金额与
-// 锁定脚本均由协议推导，不再作为 wire 字段传输。
-
-_, sellerPresignCBOR := transmit(makePacket(wire.PoolRefundPresignRequest, presign))
-sellerPresign, err := wire.UnmarshalPoolRefundPresignRequest(sellerPresignCBOR)
-must(err)
-
-presignResponse, err := sellerWorkflow.PresignPoolOpening(ctx, sellerPresign)
-must(err)
-
-_, buyerResponseCBOR := transmit(makePacket(wire.PoolRefundPresignResponse, presignResponse))
-buyerResponse, err := wire.UnmarshalPoolRefundPresignResponse(buyerResponseCBOR)
-must(err)
-
-// This durably records the complete opening proof and initial payment state.
-reference, err := buyerWorkflow.AcceptRefundPresign(
-    ctx, presign, buyerResponse, fundingTx,
-)
-must(err)
-
-fundingDelivery, err := buyerWorkflow.BuildFundingTxDelivery(fundingTx)
-must(err)
-_, fundingCBOR := transmit(makePacket(wire.PoolFundingTxDelivery, fundingDelivery))
-sellerFunding, err := wire.UnmarshalPoolFundingTxDelivery(fundingCBOR)
-must(err)
-
-// Only now does the seller verify and submit the funding transaction.
-_, err = sellerWorkflow.AcceptPoolFunding(ctx, sellerFunding)
-must(err)
+delivery, deliveryState, err := sellerWorkflow.BuildContentDelivery(ctx,
+    quote, opening, latest, request,
+    seller.ContentDeliveryInput{Content: contentBytes, Seed: seedBytes})
+journal.SaveDeliveryState(deliveryState) // 发送前先保存
+send(delivery)
 ```
 
-`PreparePoolOpening` 和 `PresignPoolOpening` 使用固定的 MultisigPool v4 引擎。角色工作流只接收窄 `Signer`，不会接收或导出私钥；应用提供原始 funding 字节，工作流负责构造并验证规范开池证据。
-
-### 4. 买方请求内容，卖方交付内容
-
-以下示例请求一个 block，因此买方的 `SeedSource` 必须能提供报价承诺的 seed。请求 seed 时可使用 `ContentType: bitfs.ContentSeed`，不需要 `SeedSource`。
+### 5. 买家验收交付、卖家接受累计付款
 
 ```go
-contentHash := app.RequestedBlockHash()
-request, err := buyerWorkflow.RequestContent(ctx, buyer.ContentRequestInput{
-    QuoteTermsHash:        quoteHash,
-    SpendTxID:             reference.SpendTxID,
-    Content: bitfs.ContentRef{
-        Type: bitfs.ContentBlock,
-        Hash: contentHash,
-    },
-    ContentSize:      app.ExpectedBlockSize(),
-    DeliveryDeadline: bitfs.UnixSeconds(time.Now().Add(time.Hour).Unix()),
-})
-must(err)
+verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, request,
+    delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
+save(verified.Payload) // 保存是应用的职责
+send(verified.Update)
 
-_, requestCBOR := transmit(makePacket(wire.ContentRequest, request))
-sellerRequest, err := wire.UnmarshalContentRequest(requestCBOR)
-must(err)
-
-// This call verifies 003, acquires the seller-side pending-request latch,
-// reads ContentSource, verifies the payload, and signs 004.
-delivery, err := sellerWorkflow.DeliverRequestedContent(ctx, sellerRequest)
-must(err)
-
-_, deliveryCBOR := transmit(makePacket(wire.ContentDelivery, delivery))
-buyerDelivery, err := wire.UnmarshalContentDelivery(deliveryCBOR)
-must(err)
+signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,
+    savedDeliveryState, verified.Update, blockHeight)
+journal.SaveLatestPayment("seller", &signed.State)
+broadcast(signed.RawTx)
 ```
-
-买方 `Signer` 签 003；卖方工作流使用固定核心和报价中的买方公钥验签，然后用自己的 `Signer` 签 004，买方仍由固定核心验收返回的 delivery。
-
-### 5. 买方验收交付，卖方接受累计付款
-
-```go
-payment, err := buyerWorkflow.AcceptDelivery(ctx, request, buyerDelivery)
-must(err)
-
-_, paymentCBOR := transmit(makePacket(wire.CumulativePayment, payment))
-sellerPayment, err := wire.UnmarshalPaymentUpdate(paymentCBOR)
-must(err)
-
-// The seller verifies the exact buyer signature, adds its own signature,
-// submits the same cumulative state to the non-final pool, then persists it.
-accepted, err := sellerWorkflow.AcceptPayment(ctx, sellerPayment)
-must(err)
-_ = accepted
-```
-
-这里没有额外的“付款成功”协议报文。卖方以节点对同一交易的接受结果为准；应用如果需要通知买方，可以自行发送状态通知，但不能把通知当成链上或费用池接受证明。买方若要继续构造协商关闭，必须先通过节点查询或应用同步，把已接受状态写入自己的 `buyerPools`。
 
 ### 6. 付款异常时的仲裁分支
 
-下面是替代 `AcceptPayment` 的分支，不应与正常付款路径同时执行。卖方依据已经签名的 003 和自己保存的最新池状态构造 007，仲裁者只验证证据并添加自己的交易签名。
-
 ```go
-arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequestFromAuthorization(
-    ctx, sellerRequest,
-)
-must(err)
-
-_, arbRequestCBOR := transmit(makePacket(wire.ArbitrationRequest, arbitrationRequest))
-arbiterRequest, err := wire.UnmarshalArbitrationRequest(arbRequestCBOR)
-must(err)
-
-arbitrationResponse, err := arbiterWorkflow.SignPayment(ctx, arbiterRequest)
-must(err)
-
-_, arbResponseCBOR := transmit(makePacket(wire.ArbitrationResponse, arbitrationResponse))
-arbiterResponse, err := wire.UnmarshalArbitrationResponse(arbResponseCBOR)
-must(err)
-
-arbitrated, err := sellerWorkflow.SubmitArbitratedPayment(
-    ctx, arbiterRequest, arbiterResponse,
-)
-must(err)
-_ = arbitrated
+authorization := journal.LoadSentContentRequest(refundTemplateTxID) // 留痕的 003 字节
+arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
+    opening, authorization, latest, blockHeight)
+response := arbiter.SignPayment(arbitrationRequest)
+signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
+    opening, latest, arbitrationRequest, response, blockHeight)
+journal.SaveLatestPayment("seller", &signed.State)
+broadcast(signed.RawTx)
 ```
 
-仲裁工作流使用固定核心验证 003 买方授权；只有候选交易全部通过后，仲裁者自己的 `Signer` 才添加仲裁签名。
-
-### 7. 另外两个结束分支：协商关闭和到期退款
-
-协商关闭和到期退款也是替代路径，不是上面正常付款后的必经步骤。协商关闭需要双方共同签名，但不新增一个 CBOR `CloseRequest`。`SignImmediateClose` 只签名并持久化 closing 保护，不会广播；`SubmitImmediateClose` 在节点接受后保存最终状态并清除保护。若保存后清理失败，重试只做清理，不会再次广播。下面假设 `buyerPools` 已经通过节点或应用同步保存了最新被接受状态：
+### 7. 另外两种结局：协商关池与到期退款
 
 ```go
-unsignedClose, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, reference.SpendTxID)
-must(err)
+unsigned, buyerSig, _ := buyerWorkflow.BuildImmediateClose(ctx, opening, latest, targetSellerAmountSat, blockHeight)
+closed, _ := sellerWorkflow.SignImmediateClose(ctx, opening, unsigned, buyerSig, blockHeight)
+final, _ := buyerWorkflow.CompleteImmediateClose(ctx, opening, closed)
+broadcast(final.RawTx)
 
-closed, err := sellerWorkflow.SignImmediateClose(ctx, unsignedClose, buyerSig)
-must(err)
-
-_, err = buyerWorkflow.SubmitImmediateClose(ctx, closed)
-must(err)
+raw, state, _ := buyerWorkflow.BuildRefundAfterExpiry(ctx, opening, currentHeight)
+broadcast(raw)
 ```
 
-如果费用池已经过期且没有更高的已接受付款状态，买方可以走单方退款路径：
-
-```go
-_, err = buyerWorkflow.RefundAfterExpiry(ctx, reference.SpendTxID)
-must(err)
-```
-
-整个示例中，应用负责实现依赖和传输；工作流负责角色顺序、精确 CBOR、签名绑定、状态检查和提交时机。应用不得用 JSON 重编码这些对象，也不得在传输层添加决定金额或支付序号的字段。
+在每一种结局中，SDK 只负责计算与验证；发送、广播、持久化、重试与对账都是应用动作。

@@ -37,10 +37,10 @@ Therefore, in BitFS v4 the seller's behavior is:
 
 1. Upon receiving 003, verify that the fee pool's current latest state matches `BasePaymentSequence` and that no in-progress request exists in the pool.
 2. Atomically save the in-progress request, then deliver 004.
-3. Upon receiving 005, validate the transaction amount, buyer signature, inputs, and higher sequence number; release the pool's latch only after the finality-deferred pool confirms acceptance.
-4. When a latch exists, the sequence number is stale, or it is a duplicate, reject the new 003. The buyer must open a new fee pool to make parallel purchases.
+3. Upon receiving 005, require the explicit `RefundTemplateTxID` correlation ID to match the opening proof's canonical refund-template TxID (the 32-byte template transaction ID, never an extra SHA-256), the locally saved 003 authorization, and the parsed unsigned payment; then validate the transaction amount, buyer signature, inputs, and higher sequence number. Whether the seller accepts a 005 whose base state is still its current business-latest record, and when the application may spend or forward the merged payment, are application decisions: the SDK verifies the candidate against the explicitly supplied state only. `RefundTemplateTxID` never replaces the authorization hash, transaction content, sequence, amount, or buyer signature checks.
+If the locally saved delivery context does not match the update (wrong correlation ID, stale sequence, or duplicate), reject the 005. Parallel purchases require separate fee pools; serialization across concurrent requests is the application's responsibility (per `RefundTemplateTxID` unique key, transaction, or CAS — the SDK has no lock).
 
-This latch is the seller's delivery-risk control data and must be persisted through an external storage hook; it is not the source of truth for the fee pool or payment and must not be used to tamper with signed transactions.
+This delivery-context record is the seller's delivery-risk control data and is persisted by the calling application in its own storage; the SDK neither saves it nor exposes any hook. It is not the source of truth for the fee pool or payment and must not be used to tamper with signed transactions.
 
 ## Expiry and Risk Boundary
 

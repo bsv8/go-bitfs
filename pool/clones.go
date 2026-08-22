@@ -59,6 +59,6 @@ func ClonePaymentUpdateInput(input PaymentUpdateInput) PaymentUpdateInput {
 // CloneCloseInput returns an independent copy of CloseInput, including copies of mutable byte slices.
 func CloneCloseInput(input CloseInput) CloseInput {
 	input.Opening = cloneOpeningProof(input.Opening)
-	input.Latest = clonePaymentState(input.Latest)
+	input.Base = clonePaymentState(input.Base)
 	return input
 }

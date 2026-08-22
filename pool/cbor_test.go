@@ -3,6 +3,7 @@ package pool
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -10,6 +11,7 @@ import (
 func TestPaymentUpdateRoundTripAndIsolation(t *testing.T) {
 	update := &PaymentUpdate{
 		Version:                   MajorVersion,
+		RefundTemplateTxID:        RefundTemplateTxID(bytes.Repeat([]byte{7}, sha256.Size)),
 		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, sha256.Size),
 		UnsignedStateTxRaw:        []byte{2, 3, 4},
 		BuyerTransactionSignature: []byte{5, 6},
@@ -18,8 +20,8 @@ func TestPaymentUpdateRoundTripAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) == 0 || raw[0] != 0x84 {
-		t.Fatalf("005 payment update must be a four-element array: %x", raw)
+	if len(raw) == 0 || raw[0] != 0x85 {
+		t.Fatalf("005 payment update must be a five-element array: %x", raw)
 	}
 	decoded, err := DecodePaymentUpdate(raw)
 	if err != nil {
@@ -35,7 +37,7 @@ func TestPaymentUpdateRoundTripAndIsolation(t *testing.T) {
 }
 
 func TestOpeningProofRoundTrip(t *testing.T) {
-	_, proof := mustRefundExpiryFixture(t, 500000100, nil)
+	_, proof := mustRefundExpiryFixture(t, 500000100)
 	raw, err := EncodeOpeningProof(proof)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +59,7 @@ func TestOpeningProofRoundTrip(t *testing.T) {
 }
 
 func TestPaymentUpdateRejectsInvalidReference(t *testing.T) {
-	_, err := EncodePaymentUpdate(&PaymentUpdate{Version: MajorVersion, PaymentAuthorizationHash: []byte{1}, UnsignedStateTxRaw: []byte{2}, BuyerTransactionSignature: []byte{3}})
+	_, err := EncodePaymentUpdate(&PaymentUpdate{Version: MajorVersion, RefundTemplateTxID: RefundTemplateTxID(bytes.Repeat([]byte{7}, sha256.Size)), PaymentAuthorizationHash: bytes.Repeat([]byte{1}, 31), UnsignedStateTxRaw: []byte{2}, BuyerTransactionSignature: []byte{3}})
 	if err == nil {
 		t.Fatal("payment update with short request hash was accepted")
 	}
@@ -115,5 +117,111 @@ func TestRoleKeyValidationHasStableBuyerPriority(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "buyer public key") {
 			t.Fatalf("proof validation error = %v, want stable buyer error", err)
 		}
+	}
+}
+
+func TestRefundPresignResponseGoldenBytesAndLegacyRejection(t *testing.T) {
+	response := &RefundPresignResponse{
+		Version:               MajorVersion,
+		RefundTemplateTxID:    RefundTemplateTxID(bytes.Repeat([]byte{0xab}, sha256.Size)),
+		SellerRefundSignature: []byte{1, 2},
+	}
+	raw, err := EncodeRefundPresignResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := hex.DecodeString("84040d5820" + strings.Repeat("ab", 32) + "420102")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("002 response golden bytes changed: %x", raw)
+	}
+	if _, err := DecodeRefundPresignResponse(raw); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy three-element shape must fail strictly.
+	legacy := append([]byte{0x83, 0x04, 0x0d}, 0x42, 0x01, 0x02)
+	if _, err := DecodeRefundPresignResponse(legacy); err == nil {
+		t.Fatal("legacy three-element presign response decoded")
+	}
+}
+
+func TestFundingTxDeliveryGoldenBytesAndLegacyRejection(t *testing.T) {
+	delivery := &FundingTxDelivery{
+		Version:            MajorVersion,
+		RefundTemplateTxID: RefundTemplateTxID(bytes.Repeat([]byte{0xab}, sha256.Size)),
+		FundingTx:          []byte{0xaa, 0xbb, 0xcc},
+	}
+	raw, err := EncodeFundingTxDelivery(delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := hex.DecodeString("84040e5820" + strings.Repeat("ab", 32) + "43aabbcc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("funding delivery golden bytes changed: %x", raw)
+	}
+	if _, err := DecodeFundingTxDelivery(raw); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy three-element shape must fail strictly.
+	legacy := append([]byte{0x83, 0x04, 0x0e}, 0x43, 0xaa, 0xbb, 0xcc)
+	if _, err := DecodeFundingTxDelivery(legacy); err == nil {
+		t.Fatal("legacy three-element funding delivery decoded")
+	}
+}
+
+func hashOfLength(t *testing.T, length int) []byte {
+	t.Helper()
+	return bytes.Repeat([]byte{7}, length)
+}
+
+func TestPoolHashFieldsRejectBadLengthsAndZero(t *testing.T) {
+	validSig := []byte{1}
+	unsigned := []byte{2}
+	// 31-byte refund hash on the wire.
+	short, err := poolEnc.Marshal([]any{MajorVersion, bytes.Repeat([]byte{7}, 31), bytes.Repeat([]byte{1}, sha256.Size), unsigned, validSig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePaymentUpdate(short); err == nil {
+		t.Fatal("31-byte refund_template_txid accepted")
+	}
+	// 33-byte refund hash on the wire.
+	long, err := poolEnc.Marshal([]any{MajorVersion, bytes.Repeat([]byte{7}, 33), bytes.Repeat([]byte{1}, sha256.Size), unsigned, validSig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePaymentUpdate(long); err == nil {
+		t.Fatal("33-byte refund_template_txid accepted")
+	}
+	// All-zero refund hash on the wire.
+	zero, err := poolEnc.Marshal([]any{MajorVersion, make([]byte, sha256.Size), bytes.Repeat([]byte{1}, sha256.Size), unsigned, validSig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePaymentUpdate(zero); err == nil {
+		t.Fatal("all-zero refund_template_txid accepted")
+	}
+	// Encode paths reject the all-zero sentinel structurally; the fixed-size
+	// Go array cannot represent 31/33-byte hashes, so those are wire-only.
+	if _, err := EncodePaymentUpdate(&PaymentUpdate{Version: MajorVersion, RefundTemplateTxID: RefundTemplateTxID{}, PaymentAuthorizationHash: bytes.Repeat([]byte{1}, sha256.Size), UnsignedStateTxRaw: unsigned, BuyerTransactionSignature: validSig}); err == nil {
+		t.Fatal("encoder accepted all-zero refund hash")
+	}
+	if _, err := EncodeFundingTxDelivery(&FundingTxDelivery{Version: MajorVersion, RefundTemplateTxID: RefundTemplateTxID{}, FundingTx: unsigned}); err == nil {
+		t.Fatal("delivery encoder accepted all-zero refund hash")
+	}
+	if _, err := EncodeRefundPresignResponse(&RefundPresignResponse{Version: MajorVersion, RefundTemplateTxID: RefundTemplateTxID{}, SellerRefundSignature: validSig}); err == nil {
+		t.Fatal("response encoder accepted all-zero refund hash")
+	}
+	legacy, err := poolEnc.Marshal([]any{MajorVersion, bytes.Repeat([]byte{1}, sha256.Size), unsigned, validSig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePaymentUpdate(legacy); err == nil {
+		t.Fatal("legacy four-element 005 payment update decoded")
 	}
 }

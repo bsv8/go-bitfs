@@ -20,10 +20,10 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 		SeedPriceSat:                5,
 		FullBlockPriceSat:           100,
 		FileSize:                    BlockSize + 7,
-		QuoteExpiresAtUnix:          200,
+		QuoteExpiresAtUnix:          quoteTestFutureUnix(),
 		SupportedArbiterPubkeysCBOR: arbiters,
 	}
-	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "report.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "report.bin")
 	if err != nil {
 		t.Fatalf("NewSignedFileQuote() error = %v", err)
 	}
@@ -35,9 +35,9 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeSignedFileQuote() error = %v", err)
 	}
-	verified, err := VerifySignedFileQuoteAt(decoded, time.Unix(100, 0), quoteTestVerifier)
+	verified, err := VerifySignedFileQuote(decoded)
 	if err != nil {
-		t.Fatalf("VerifySignedFileQuoteAt() error = %v", err)
+		t.Fatalf("VerifySignedFileQuote() error = %v", err)
 	}
 	if !bytes.Equal(verified.BuyerPubkey, terms.BuyerPubkey) || verified.FileSize != terms.FileSize {
 		t.Fatalf("verified terms = %#v, want %#v", verified, terms)
@@ -53,12 +53,12 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 
 func TestRecommendedFilenameIsNotSigned(t *testing.T) {
 	terms := quoteTestTerms(t)
-	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "original.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "original.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	quote.RecommendedFilename = "renamed-by-relay.bin"
-	if _, err := VerifySignedFileQuoteAt(quote, time.Unix(100, 0), quoteTestVerifier); err != nil {
+	if _, err := VerifySignedFileQuote(quote); err != nil {
 		t.Fatalf("unsigned filename unexpectedly invalidated terms signature: %v", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestSanitizeRecommendedFilename(t *testing.T) {
 }
 
 func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "f", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "f")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +89,8 @@ func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedFileQuoteAt(quote, time.Unix(100, 0), quoteTestVerifier); err == nil {
-		t.Fatal("VerifySignedFileQuoteAt() accepted changed terms")
+	if _, err := VerifySignedFileQuote(quote); err == nil {
+		t.Fatal("VerifySignedFileQuote() accepted changed terms")
 	}
 }
 
@@ -131,9 +131,6 @@ func TestProtocolIdentityKeysRequireCompressedEncoding(t *testing.T) {
 	if _, err := EncodeSupportedArbiterPubkeys([][]byte{quoteTestKey().PubKey().Uncompressed()}); err == nil {
 		t.Fatal("uncompressed supported arbiter key was accepted")
 	}
-	if _, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey().PubKey().Uncompressed(), "file", quoteTestSigner); err == nil {
-		t.Fatal("uncompressed quote seller key was accepted")
-	}
 }
 
 func quoteTestTerms(t *testing.T) *FileQuoteTerms {
@@ -148,23 +145,14 @@ func quoteTestTerms(t *testing.T) *FileQuoteTerms {
 		SeedPriceSat:                1,
 		FullBlockPriceSat:           2,
 		FileSize:                    1,
-		QuoteExpiresAtUnix:          200,
+		QuoteExpiresAtUnix:          quoteTestFutureUnix(),
 		SupportedArbiterPubkeysCBOR: arbiters,
 	}
 }
 
-func quoteTestSigner(termsCBOR []byte) ([]byte, error) {
-	digest := sha256.Sum256(termsCBOR)
-	signature, err := quoteTestKey().Sign(digest[:])
-	if err != nil {
-		return nil, err
-	}
-	return signature.Serialize(), nil
-}
-
-func quoteTestVerifier(pubkey, termsCBOR, signature []byte) error {
-	return VerifySignature(pubkey, termsCBOR, signature)
-}
+// quoteTestFutureUnix returns a UTC timestamp safely in the future so tests
+// stay deterministic without an injectable clock.
+func quoteTestFutureUnix() int64 { return time.Now().UTC().Add(time.Hour).Unix() }
 
 func quoteTestKey() *ec.PrivateKey {
 	key, err := ec.PrivateKeyFromHex(string(bytes.Repeat([]byte("11"), 32)))

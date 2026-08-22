@@ -26,6 +26,6 @@ BitFS v4 的仲裁提交只执行卖方提供、且可验证的最终付款授�
 
 ## 对仲裁者的证据要求
 
-仲裁者不是原始参与方，不能只收到一个交易 ID 就相信状态。卖方发起仲裁提交时，必须提供完整开池证明、买方签出的最终付款授权、卖方依据授权构造的空解锁候选交易和 Seller detached signature；不得要求买方为本次争议签署 005，也不得携带 001、004、payload 或历史付款链作为业务证据。仲裁者只验证候选交易并以 Arbiter detached signature 签名，不为买方缺少的卖方反签创造新的金额真值。完整要求见 007。
+仲裁者不是原始参与方，不能只收到一个交易 ID 或 session 标识就相信状态。所有仲裁证据必须绑定费用池的 `RefundTemplateTxID` 关联 ID：仲裁者在签名前会比较请求 hash、从 opening proof 派生的 hash 和 003 授权的 hash 字段。卖方发起仲裁提交时，必须提供完整开池证明、买方签出的最终付款授权、卖方依据授权构造的空解锁候选交易和 Seller detached signature；不得要求买方为本次争议签署 005，也不得携带 001、004、payload 或历史付款链作为业务证据。仲裁者只验证候选交易并以 Arbiter detached signature 签名，不为买方缺少的卖方反签创造新的金额真值。完整要求见 007。
 
 具体关闭报文和 BitFS v4 的未定边界见[费用池无条件关闭规范](006-unconditional-pool-close-spec.md)。

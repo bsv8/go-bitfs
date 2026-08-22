@@ -1,3 +1,6 @@
 ; v4 wire family. Quote remains independently versioned; pool/content/arbitration
 ; messages carry their own strict major and are not decoded as older payloads.
+; This v4 was hard-switched before launch (RefundTemplateTxID is now the unified pool
+; correlation ID); only post-switch structures are accepted and no older v4
+; payload or version is recognized.
 wire-family = "bitfs.protocol.v4"

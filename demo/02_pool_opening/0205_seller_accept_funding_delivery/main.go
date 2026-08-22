@@ -1,9 +1,10 @@
 // 0205 是开池流程的卖方收尾动作。
 //
-// 它接收 0204 首次公开的完整 FundingTx，使用 0202 已保存的 opening proof
-// 验证资金交易确实匹配退款证据和池输出，然后把交易交给 demo backend。
-// backend 仍是内存实现，不会广播真实交易；本命令展示的是卖方 workflow
-// 到节点/费用池后端之间的校验与提交边界。
+// 它接收 0204 首次公开的完整 FundingTx，按 delivery.RefundTemplateTxID 从卖方
+// 自己的 checkpoint 加载 0202 保存的预签证据，显式传给 SDK 验证资金交易
+// 确实匹配退款证据和池输出，并得到完整的 opening proof、初始付款状态和
+// 待广播的资金交易原文。SDK 不提交任何交易；真实应用在此处调用自己的
+// 节点适配器完成广播与对账。
 package main
 
 import (
@@ -19,8 +20,8 @@ import (
 )
 
 func main() {
-	// 加载环境并打开卖方 FileStore。0202 已把待接收资金所需的 proof 保存在
-	// 同一个状态目录中，0205 必须从持久化状态恢复，而不能相信买方传来的 proof。
+	// 加载环境并组装卖方会话。0202 已把预签证据保存在同一状态目录的
+	// checkpoint 中，0205 必须从调用方状态恢复，而不能相信买方传来的 proof。
 	if err := demoenv.Load(); err != nil {
 		fail(err)
 	}
@@ -40,53 +41,47 @@ func main() {
 		fail(fmt.Errorf("decode FundingTxDelivery: %w", err))
 	}
 
-	debug("=== 0205 卖方：接受、检验 FundingTxDelivery 并提交资金 ===")
+	debug("=== 0205 卖方：接受并检验 FundingTxDelivery ===")
 	debug("[transport] seller <- buyer: PoolFundingTxDelivery (%d bytes)", len(deliveryRaw))
-	debug("[seller] 根据 0202 保存的 opening proof 检验 FundingTx 与退款证据一致")
-	// AcceptPoolFunding 会按 FundingTxID 找到 0202 保存的 proof，验证完整
-	// FundingTx 的规范编码、资金 outpoint、池输出和开池证据，然后调用 demo
-	// backend 提交。任一校验失败都不会产生“已开池”状态。
-	opening, err := session.Seller.AcceptPoolFunding(ctx, delivery)
+	debug("[seller] 按 delivery.RefundTemplateTxID 加载 0202 保存的预签证据并交叉验证")
+	checkpointPath := poolopening.SellerPresignProofCheckpointPath()
+	presignProof, err := poolopening.LoadSellerPresignProof(checkpointPath, delivery.RefundTemplateTxID)
+	if err != nil {
+		fail(fmt.Errorf("load seller presign checkpoint (caller state): %w", err))
+	}
+	// AcceptPoolFunding 用显式传入的预签证据复核派生 hash 一致性，验证完整
+	// FundingTx 的规范编码、资金 outpoint、池输出和开池证据，然后返回完整
+	// proof、初始付款状态和待调用方广播的资金交易。任一校验失败都不会产生
+	// “已开池”结果；SDK 不执行任何广播或持久化。
+	acceptance, err := session.Seller.AcceptPoolFunding(ctx, presignProof, delivery)
 	if err != nil {
 		fail(fmt.Errorf("seller.AcceptPoolFunding: %w", err))
 	}
-	// 返回的 opening 是 seller 侧已经完成的证据快照。编码并输出它方便演示
-	// 查看两方最终证据，但它不是另一个需要买方响应的网络报文。
-	openingRaw, err := pool.EncodeOpeningProof(opening)
-	if err != nil {
-		fail(fmt.Errorf("encode seller completed opening proof: %w", err))
-	}
-	details, err := pool.DeriveOpeningDetails(opening)
+	details, err := pool.DeriveOpeningDetails(acceptance.Opening)
 	if err != nil {
 		fail(fmt.Errorf("derive seller opening details: %w", err))
 	}
-	debug("[seller] FundingTx 已通过验证并提交给 demo backend")
-	debug("[seller] funding submissions accepted: %d", session.Backend.Fundings)
-	debug("[state] pool opened: true")
+	if details.RefundTemplateTxID != delivery.RefundTemplateTxID {
+		fail(fmt.Errorf("opening proof does not match delivery correlation ID"))
+	}
+	debug("[seller] FundingTx 已通过验证；广播资金交易是调用方的节点适配器职责")
+	debug("[seller] funding tx to broadcast: %d bytes", len(acceptance.FundingTx))
+	debug("[state] pool opened (locally verified): true")
 	fmt.Printf("POOL_OPENED=true\n")
 	fmt.Printf("FUNDING_TX_ID_HEX=%s\n", hex.EncodeToString(details.FundingTxID[:]))
-	fmt.Printf("SPEND_TX_ID_HEX=%s\n", hex.EncodeToString(details.SpendTxID[:]))
-	// 重新从 seller store 读取初始支付状态，验证提交资金后 opening proof
-	// 和 PaymentState 都已经持久化，而不是只在 AcceptPoolFunding 返回值中存在。
-	initial, err := session.Store.LoadAcceptedPayment(ctx, details.SpendTxID)
-	if err != nil {
-		fail(fmt.Errorf("load seller initial payment state: %w", err))
-	}
-	if initial == nil {
-		fail(fmt.Errorf("seller initial payment state was not persisted"))
-	}
-	fmt.Printf("INITIAL_PAYMENT_SEQUENCE=%d\n", initial.PaymentSequence)
-	// 最后输出 seller 侧 proof 快照。stdout 中的标量和 hex 字段都可以被脚本
-	// 读取，调试过程则始终由 stderr 承载。
-	if err := poolopening.WriteHex(os.Stdout, "SELLER_OPENING_PROOF_HEX", openingRaw); err != nil {
+	fmt.Printf("REFUND_TEMPLATE_TXID_HEX=%s\n", hex.EncodeToString(details.RefundTemplateTxID[:]))
+	fmt.Printf("INITIAL_PAYMENT_SEQUENCE=%d\n", acceptance.InitialPayment.PaymentSequence)
+	// 输出初始付款状态的规范交易，供脚本观察“待保存/待广播”的结果形态；
+	// 它不是新的网络报文。
+	if err := poolopening.WriteHex(os.Stdout, "INITIAL_REFUND_TX_HEX", acceptance.InitialPayment.RawTx); err != nil {
 		fail(err)
 	}
 }
 
-// debug 不污染 stdout 上的状态结果和 proof 快照。
+// debug 不污染 stdout 上的状态结果和报文字段。
 func debug(format string, values ...any) { fmt.Fprintf(os.Stderr, format+"\n", values...) }
 
-// fail 在任意解码、校验或持久化错误时终止开池收尾动作。
+// fail 在任意解码、校验错误时终止开池收尾动作。
 func fail(err error) {
 	debug("[FAIL] %v", err)
 	os.Exit(1)

@@ -11,7 +11,7 @@ title: 004 · 内容交付凭证需求
 
 ## 最小交付关系
 
-004 引用 `PaymentAuthorizationHash`，并带内容字节。卖方对这两项组成的确定性 CBOR 签名。买方从自己保存的 003 恢复所有购买条件，校验卖方身份、内容哈希和交付截止时间；通过后才进入付款。
+004 携带费用池 `RefundTemplateTxID` 关联 ID，并引用 `PaymentAuthorizationHash` 与内容字节。卖方对这三项的确定性 CBOR 编码签名，因此可独立投递的凭证能直接路由到其费用池。买方从本地保存的 opening proof 重新派生 `RefundTemplateTxID`，要求其与 003 条款 hash 字段和已签名的 004 交付 hash 字段全部相等，并验证卖家身份、内容哈希和交付期限；全部通过后才进入付款。
 
 ```text
 003：买方签名地请求确定内容

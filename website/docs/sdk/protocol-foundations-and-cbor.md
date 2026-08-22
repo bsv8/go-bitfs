@@ -31,7 +31,7 @@ The API has three layers: a pure protocol core, role workflows, and externally s
 bitfs/       Credentials, CBOR, signatures, and content checks for 001, 003, and 004
 pool/        Generic 2-of-3 payment pools and BSV transaction checks for 002, 005, and 006
 buyer/       Buyer workflow facade; produces the next credential or transaction to send
-seller/      Seller workflow facade; owns the delivery latch, acceptance, and deferred updates
+seller/      Seller workflow facade; verifies deliveries and advances deferred updates; delivery-context serialization is the calling application's responsibility
 arbitration/ Evidence validation and transaction-signing facade for 007
 wire/        Deterministic CBOR encoding, strict decoding, and dispatch for current messages
 transport/   Optional application adapter layer; the SDK core does not depend on it
@@ -64,17 +64,14 @@ Callers should be able to choose retry, rejection, or user feedback by error cat
 var (
     ErrInvalidEvidence      error // CBOR, hashes, signatures, or transaction data are inconsistent.
     ErrQuoteExpired         error // The 001 quote has expired.
-    ErrPoolBusy             error // The seller already has an unfinished delivery on this pool.
     ErrStalePaymentSequence error // The request or payment is based on a non-current pool state.
     ErrInsufficientBalance  error // The pool cannot cover the content and transaction fee.
-    ErrNonFinalRejected     error // The BSV non-final pool rejected the update.
-    ErrFinalRejected        error // The BSV node rejected the final transaction.
     ErrNotExpired           error // The refund timelock has not been reached.
     ErrContentNotInSeed     error // The requested block is not committed by the quote's seed.
 )
 ```
 
-`ErrPoolBusy` and `ErrStalePaymentSequence` are expected business outcomes and should not be reported as internal errors.
+`ErrStalePaymentSequence` is an expected business outcome and should not be reported as an internal error.
 
 ## Unified CBOR message API
 
@@ -85,7 +82,9 @@ CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or 
 ```go
 // package wire
 // Kind is known to the transport and selects a decoder. It is not part of a
-// signed 001–007 CBOR body.
+// signed 001–007 CBOR body, and it never identifies a pool instance: messages
+// that define RefundTemplateTxID carry it in the CBOR document. The 0201 presign
+// request derives it from RefundTx and has no separate correlation ID field.
 type Kind uint16
 
 const (
@@ -166,7 +165,7 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 006 introduces no application-level close message. Closing uses raw transactions already retained from 002 and 005; applications should not invent a CBOR `CloseRequest`.
 
-`Unmarshal` answers only whether bytes conform to a message schema. The configured signature-verifier callbacks and the role workflow subsequently validate signatures, quote expiry, payment-pool inputs, and amounts. A decoder MUST NOT expose “decoded” as “verified” or “paid.”
+`Unmarshal` answers only whether bytes conform to a message schema. The role workflows subsequently validate signatures, quote expiry, payment-pool inputs, and amounts with the SDK's fixed verifiers — there are no caller-supplied verifier callbacks to configure. A decoder MUST NOT expose “decoded” as “verified” or “paid.”
 
 Every protocol identity public key is encoded as a valid 33-byte compressed
 secp256k1 key. The fixed validation layer rejects 65-byte uncompressed keys
@@ -174,65 +173,49 @@ before they can enter signed 001/003/004 terms or 002 pool evidence.
 
 ## Pure protocol API
 
-These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests.
+These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests. Signing takes the caller-parsed official BSV private key directly (`ec.PrivateKey` from `github.com/bsv-blockchain/go-sdk/primitives/ec`; TypeScript uses the native `@bsv/sdk` `PrivateKey`). There are no signer or verifier callbacks.
+
+The signature path is fixed and identical for every credential: canonical CBOR
+is hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, while TypeScript's `PrivateKey.sign(message)` hashes internally — cross-language vectors must avoid double hashing. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
 
 ```go
 // package bitfs
-// NewSignedFileQuote passes canonical FileQuoteTerms CBOR to signer; signer
-// hashes it once with SHA-256 and returns DER-only bytes. The constructor
-// fixedly verifies the signature and creates a 001 credential.
+// NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
+// signs those exact bytes with the seller's official BSV private key through
+// the fixed single-SHA-256 message path, and fixedly re-verifies the
+// signature with the derived public key before returning a 001 credential.
 func NewSignedFileQuote(
     terms *FileQuoteTerms,
-    sellerPubkey []byte,
+    sellerKey *ec.PrivateKey,
     recommendedFilename string,
-    signer QuoteTermsSigner,
 ) (*SignedFileQuote, error)
 
-// VerifySignedFileQuoteAt checks the seller signature, field constraints, and
-// expiry at the supplied wall-clock time.
-func VerifySignedFileQuoteAt(
-    quote *SignedFileQuote,
-    now time.Time,
-    verifier QuoteTermsSignatureVerifier,
-) (*FileQuoteTerms, error)
+// VerifySignedFileQuote checks the seller signature, field constraints, and
+// expiry using system UTC read once at entry and the fixed SDK verifier.
+// There is no now parameter and no verifier argument to supply.
+func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
 
-// NewSignedContentRequest passes canonical 003 terms to signer; signer hashes
-// them once with SHA-256 and returns DER-only bytes. The constructor fixedly
-// verifies the signature before returning.
-func NewSignedContentRequest(
-    terms *ContentRequestTerms,
-    signer ContentTermsSigner,
-) (*SignedContentRequest, error)
+// NewSignedContentRequest deterministically encodes 003 terms and signs those
+// exact bytes with the buyer's official BSV private key through the same
+// fixed single-SHA-256 message path.
+func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
-// VerifySignedContentRequestAt checks quote binding, the buyer signature,
-// arbiter selection, and the delivery deadline.
-func VerifySignedContentRequestAt(
-    request *SignedContentRequest,
-    quote *SignedFileQuote,
-    now time.Time,
-    quoteVerifier QuoteTermsSignatureVerifier,
-    buyerVerifier ContentTermsSignatureVerifier,
-) (*ContentRequestTerms, error)
+// VerifySignedContentRequest checks quote binding, the buyer signature,
+// arbiter selection, and the delivery deadline using system UTC read once at
+// entry and the fixed SDK verifiers.
+func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error)
 
-// NewSignedContentDelivery binds payload bytes to 003 and passes canonical 004
-// terms to signer; signer hashes them once with SHA-256 and returns DER-only
-// bytes. The constructor fixedly verifies the signature before returning.
-func NewSignedContentDelivery(
-    request *SignedContentRequest,
-    payload []byte,
-    signer ContentTermsSigner,
-) (*SignedContentDelivery, error)
+// NewSignedContentDelivery binds payload bytes to the request authorization
+// hash and signs the resulting deterministic delivery terms with the seller's
+// official BSV private key through the fixed message path.
+func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error)
 
-// VerifySignedContentDeliveryWithSeedAt additionally checks block membership
-// and block length using the previously verified seed.
-func VerifySignedContentDeliveryWithSeedAt(
+// VerifySignedContentDeliveryWithSeed additionally checks block membership
+// and block length derived from a caller-owned seed.
+func VerifySignedContentDeliveryWithSeed(
     request *SignedContentRequest,
     delivery *SignedContentDelivery,
     quote *SignedFileQuote,
     seed []byte,
-    now time.Time,
-    quoteVerifier QuoteTermsSignatureVerifier,
-    buyerVerifier ContentTermsSignatureVerifier,
-    sellerVerifier ContentTermsSignatureVerifier,
 ) ([]byte, error)
 ```

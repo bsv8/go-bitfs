@@ -17,7 +17,10 @@ import (
 const ProtocolFamily = "bitfs.protocol.v4"
 
 // Kind identifies the message type selected by the transport. The tag is not
-// inserted into the signed 001–007 CBOR document.
+// inserted into the signed 001–007 CBOR document. Kind never identifies a
+// pool instance: messages that define a RefundTemplateTxID carry it in the CBOR
+// document; the 0201 presign request derives it from RefundTx and has no
+// separate hash field.
 type Kind uint16
 
 const (
@@ -51,7 +54,9 @@ const (
 )
 
 // Packet carries a transport-selected Kind and the exact canonical CBOR bytes
-// produced by the corresponding protocol encoder. It adds no envelope.
+// produced by the corresponding protocol encoder. It adds no envelope and no
+// session semantics; pool instances are correlated by RefundTemplateTxID where the
+// message defines that field, while 0201 derives it from RefundTx.
 type Packet struct {
 	Kind Kind
 	CBOR []byte

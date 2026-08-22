@@ -59,7 +59,7 @@ func run(input io.Reader) error {
 	debugf("[decode] terms CBOR bytes  : %d", len(quote.TermsCBOR))
 	debugf("[decode] seller public key : %s", hex.EncodeToString(quote.SellerPubkey))
 	debugf("[decode] signature bytes   : %d", len(quote.TermsSignature))
-	terms, err := bitfs.VerifySignedFileQuoteAt(quote, time.Now().UTC(), verifySignature)
+	terms, err := bitfs.VerifySignedFileQuote(quote)
 	if err != nil {
 		return fmt.Errorf("[verify seller signature/expiry] rejected: %w", err)
 	}

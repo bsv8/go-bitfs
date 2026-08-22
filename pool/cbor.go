@@ -37,21 +37,40 @@ func init() {
 	}
 }
 
+// validatePoolHash32 checks that a decoded hash field is exactly 32 bytes and
+// not the all-zero "unset" sentinel.
+func validatePoolHash32(raw []byte, name string) error {
+	if len(raw) != sha256.Size {
+		return fmt.Errorf("%w: %s must be 32 bytes", ErrInvalidEvidence, name)
+	}
+	for _, b := range raw {
+		if b != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s must not be all zero", ErrInvalidEvidence, name)
+}
+
+func validatePoolHash32Value(value Hash32, name string) error {
+	return validatePoolHash32(value[:], name)
+}
+
 // EncodePaymentUpdate validates and encodes the 005 unsigned transaction plus
-// detached buyer signature as its four-field deterministic CBOR container. It
-// performs structural validation, not node acceptance or signature verification.
+// detached buyer signature as its five-field deterministic CBOR container,
+// led by the pool's RefundTemplateTxID correlation ID. It performs structural
+// validation, not node acceptance or signature verification.
 func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 	if err := ValidatePaymentUpdate(update); err != nil {
 		return nil, err
 	}
-	return poolEnc.Marshal([]any{MajorVersion, update.PaymentAuthorizationHash, update.UnsignedStateTxRaw, update.BuyerTransactionSignature})
+	return poolEnc.Marshal([]any{MajorVersion, update.RefundTemplateTxID[:], update.PaymentAuthorizationHash, update.UnsignedStateTxRaw, update.BuyerTransactionSignature})
 }
 
-// DecodePaymentUpdate decodes and canonicality-checks the 005 four-field payment
+// DecodePaymentUpdate decodes and canonicality-checks the 005 five-field payment
 // container, then validates its field shape. It does not prove pool ownership or
 // verify the buyer signature against an opening proof.
 func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
-	values, err := decodePoolArray(data, 4)
+	values, err := decodePoolArray(data, 5)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode payment update: %v", ErrInvalidEvidence, err)
 	}
@@ -59,13 +78,16 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	if err := poolDec.Unmarshal(values[0], &update.Version); err != nil || update.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported payment update version", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[1], &update.PaymentAuthorizationHash); err != nil {
+	if err := poolDec.Unmarshal(values[1], &update.RefundTemplateTxID); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[2], &update.UnsignedStateTxRaw); err != nil {
+	if err := poolDec.Unmarshal(values[2], &update.PaymentAuthorizationHash); err != nil {
 		return nil, err
 	}
-	if err := poolDec.Unmarshal(values[3], &update.BuyerTransactionSignature); err != nil {
+	if err := poolDec.Unmarshal(values[3], &update.UnsignedStateTxRaw); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[4], &update.BuyerTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidatePaymentUpdate(update); err != nil {
@@ -84,7 +106,8 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 // EncodeRefundPresignRequest validates and encodes the 002 buyer refund-presign
 // request, including the workflow version, refund bytes, role keys, fee rate, and
 // detached buyer signature. The funding outpoint, pool amount, and pool lock
-// are derived canonically from RefundTx and the participant keys.
+// are derived canonically from RefundTx and the participant keys. The request
+// does not duplicate the derived RefundTemplateTxID.
 func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
@@ -139,18 +162,19 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 }
 
 // EncodeRefundPresignResponse validates and encodes the seller's 002 refund
-// signature response with the workflow version and message kind.
+// signature response with the workflow version, message kind, and the pool's
+// RefundTemplateTxID correlation ID re-derived by the seller from the request.
 func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error) {
 	if err := ValidateRefundPresignResponse(response); err != nil {
 		return nil, err
 	}
-	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignResponse, response.SellerRefundSignature})
+	return poolEnc.Marshal([]any{MajorVersion, KindPoolRefundPresignResponse, response.RefundTemplateTxID[:], response.SellerRefundSignature})
 }
 
 // DecodeRefundPresignResponse decodes and canonicality-checks the 002 seller
 // response without deciding whether the signature matches a particular request.
 func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
-	values, err := decodePoolArray(data, 3)
+	values, err := decodePoolArray(data, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode refund presign response: %v", ErrInvalidEvidence, err)
 	}
@@ -162,7 +186,10 @@ func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	if err := poolDec.Unmarshal(values[1], &kind); err != nil || kind != KindPoolRefundPresignResponse {
 		return nil, fmt.Errorf("%w: unexpected refund presign response kind", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[2], &response.SellerRefundSignature); err != nil {
+	if err := poolDec.Unmarshal(values[2], &response.RefundTemplateTxID); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[3], &response.SellerRefundSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateRefundPresignResponse(response); err != nil {
@@ -179,19 +206,19 @@ func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 }
 
 // EncodeFundingTxDelivery validates and encodes the 002 funding-transaction
-// delivery container. It does not verify that the funding transaction spends
-// the retained opening proof.
+// delivery container with its RefundTemplateTxID correlation ID. It does not verify
+// that the funding transaction spends the retained opening proof.
 func EncodeFundingTxDelivery(delivery *FundingTxDelivery) ([]byte, error) {
 	if err := ValidateFundingTxDelivery(delivery); err != nil {
 		return nil, err
 	}
-	return poolEnc.Marshal([]any{MajorVersion, KindPoolFundingTxDelivery, delivery.FundingTx})
+	return poolEnc.Marshal([]any{MajorVersion, KindPoolFundingTxDelivery, delivery.RefundTemplateTxID[:], delivery.FundingTx})
 }
 
 // DecodeFundingTxDelivery decodes and canonicality-checks the 002 funding
 // delivery; SellerAcceptFundingTx performs the proof and node checks.
 func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
-	values, err := decodePoolArray(data, 3)
+	values, err := decodePoolArray(data, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode funding transaction delivery: %v", ErrInvalidEvidence, err)
 	}
@@ -203,7 +230,10 @@ func DecodeFundingTxDelivery(data []byte) (*FundingTxDelivery, error) {
 	if err := poolDec.Unmarshal(values[1], &kind); err != nil || kind != KindPoolFundingTxDelivery {
 		return nil, fmt.Errorf("%w: unexpected funding transaction delivery kind", ErrInvalidEvidence)
 	}
-	if err := poolDec.Unmarshal(values[2], &delivery.FundingTx); err != nil {
+	if err := poolDec.Unmarshal(values[2], &delivery.RefundTemplateTxID); err != nil {
+		return nil, err
+	}
+	if err := poolDec.Unmarshal(values[3], &delivery.FundingTx); err != nil {
 		return nil, err
 	}
 	if err := ValidateFundingTxDelivery(delivery); err != nil {
@@ -285,15 +315,19 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	return cloneOpeningProof(proof), nil
 }
 
-// ValidatePaymentUpdate checks the 005 envelope version, 32-byte authorization
-// hash, and presence of the unsigned transaction and detached buyer signature.
-// It does not parse the transaction or establish that a node accepted it.
+// ValidatePaymentUpdate checks the 005 envelope version, 32-byte non-zero
+// RefundTemplateTxID and authorization hash, and presence of the unsigned transaction
+// and detached buyer signature. It does not parse the transaction or establish
+// that a node accepted it.
 func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update == nil {
 		return fmt.Errorf("%w: payment update is required", ErrInvalidEvidence)
 	}
 	if update.Version != MajorVersion {
 		return fmt.Errorf("%w: unsupported payment update version %d", ErrInvalidEvidence, update.Version)
+	}
+	if err := validatePoolHash32Value(Hash32(update.RefundTemplateTxID), "refund_template_txid"); err != nil {
+		return err
 	}
 	if len(update.PaymentAuthorizationHash) != sha256.Size {
 		return fmt.Errorf("%w: payment_authorization_hash must be 32 bytes", ErrInvalidEvidence)
@@ -329,20 +363,28 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	return nil
 }
 
-// ValidateRefundPresignResponse checks the 002 response version and requires a
-// seller refund signature; matching it to a request is a workflow operation.
+// ValidateRefundPresignResponse checks the 002 response version, requires a
+// non-zero 32-byte RefundTemplateTxID and a seller refund signature; matching them to
+// a request is a workflow operation.
 func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.SellerRefundSignature) == 0 {
 		return fmt.Errorf("%w: invalid refund presign response", ErrInvalidEvidence)
 	}
+	if err := validatePoolHash32Value(Hash32(response.RefundTemplateTxID), "refund_template_txid"); err != nil {
+		return err
+	}
 	return nil
 }
 
-// ValidateFundingTxDelivery checks the 002 delivery version and requires raw
-// funding transaction bytes; it does not prove the bytes spend the opening.
+// ValidateFundingTxDelivery checks the 002 delivery version, requires a non-zero
+// 32-byte RefundTemplateTxID and raw funding transaction bytes; it does not prove the
+// bytes spend the opening.
 func ValidateFundingTxDelivery(delivery *FundingTxDelivery) error {
 	if delivery == nil || delivery.Version != MajorVersion || len(delivery.FundingTx) == 0 {
 		return fmt.Errorf("%w: invalid funding transaction delivery", ErrInvalidEvidence)
+	}
+	if err := validatePoolHash32Value(Hash32(delivery.RefundTemplateTxID), "refund_template_txid"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -387,7 +429,7 @@ func clonePaymentUpdate(update *PaymentUpdate) *PaymentUpdate {
 	if update == nil {
 		return nil
 	}
-	return &PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), UnsignedStateTxRaw: append([]byte(nil), update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
+	return &PaymentUpdate{Version: update.Version, RefundTemplateTxID: update.RefundTemplateTxID, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), UnsignedStateTxRaw: append([]byte(nil), update.UnsignedStateTxRaw...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
 }
 
 func cloneRefundPresignRequest(request *RefundPresignRequest) *RefundPresignRequest {
@@ -407,13 +449,13 @@ func cloneRefundPresignResponse(response *RefundPresignResponse) *RefundPresignR
 	if response == nil {
 		return nil
 	}
-	return &RefundPresignResponse{Version: response.Version, SellerRefundSignature: append([]byte(nil), response.SellerRefundSignature...)}
+	return &RefundPresignResponse{Version: response.Version, RefundTemplateTxID: response.RefundTemplateTxID, SellerRefundSignature: append([]byte(nil), response.SellerRefundSignature...)}
 }
 func cloneFundingTxDelivery(delivery *FundingTxDelivery) *FundingTxDelivery {
 	if delivery == nil {
 		return nil
 	}
-	return &FundingTxDelivery{Version: delivery.Version, FundingTx: append([]byte(nil), delivery.FundingTx...)}
+	return &FundingTxDelivery{Version: delivery.Version, RefundTemplateTxID: delivery.RefundTemplateTxID, FundingTx: append([]byte(nil), delivery.FundingTx...)}
 }
 
 func cloneOpeningProof(proof *OpeningProof) *OpeningProof {

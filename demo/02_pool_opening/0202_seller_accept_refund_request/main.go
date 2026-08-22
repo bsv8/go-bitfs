@@ -2,8 +2,9 @@
 //
 // 它从标准输入读取 0201 产生的 RefundPresignRequest，交给 seller
 // workflow 做结构、参与方、公钥、退款交易以及买方签名的完整校验；校验
-// 成功后，卖方签署同一笔退款交易并返回 RefundPresignResponse。响应只携带
-// 卖方退款签名，不携带 FundingTx 原文。
+// 成功后，卖方从收到的 request 重新派生 RefundTemplateTxID 并签署同一笔退款交易，
+// 返回携带该关联 ID 的 RefundPresignResponse。响应不携带 FundingTx 原文。
+// 卖方的预签证据由本 demo 的 checkpoint 显式保存——SDK 不做任何持久化。
 package main
 
 import (
@@ -18,12 +19,10 @@ import (
 )
 
 func main() {
-	// 读取 demo/.env，获得卖方私钥和 FileStore 所需的状态目录配置。
+	// 读取 demo/.env，获得卖方私钥等配置。workflow 只持有 Signer。
 	if err := demoenv.Load(); err != nil {
 		fail(err)
 	}
-	// seller workflow 会在本地保存“待接收资金”的 opening proof。该状态
-	// 必须跨越 0202 与 0205 两个独立进程，因此使用持久化 FileStore。
 	ctx := context.Background()
 	session, err := poolopening.NewSeller(ctx)
 	if err != nil {
@@ -47,20 +46,25 @@ func main() {
 	debug("[transport] seller <- buyer: PoolRefundPresignRequest (%d bytes)", len(requestRaw))
 	debug("[seller] 检验请求结构、参与方、公钥、退款交易和买方签名")
 	// PresignPoolOpening 会确认请求中的卖方公钥确实属于当前卖方，验证
-	// 买方对退款交易的签名，并把补齐卖方签名所需的证据保存到 seller store。
-	// 在这个调用成功前，绝不能生成或发送响应。
-	response, err := session.Seller.PresignPoolOpening(ctx, request)
+	// 买方对退款交易的签名，并返回卖方签名与预签 opening proof。SDK 不保存
+	// 任何证据；应用必须先保存 Opening，再发送 Response。
+	result, err := session.Seller.PresignPoolOpening(ctx, request)
 	if err != nil {
 		fail(fmt.Errorf("seller.PresignPoolOpening: %w", err))
 	}
-	// 响应是独立的 wire 报文。其核心内容只有卖方退款签名，0203 会把它
-	// 与原始请求及买方本地 FundingTx 合并成完整 OpeningProof。
-	responseRaw, err := wire.MarshalPoolRefundPresignResponse(response)
+	checkpointPath := poolopening.SellerPresignProofCheckpointPath()
+	if err := poolopening.SaveSellerPresignProof(checkpointPath, result); err != nil {
+		fail(fmt.Errorf("save seller presign checkpoint (caller responsibility): %w", err))
+	}
+	debug("[seller] 预签 opening proof 已保存到应用 checkpoint %s", checkpointPath)
+	// 响应是独立的 wire 报文。其核心内容是卖方重新派生的 RefundTemplateTxID 和
+	// 退款签名；0203 只凭该 hash 关联买方自己的本地状态。
+	responseRaw, err := wire.MarshalPoolRefundPresignResponse(result.Response)
 	if err != nil {
 		fail(fmt.Errorf("encode RefundPresignResponse: %w", err))
 	}
-	debug("[seller] 已保存预签 opening proof；FundingTx 原文仍未接收")
-	debug("[seller] seller refund signature: %s", hex.EncodeToString(response.SellerRefundSignature))
+	debug("[seller] refund tx hash (pool correlation ID): %s", hex.EncodeToString(result.Response.RefundTemplateTxID[:]))
+	debug("[seller] seller refund signature: %s", hex.EncodeToString(result.Response.SellerRefundSignature))
 	debug("[transport] seller -> buyer: PoolRefundPresignResponse (%d bytes)", len(responseRaw))
 	// 与 0201 一样，stdout 保持为可继续传输的单一 hex 字段，调试日志全部
 	// 走 stderr，方便调用方用管道或 tee 连接下一步。

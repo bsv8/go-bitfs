@@ -3,8 +3,8 @@
 // 这个子项目负责两件事：先在买方本地准备一笔真实的 FundingTx，再根据
 // FundingTx 构造退款交易并生成 RefundPresignRequest。需要特别注意的是，
 // FundingTx 的原文不会放进本次发给卖方的报文，报文中只公开其交易 ID；
-// 这样卖方可以先验证退款条件，但要等买方完成本地证据保存后，才会收到
-// 完整的资金交易（见 0204）。
+// 这样卖方可以先验证退款条件，但要等买方把本地状态写入自己的 checkpoint
+// 之后，才会收到完整的资金交易（见 0204）。
 package main
 
 import (
@@ -28,8 +28,8 @@ func main() {
 	// 使用一个贯穿本次命令的 context，供 JungleBus 查询和 buyer workflow
 	// 传递取消信号。这个演示是一次性命令，因此使用 Background 即可。
 	ctx := context.Background()
-	// NewBuyer 会加载买方、卖方和仲裁方密钥，创建买方本地 FileStore，
-	// 并组装 buyer.Workflow。FileStore 让后续 0203/0204 进程仍能读取本地状态。
+	// NewBuyer 会加载三方密钥并组装只含 Signer 的 buyer.Workflow。
+	// 跨进程状态由本 demo 的 checkpoint 函数保存，不经过 SDK。
 	session, err := poolopening.NewBuyer(ctx)
 	if err != nil {
 		fail(err)
@@ -41,12 +41,12 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("derive buyer funding addresses: %w", err))
 	}
-	debug("=== 0201 买方：接受开池条件并发送 RefundPresignRequest ===")
+	debug("=== 0201 买方：构造开池条件并发送 RefundPresignRequest ===")
 	debug("[buyer] selected network: %s", addresses.Network)
 	debug("[buyer] funding address: %s", addresses.SelectedAddress)
 	// PrepareFunding 在 demo 层查询 JungleBus，重建地址的已确认 UTXO，
 	// 选择一个可用输出，并使用买方私钥签名真实 FundingTx。它不是协议报文，
-	// 只在买方本地短暂持有，稍后会保存到 DEMO_02_FUNDING_TX_FILE。
+	// 只在买方本地短暂持有，稍后随 BuyerOpeningState 进入买方 checkpoint。
 	funding, err := session.PrepareFunding(ctx)
 	if err != nil {
 		fail(fmt.Errorf("prepare real funding transaction: %w", err))
@@ -80,11 +80,6 @@ func main() {
 	}
 	debug("[funding] miner fee rate: %d sat/KB (%s)", funding.MinerFeeRateSatPerKB, funding.MinerFeeRateSource)
 	debug("[funding] actual miner fee: %d satoshis; raw size: %d bytes", funding.FundingFeeSatoshis, len(funding.RawTx))
-	// 先把真实 FundingTx 保存到买方本地，再进入协议报文阶段。0203 会从
-	// 这个文件取回原文，将卖方响应与原始请求重新绑定并形成完整 opening proof。
-	if err := poolopening.SaveFundingTx(funding.RawTx); err != nil {
-		fail(err)
-	}
 	// 这里用库的规范交易解析器计算 FundingTxID，而不是对原始 hex 做普通
 	// 哈希。规范解析同时保证后续流程使用的交易序列化与协议身份一致。
 	fundingTransaction, err := pool.ParseCanonicalTransaction(funding.RawTx)
@@ -92,25 +87,33 @@ func main() {
 		fail(fmt.Errorf("parse prepared funding transaction: %w", err))
 	}
 	debug("[funding] real funding txid: %s", fundingTransaction.TxID().String())
-	debug("[funding] raw tx hex: %s", hex.EncodeToString(funding.RawTx))
-	debug("[funding] buyer-local file: %s", poolopening.FundingTxPath())
 	debug("[buyer] 构造并签名退款交易预签名请求")
-	// OpeningInput 把资金交易、费用率和参与方公钥交给
-	// buyer workflow。workflow 会构造退款交易，并由买方对退款交易签名；
-	// 卖方稍后只需在同一退款交易上补充自己的签名。
-	request, err := session.Buyer.PreparePoolOpening(ctx, session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatPerKB))
+	// PreparePoolOpening 返回 wire 报文与买方私有状态。SDK 不做任何保存；
+	// 应用必须先持久化 State，再发送 Request。这里由 demo checkpoint 承担
+	// “应用数据库”的角色。
+	preparation, err := session.Buyer.PreparePoolOpening(ctx, session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatPerKB))
 	if err != nil {
 		fail(fmt.Errorf("buyer.PreparePoolOpening: %w", err))
 	}
+	checkpointPath := poolopening.BuyerOpeningCheckpointPath()
+	if err := poolopening.SaveBuyerOpeningState(checkpointPath, preparation.State); err != nil {
+		fail(fmt.Errorf("save buyer opening checkpoint (caller responsibility): %w", err))
+	}
+	debug("[buyer] BuyerOpeningState 已保存到应用 checkpoint %s", checkpointPath)
 	// wire 层使用协议规定的严格 CBOR 编码。编码失败时不能继续输出，
 	// 否则下一个子项目会把不完整数据误当成 RefundPresignRequest。
-	raw, err := wire.MarshalPoolRefundPresignRequest(request)
+	raw, err := wire.MarshalPoolRefundPresignRequest(preparation.Request)
 	if err != nil {
 		fail(fmt.Errorf("encode RefundPresignRequest: %w", err))
 	}
-	debug("[buyer] RefundTx bytes: %d", len(request.RefundTx))
+	refundTemplateTxID, err := pool.DeriveRefundTemplateTxIDFromRequest(preparation.Request)
+	if err != nil {
+		fail(fmt.Errorf("derive RefundTemplateTxID: %w", err))
+	}
+	debug("[buyer] RefundTx bytes: %d", len(preparation.Request.RefundTx))
+	debug("[buyer] RefundTemplateTxID (pool correlation ID): %s", hex.EncodeToString(refundTemplateTxID[:]))
 	debug("[buyer] FundingTxID (derived from RefundTx): %s", fundingTransaction.TxID().String())
-	debug("[buyer] FundingTx 原文尚未进入报文：yes")
+	debug("[buyer] FundingTx 原文尚未进入报文：yes（仅保存在买方私有 checkpoint）")
 	debug("[transport] buyer -> seller: PoolRefundPresignRequest (%d bytes)", len(raw))
 	// stdout 只输出可传给下一个命令的 hex 报文，stderr 承载调试日志。
 	// 这种分离使得 tee 保存的文件不会混入人类可读日志。

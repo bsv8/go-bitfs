@@ -44,3 +44,4 @@ website/build/
 website/.docusaurus/
 website/generated-api/
 website/i18n/zh-CN/docusaurus-plugin-content-docs-api/current/*.md
+node_modules/

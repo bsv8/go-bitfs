@@ -1,6 +1,7 @@
 ; 007 is seller + arbiter detached-signature arbitration only.
-arbitration-request = [4, opening-proof-cbor, payment-authorization-cbor, unsigned-state-tx, seller-signature]
-arbitration-response = [4, payment-authorization-hash, unsigned-state-tx-hash, arbiter-signature]
+arbitration-request = [4, refund-template-txid, opening-proof-cbor, payment-authorization-cbor, unsigned-state-tx, seller-signature]
+arbitration-response = [4, refund-template-txid, payment-authorization-hash, unsigned-state-tx-hash, arbiter-signature]
+refund-template-txid = bstr .size 32
 opening-proof-cbor = bstr
 payment-authorization-cbor = bstr
 unsigned-state-tx = bstr

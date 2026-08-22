@@ -3,36 +3,26 @@ package bitfs
 import (
 	"bytes"
 	"crypto/sha256"
-	"errors"
 	"testing"
+	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 )
 
-func constructorOtherKey() []byte {
-	return []byte("3333333333333333333333333333333333333333333333333333333333333333")
+// quoteDeadline returns a delivery deadline safely in the future; deadline vs
+// expiry relations are tested with dedicated fixtures.
+func quoteDeadline(t *testing.T) int64 {
+	t.Helper()
+	return time.Now().UTC().Add(55 * time.Minute).Unix()
 }
 
-func constructorOtherSigner(raw []byte) ([]byte, error) {
-	key, err := ec.PrivateKeyFromHex(string(constructorOtherKey()))
+func constructorOtherKey(t *testing.T) *ec.PrivateKey {
+	t.Helper()
+	key, err := ec.PrivateKeyFromHex(string(bytes.Repeat([]byte("33"), 32)))
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	digest := sha256.Sum256(raw)
-	signature, err := key.Sign(digest[:])
-	if err != nil {
-		return nil, err
-	}
-	return signature.Serialize(), nil
-}
-
-func constructorWrongDigestSigner([]byte) ([]byte, error) {
-	digest := sha256.Sum256([]byte("different protocol payload"))
-	signature, err := quoteTestKey().Sign(digest[:])
-	if err != nil {
-		return nil, err
-	}
-	return signature.Serialize(), nil
+	return key
 }
 
 func constructorRequestTerms(t *testing.T) *ContentRequestTerms {
@@ -43,53 +33,39 @@ func constructorRequestTerms(t *testing.T) *ContentRequestTerms {
 	}
 	contentHash := sha256.Sum256([]byte("payload"))
 	return &ContentRequestTerms{
-		QuoteTermsHash: quoteHash[:], SpendTxID: bytes.Repeat([]byte{1}, sha256.Size),
+		QuoteTermsHash: quoteHash[:], RefundTemplateTxID: bytes.Repeat([]byte{1}, sha256.Size),
 		BasePaymentSequence: 1, PaymentSequenceAfter: 2, SellerAmountAfterSat: 1,
 		MinerFeeRateSatPerKB: 1, BuyerPubkey: quoteTestPubkey(), SellerPubkey: quoteTestPubkey(),
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(), ContentType: ContentSeed,
-		ContentHash: contentHash[:], DeliveryDeadlineUnix: 200,
+		ContentHash: contentHash[:], DeliveryDeadlineUnix: quoteDeadline(t),
 	}
 }
 
 func mustConstructorQuote(t *testing.T) *SignedFileQuote {
 	t.Helper()
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return quote
 }
 
-func TestSignedConstructorsRejectWrongKeySignatures(t *testing.T) {
-	if _, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", constructorOtherSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("quote constructor error = %v, want ErrInvalidEvidence", err)
-	}
+// With the signer and verifier callbacks removed, a constructor can only be
+// misused by supplying a private key that does not match the role committed in
+// the terms; the fixed path rejects that before any signature is produced.
+func TestSignedConstructorsRejectWrongRoleKeys(t *testing.T) {
 	terms := constructorRequestTerms(t)
-	if _, err := NewSignedContentRequest(terms, constructorOtherSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("request constructor error = %v, want ErrInvalidEvidence", err)
+	if _, err := NewSignedContentRequest(terms, constructorOtherKey(t)); err == nil {
+		t.Fatal("request constructor accepted a non-buyer key")
 	}
-	request, err := NewSignedContentRequest(terms, quoteTestSigner)
+	request, err := NewSignedContentRequest(terms, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewSignedContentDelivery(request, []byte("payload"), constructorOtherSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("delivery constructor error = %v, want ErrInvalidEvidence", err)
+	if _, err := NewSignedContentDelivery(request, []byte("payload"), constructorOtherKey(t)); err == nil {
+		t.Fatal("delivery constructor accepted a non-seller key")
 	}
-}
-
-func TestSignedConstructorsRejectWrongDigestSignatures(t *testing.T) {
-	if _, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", constructorWrongDigestSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("quote constructor error = %v, want ErrInvalidEvidence", err)
-	}
-	terms := constructorRequestTerms(t)
-	if _, err := NewSignedContentRequest(terms, constructorWrongDigestSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("request constructor error = %v, want ErrInvalidEvidence", err)
-	}
-	request, err := NewSignedContentRequest(terms, quoteTestSigner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewSignedContentDelivery(request, []byte("payload"), constructorWrongDigestSigner); !errors.Is(err, ErrInvalidEvidence) {
-		t.Fatalf("delivery constructor error = %v, want ErrInvalidEvidence", err)
+	if _, err := NewSignedContentDelivery(request, []byte("payload"), quoteTestKey()); err != nil {
+		t.Fatalf("fixed delivery signing failed: %v", err)
 	}
 }

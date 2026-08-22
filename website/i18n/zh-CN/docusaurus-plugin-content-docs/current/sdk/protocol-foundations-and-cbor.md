@@ -31,7 +31,7 @@ title: 01 · 协议基础与 CBOR
 bitfs/       001、003、004 的凭证、CBOR、签名和内容校验
 pool/        002、005、006 的通用 2-of-3 费用池与 BSV 交易校验
 buyer/       买方工作流门面，只产生下一步应发送的凭证或交易
-seller/      卖方工作流门面，负责交付门闩、验收并推进远期交易
+seller/      卖方工作流门面，验收交付并推进远期交易；交付上下文的串行化由调用方应用负责
 arbitration/     007 仲裁证据校验和交易签名门面
 wire/        所有新协议报文的 deterministic CBOR 编码、严格解码和类型分派
 transport/   可选的调用方适配层；SDK 核心不依赖它
@@ -64,17 +64,14 @@ type UnixSeconds int64
 var (
     ErrInvalidEvidence      error // CBOR、哈希、签名或交易内容不自洽。
     ErrQuoteExpired         error // 001 报价已到期。
-    ErrPoolBusy             error // 卖方已有一笔未完成交付，不能再用同一池交付。
     ErrStalePaymentSequence error // 请求或付款所依据的池状态不是当前状态。
     ErrInsufficientBalance  error // 池余额不足以支付内容及交易费。
-    ErrNonFinalRejected     error // BSV 非最终交易池拒绝本次 update。
-    ErrFinalRejected         error // BSV 节点拒绝最终交易。
     ErrNotExpired            error // 到期退款尚未达到时间锁。
     ErrContentNotInSeed      error // block 未被报价对应 seed 提交。
 )
 ```
 
-`ErrPoolBusy` 和 `ErrStalePaymentSequence` 是可预期的业务结果，不应被包装为“内部错误”。
+`ErrStalePaymentSequence` 是可预期的业务结果，不应被包装为“内部错误”。
 
 ## 统一 CBOR 报文 API
 
@@ -84,7 +81,9 @@ CBOR 的打包与解包属于 SDK，不属于 HTTP、WebSocket、队列或应用
 
 ```go
 // package wire
-// Kind 是传输层已知的报文类别，用于统一分派；它不进入 001–007 的已签名 CBOR 本体。
+// Kind 是传输层已知的报文类别，用于统一分派；它不进入 001–007 的已签名 CBOR 本体，
+// 也绝不标识费用池实例：定义 RefundTemplateTxID 的报文会在 CBOR 文档中携带它；0201
+// 预签请求从 RefundTx 推导该值，不包含单独的 hash 字段。
 type Kind uint16
 
 const (
@@ -165,67 +164,51 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。
 
-`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由配置的签名验证回调和角色工作流校验签名、报价有效期、费用池输入和金额。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
+`Unmarshal` 只解决“字节是否是此类规范 CBOR”；随后由角色工作流使用 SDK 固定验证器校验签名、报价有效期、费用池输入和金额——不存在需要调用方配置的签名验证回调。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
 所有协议身份公钥都必须编码为合法的 33 字节压缩 secp256k1 公钥。固定验证
 层会在它们进入签名的 001/003/004 条款或 002 费用池证据前拒绝 65 字节未压缩公钥。
 
 ## 纯协议 API
 
-这些函数没有存储、网络和时间以外的副作用，适合钱包、服务端、CLI 和测试直接使用。
+这些函数没有存储或网络副作用，适合钱包、服务端、CLI 和测试直接使用。签名直接使用调用方解析的官方 BSV 私钥（`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `ec.PrivateKey`；TypeScript 使用 `@bsv/sdk` 原生 `PrivateKey`）。不存在 signer 或 verifier 回调。
+
+所有凭证的签名路径固定且一致：规范 CBOR 用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，而 TS 侧 `PrivateKey.sign(message)` 会自行哈希——跨语言向量必须避免双重哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 ```go
 // package bitfs
-// NewSignedFileQuote 将 FileQuoteTerms 规范 CBOR 传给 signer；signer 对其执行一次
-// SHA-256 并返回 DER 字节。构造器固定验证签名并生成 001 报价凭证。
-// recommendedFilename 仅为展示信息，不进入签名条款。
+// NewSignedFileQuote 验证报价条款，编码规范 TermsCBOR，通过固定的一次
+// SHA-256 消息签名路径用卖方官方 BSV 私钥为这些精确字节签名，并在返回
+// 001 凭证前用派生公钥固定复验签名。
 func NewSignedFileQuote(
     terms *FileQuoteTerms,
-    sellerPubkey []byte,
+    sellerKey *ec.PrivateKey,
     recommendedFilename string,
-    signer QuoteTermsSigner,
 ) (*SignedFileQuote, error)
 
-// VerifySignedFileQuoteAt 在指定时间验证卖方签名、字段约束和 expires_at。
-func VerifySignedFileQuoteAt(
-    quote *SignedFileQuote,
-    now time.Time,
-    verifier QuoteTermsSignatureVerifier,
-) (*FileQuoteTerms, error)
+// VerifySignedFileQuote 在入口处读取一次系统 UTC 并使用 SDK 固定验证器，
+// 验证卖方签名、字段约束和报价有效期。
+// 不存在 now 参数，也没有可传入的 verifier 参数。
+func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
 
-// NewSignedContentRequest 将规范 003 条款传给 signer；signer 对其执行一次 SHA-256
-// 并返回 DER 字节。构造器在返回前固定验证签名。
-func NewSignedContentRequest(
-    terms *ContentRequestTerms,
-    signer ContentTermsSigner,
-) (*SignedContentRequest, error)
+// NewSignedContentRequest 确定性编码 003 条款，并通过同一条固定的一次
+// SHA-256 消息签名路径用买方官方 BSV 私钥为这些精确字节签名。
+func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
-// VerifySignedContentRequestAt 验证报价绑定、买方签名、仲裁者选择和交付期限。
-func VerifySignedContentRequestAt(
-    request *SignedContentRequest,
-    quote *SignedFileQuote,
-    now time.Time,
-    quoteVerifier QuoteTermsSignatureVerifier,
-    buyerVerifier ContentTermsSignatureVerifier,
-) (*ContentRequestTerms, error)
+// VerifySignedContentRequest 在入口处读取一次系统 UTC 并使用 SDK 固定验证器，
+// 验证报价绑定、买方签名、仲裁者选择和交付期限。
+func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error)
 
-// NewSignedContentDelivery 将 payload 绑定到 003，并将规范 004 条款传给 signer；
-// signer 对其执行一次 SHA-256 并返回 DER 字节。构造器在返回前固定验证签名。
-func NewSignedContentDelivery(
-    request *SignedContentRequest,
-    payload []byte,
-    signer ContentTermsSigner,
-) (*SignedContentDelivery, error)
+// NewSignedContentDelivery 将 payload 绑定到请求授权哈希，并通过固定消息
+// 路径用卖方官方 BSV 私钥为生成的确定性交付条款签名。
+func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error)
 
-// VerifySignedContentDeliveryWithSeedAt 使用已验证的 seed 额外检查块归属和块长度。
-func VerifySignedContentDeliveryWithSeedAt(
+// VerifySignedContentDeliveryWithSeed 使用调用方持有的 seed 额外检查块归属
+// 和块长度。
+func VerifySignedContentDeliveryWithSeed(
     request *SignedContentRequest,
     delivery *SignedContentDelivery,
     quote *SignedFileQuote,
     seed []byte,
-    now time.Time,
-    quoteVerifier QuoteTermsSignatureVerifier,
-    buyerVerifier ContentTermsSignatureVerifier,
-    sellerVerifier ContentTermsSignatureVerifier,
 ) ([]byte, error)
 ```

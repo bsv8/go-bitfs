@@ -25,12 +25,12 @@ The seed contains the file block hash list, so the block index, actual block siz
 The buyer selects an available pool and its current latest cumulative payment state:
 
 ```text
-SpendTxID + BasePaymentSequence
+RefundTemplateTxID + BasePaymentSequence
 ```
 
 `BasePaymentSequence` is the fee pool state version — it is not a block sequence number, not a request sequence number, and does not encode any ordering between seeds and blocks. The buyer may select any one of their available pools but MUST use that pool's current latest state.
 
-The same pool MUST NOT be accepted by the seller for multiple outstanding requests simultaneously; otherwise the same balance would be committed multiple times, and the buyer could pay only once after the seller delivers several contents. This is a local operational constraint on the seller; it does not turn the database into the source of truth — the seller's saved signed payment state is the authoritative record. The specific atomic latch, persistence, and release timing are defined in 005.
+The same pool MUST NOT be accepted by the seller for multiple outstanding requests simultaneously; otherwise the same balance would be committed multiple times, and the buyer could pay only once after the seller delivers several contents. This is a local operational constraint on the calling application; it does not turn the database into the source of truth — the seller's saved signed payment state is the authoritative record. The SDK validates only explicit inputs; delivery-context serialization, persistence, and confirmation timing are the calling application's responsibilities, as described in 005.
 
 In 003, the buyer commits to the sequence number, absolute cumulative amount, and fixed fee rate; the seller is not required to countersign or acknowledge these fields. The seller may deliver per 004, or may refuse or take no action; if the seller cannot submit normally and the buyer declines to sign 005, the seller may use this final authorization request for arbitration per 007.
 

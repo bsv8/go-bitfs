@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/fxamacker/cbor/v2"
@@ -43,42 +44,52 @@ func init() {
 	}
 }
 
-// ArbitrationRequest is the complete v4 wire request. All transaction bytes
-// are unsigned-template bytes; the seller signature is deliberately separate.
+// ArbitrationRequest is the complete v4 wire request. RefundTemplateTxID is the
+// pool correlation ID that lets the request route independently of any
+// connection or session. All transaction bytes are unsigned-template bytes;
+// the seller signature is deliberately separate.
 type ArbitrationRequest struct {
 	Version                    uint64
+	RefundTemplateTxID         pool.RefundTemplateTxID
 	PoolOpeningProofCBOR       []byte
 	PaymentAuthorizationCBOR   []byte
 	UnsignedStateTxRaw         []byte
 	SellerTransactionSignature []byte
 }
 
-// ArbitrationResponse contains the arbiter decision signature and resulting payment transaction.
+// ArbitrationResponse contains the verified pool correlation ID, the hashes of
+// the authorized bytes, and the arbiter decision signature.
 type ArbitrationResponse struct {
 	Version                     uint64
+	RefundTemplateTxID          pool.RefundTemplateTxID
 	PaymentAuthorizationHash    []byte
 	UnsignedStateTxHash         []byte
 	ArbiterTransactionSignature []byte
 }
 
 type WorkflowConfig struct {
-	Signer pool.Signer
+	// PrivateKey 是仲裁方官方 BSV Go SDK 私钥。它是唯一的运行时配置：
+	// 不存在 Signer、Verifier、Clock、Store 或 Node hook，私钥也绝不进入
+	// 任何报文、返回值、日志或持久化结构。
+	PrivateKey *ec.PrivateKey
 }
 
 // Workflow verifies 007 evidence and adds only the arbiter signature. It never
 // prices content, replaces the seller candidate transaction, or submits a node
-// transaction on the arbiter's behalf.
+// transaction on the arbiter's behalf. The workflow is stateless apart from
+// the arbiter private key and the compressed public key derived from it.
 type Workflow struct {
-	signer pool.Signer
+	privateKey *ec.PrivateKey
+	publicKey  []byte
 }
 
-// NewWorkflow requires only a non-nil arbiter Signer. It returns an arbiter
-// workflow with no storage or network side effects.
+// NewWorkflow requires only a non-nil official BSV private key. It returns an
+// arbiter workflow with no storage or network side effects.
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
-	if config.Signer == nil {
-		return nil, errors.New("arbitration workflow requires an arbiter signer")
+	if config.PrivateKey == nil {
+		return nil, errors.New("arbitration workflow requires an arbiter private key")
 	}
-	return &Workflow{signer: config.Signer}, nil
+	return &Workflow{privateKey: config.PrivateKey, publicKey: config.PrivateKey.PubKey().Compressed()}, nil
 }
 
 // SignPayment decodes and verifies the opening proof, standalone 003 buyer
@@ -101,15 +112,22 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	if err != nil {
 		return nil, fmt.Errorf("build pool engine: %w", err)
 	}
-	poolAdapter := &pool.MultisigPoolAdapter{Engine: engine, ArbiterKey: workflow.signer}
+	poolAdapter := &pool.MultisigPoolAdapter{Engine: engine, ArbiterKey: workflow.privateKey}
 	if err := engine.VerifyOpening(proof); err != nil {
 		return nil, fmt.Errorf("verify opening proof: %w", err)
+	}
+	derivedRefundTemplateTxID, err := pool.DeriveRefundTemplateTxID(ctx, proof)
+	if err != nil {
+		return nil, fmt.Errorf("derive refund template transaction ID: %w", err)
+	}
+	if derivedRefundTemplateTxID != request.RefundTemplateTxID {
+		return nil, fmt.Errorf("%w: arbitration request correlation ID does not match opening evidence", pool.ErrInvalidEvidence)
 	}
 	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("decode payment authorization: %w", err)
 	}
-	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization, bitfs.VerifySignature)
+	terms, err := bitfs.VerifySignedContentRequestStandalone(authorization)
 	if err != nil {
 		return nil, fmt.Errorf("verify payment authorization: %w", err)
 	}
@@ -135,20 +153,21 @@ func (workflow *Workflow) SignPayment(ctx context.Context, request *ArbitrationR
 	}
 	authHash := sha256.Sum256(request.PaymentAuthorizationCBOR)
 	txHash := sha256.Sum256(request.UnsignedStateTxRaw)
-	return &ArbitrationResponse{Version: MajorVersion, PaymentAuthorizationHash: authHash[:], UnsignedStateTxHash: txHash[:], ArbiterTransactionSignature: append([]byte(nil), arbiterSig...)}, nil
+	return &ArbitrationResponse{Version: MajorVersion, RefundTemplateTxID: derivedRefundTemplateTxID, PaymentAuthorizationHash: authHash[:], UnsignedStateTxHash: txHash[:], ArbiterTransactionSignature: append([]byte(nil), arbiterSig...)}, nil
 }
 
-// MarshalRequest validates and encodes a five-field 007 arbitration request.
+// MarshalRequest validates and encodes a six-field 007 arbitration request led
+// by its RefundTemplateTxID correlation ID.
 func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 	if err := ValidateRequest(request); err != nil {
 		return nil, err
 	}
-	return arbitrationEnc.Marshal([]any{MajorVersion, request.PoolOpeningProofCBOR, request.PaymentAuthorizationCBOR, request.UnsignedStateTxRaw, request.SellerTransactionSignature})
+	return arbitrationEnc.Marshal([]any{MajorVersion, request.RefundTemplateTxID[:], request.PoolOpeningProofCBOR, request.PaymentAuthorizationCBOR, request.UnsignedStateTxRaw, request.SellerTransactionSignature})
 }
 
 // UnmarshalRequest strictly decodes and canonicalizes a 007 arbitration request.
 func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
-	values, err := decodeArray(data, 5)
+	values, err := decodeArray(data, 6)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode arbitration request: %v", pool.ErrInvalidEvidence, err)
 	}
@@ -156,16 +175,19 @@ func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	if err := arbitrationDec.Unmarshal(values[0], &request.Version); err != nil || request.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported arbitration request version", pool.ErrInvalidEvidence)
 	}
-	if err := arbitrationDec.Unmarshal(values[1], &request.PoolOpeningProofCBOR); err != nil {
+	if err := arbitrationDec.Unmarshal(values[1], &request.RefundTemplateTxID); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[2], &request.PaymentAuthorizationCBOR); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &request.PoolOpeningProofCBOR); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[3], &request.UnsignedStateTxRaw); err != nil {
+	if err := arbitrationDec.Unmarshal(values[3], &request.PaymentAuthorizationCBOR); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[4], &request.SellerTransactionSignature); err != nil {
+	if err := arbitrationDec.Unmarshal(values[4], &request.UnsignedStateTxRaw); err != nil {
+		return nil, err
+	}
+	if err := arbitrationDec.Unmarshal(values[5], &request.SellerTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateRequest(request); err != nil {
@@ -181,17 +203,18 @@ func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	return cloneRequest(request), nil
 }
 
-// MarshalResponse validates and encodes a four-field 007 arbitration response.
+// MarshalResponse validates and encodes a five-field 007 arbitration response
+// carrying the verified RefundTemplateTxID correlation ID.
 func MarshalResponse(response *ArbitrationResponse) ([]byte, error) {
 	if err := ValidateResponse(response); err != nil {
 		return nil, err
 	}
-	return arbitrationEnc.Marshal([]any{MajorVersion, response.PaymentAuthorizationHash, response.UnsignedStateTxHash, response.ArbiterTransactionSignature})
+	return arbitrationEnc.Marshal([]any{MajorVersion, response.RefundTemplateTxID[:], response.PaymentAuthorizationHash, response.UnsignedStateTxHash, response.ArbiterTransactionSignature})
 }
 
 // UnmarshalResponse strictly decodes and canonicalizes a 007 arbitration response.
 func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
-	values, err := decodeArray(data, 4)
+	values, err := decodeArray(data, 5)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode arbitration response: %v", pool.ErrInvalidEvidence, err)
 	}
@@ -199,13 +222,16 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	if err := arbitrationDec.Unmarshal(values[0], &response.Version); err != nil || response.Version != MajorVersion {
 		return nil, fmt.Errorf("%w: unsupported arbitration response version", pool.ErrInvalidEvidence)
 	}
-	if err := arbitrationDec.Unmarshal(values[1], &response.PaymentAuthorizationHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[1], &response.RefundTemplateTxID); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[2], &response.UnsignedStateTxHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &response.PaymentAuthorizationHash); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[3], &response.ArbiterTransactionSignature); err != nil {
+	if err := arbitrationDec.Unmarshal(values[3], &response.UnsignedStateTxHash); err != nil {
+		return nil, err
+	}
+	if err := arbitrationDec.Unmarshal(values[4], &response.ArbiterTransactionSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateResponse(response); err != nil {
@@ -227,7 +253,12 @@ func ValidateRequest(request *ArbitrationRequest) error {
 	if request == nil || request.Version != MajorVersion || len(request.PoolOpeningProofCBOR) == 0 || len(request.PaymentAuthorizationCBOR) == 0 || len(request.UnsignedStateTxRaw) == 0 || len(request.SellerTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration request is incomplete", pool.ErrInvalidEvidence)
 	}
-	return nil
+	for _, b := range request.RefundTemplateTxID {
+		if b != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: arbitration refund_template_txid must not be all zero", pool.ErrInvalidEvidence)
 }
 
 // ValidateResponse checks the 007 response version, authorization/state hashes,
@@ -236,7 +267,12 @@ func ValidateResponse(response *ArbitrationResponse) error {
 	if response == nil || response.Version != MajorVersion || len(response.PaymentAuthorizationHash) != sha256.Size || len(response.UnsignedStateTxHash) != sha256.Size || len(response.ArbiterTransactionSignature) == 0 {
 		return fmt.Errorf("%w: arbitration response is incomplete", pool.ErrInvalidEvidence)
 	}
-	return nil
+	for _, b := range response.RefundTemplateTxID {
+		if b != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: arbitration refund_template_txid must not be all zero", pool.ErrInvalidEvidence)
 }
 
 func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.OpeningProof) error {
@@ -244,7 +280,7 @@ func ensureAuthorizationPool(terms *bitfs.ContentRequestTerms, proof *pool.Openi
 		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
 	}
 	details, err := pool.DeriveOpeningDetails(proof)
-	if err != nil || !bytes.Equal(terms.SpendTxID, details.SpendTxID[:]) {
+	if err != nil || !bytes.Equal(terms.RefundTemplateTxID, details.RefundTemplateTxID[:]) {
 		return fmt.Errorf("%w: authorization pool anchor is missing", pool.ErrInvalidEvidence)
 	}
 	if len(proof.BuyerPubKey) != 0 && !bytes.Equal(terms.BuyerPubkey, proof.BuyerPubKey) {
@@ -277,12 +313,12 @@ func cloneRequest(request *ArbitrationRequest) *ArbitrationRequest {
 	if request == nil {
 		return nil
 	}
-	return &ArbitrationRequest{Version: request.Version, PoolOpeningProofCBOR: append([]byte(nil), request.PoolOpeningProofCBOR...), PaymentAuthorizationCBOR: append([]byte(nil), request.PaymentAuthorizationCBOR...), UnsignedStateTxRaw: append([]byte(nil), request.UnsignedStateTxRaw...), SellerTransactionSignature: append([]byte(nil), request.SellerTransactionSignature...)}
+	return &ArbitrationRequest{Version: request.Version, RefundTemplateTxID: request.RefundTemplateTxID, PoolOpeningProofCBOR: append([]byte(nil), request.PoolOpeningProofCBOR...), PaymentAuthorizationCBOR: append([]byte(nil), request.PaymentAuthorizationCBOR...), UnsignedStateTxRaw: append([]byte(nil), request.UnsignedStateTxRaw...), SellerTransactionSignature: append([]byte(nil), request.SellerTransactionSignature...)}
 }
 
 func cloneResponse(response *ArbitrationResponse) *ArbitrationResponse {
 	if response == nil {
 		return nil
 	}
-	return &ArbitrationResponse{Version: response.Version, PaymentAuthorizationHash: append([]byte(nil), response.PaymentAuthorizationHash...), UnsignedStateTxHash: append([]byte(nil), response.UnsignedStateTxHash...), ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...)}
+	return &ArbitrationResponse{Version: response.Version, RefundTemplateTxID: response.RefundTemplateTxID, PaymentAuthorizationHash: append([]byte(nil), response.PaymentAuthorizationHash...), UnsignedStateTxHash: append([]byte(nil), response.UnsignedStateTxHash...), ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...)}
 }

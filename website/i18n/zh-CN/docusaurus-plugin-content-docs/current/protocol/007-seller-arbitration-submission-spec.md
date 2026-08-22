@@ -12,6 +12,7 @@ title: 007 · v4 卖方仲裁提交规范
 ```text
 ArbitrationRequest = [
   4,
+  refund_template_txid,
   pool_opening_proof_cbor,
   payment_authorization_cbor,
   unsigned_state_tx_raw,
@@ -20,6 +21,7 @@ ArbitrationRequest = [
 
 ArbitrationResponse = [
   4,
+  refund_template_txid,
   payment_authorization_hash,
   unsigned_state_tx_hash,
   arbiter_transaction_signature

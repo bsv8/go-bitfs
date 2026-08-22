@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	mp "github.com/bsv8/MultisigPool/v4/pkg"
 	"github.com/bsv8/go-bitfs/bitfs"
 )
@@ -20,8 +21,10 @@ func BuildPoolLock(roles mp.ArbitratedPoolRoles) ([]byte, error) {
 // MultisigPoolAdapter is the arbiter-facing capability. It contains no legacy
 // role aliases and never constructs a replacement candidate transaction.
 type MultisigPoolAdapter struct {
-	Engine     *MultisigPoolEngine
-	ArbiterKey Signer
+	// Engine 是无状态的 MultisigPool v4 协议引擎。
+	Engine *MultisigPoolEngine
+	// ArbiterKey 是仲裁方官方 BSV 私钥；绝不进入报文、返回值或日志。
+	ArbiterKey *ec.PrivateKey
 }
 
 // VerifyOpening validates the complete 002 OpeningProof through MultisigPool v4:
@@ -81,7 +84,7 @@ func (adapter *MultisigPoolAdapter) SignArbitrationCandidate(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	sig, err := adapter.Engine.signWithSigner(ctx, state, unsigned.PoolOutputSatoshis, adapter.ArbiterKey, "arbiter")
+	sig, err := adapter.Engine.signWithKey(state, unsigned.PoolOutputSatoshis, adapter.ArbiterKey, "arbiter")
 	if err != nil {
 		return nil, err
 	}
@@ -106,5 +109,5 @@ func unsignedFromRaw(raw []byte, details *OpeningDetails) (*UnsignedPayment, err
 	if state.Inputs[0].UnlockingScript != nil && len(state.Inputs[0].UnlockingScript.Bytes()) != 0 {
 		return nil, invalid("arbitration candidate must have an empty unlocking script")
 	}
-	return &UnsignedPayment{SpendTxID: details.SpendTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}, nil
+	return &UnsignedPayment{RefundTemplateTxID: details.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}, nil
 }

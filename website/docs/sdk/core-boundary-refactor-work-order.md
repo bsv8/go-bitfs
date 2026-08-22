@@ -5,113 +5,89 @@ title: Core boundary refactor work order
 
 # Core boundary refactor work order
 
-This work order is the acceptance contract for the SDK boundary refactor. It is
-normative for the implementation work described here; protocol specifications
-001–007 remain authoritative for wire bytes and protocol behavior.
+This page records the acceptance contract of the completed SDK boundary hard
+switch. It supersedes every earlier description in which role workflows could
+accept stores, content sources/sinks, or BSV submission backends. Protocol
+specifications 001–007 remain authoritative for wire bytes and protocol
+behavior; the v4 wire shape, CDDL, signature domains, and `RefundTemplateTxID`
+algorithm are unchanged.
 
 ## Product definition
 
-`go-bitfs` is the executable BitFS protocol specification and the role SDK for
-Buyer, Seller, and Arbiter implementations. It owns deterministic message
-construction, strict reading, semantic verification, protocol calculations,
-and the 001–007 state transitions.
+`go-bitfs` is a **stateless, infrastructure-side-effect-free** executable BitFS
+protocol specification and role SDK for Buyer, Seller, and Arbiter
+implementations. Given explicit protocol inputs and explicit prior state, it
+strictly decides whether the inputs are legal and computes the next protocol
+message, transaction, signature material, or local role state.
 
-The application owns only infrastructure:
+The application owns everything the SDK no longer does:
 
-- persistence and atomic storage operations;
-- public-key lookup and signing of exact SDK-supplied bytes or digests, without
-  any required key-vault product or private-key export;
-- peer-to-peer message transport, which is completely outside this SDK;
-- concrete BSV-node connectivity behind narrow submission backends;
-- content byte storage behind seed/block source and sink interfaces.
+- databases, files, transactions, locks, CAS, and unique constraints;
+- concurrency serialization per `RefundTemplateTxID` (the SDK has no mutex or lease);
+- retries, idempotency, crash recovery, and outboxes;
+- peer transport, routing, timeouts;
+- node broadcasting, chain queries, and result reconciliation — only the
+  application's node adapter may declare that a broadcast was accepted;
+- block-height sources, supplied explicitly as `blockHeight uint32` arguments;
+  the SDK reads system UTC once internally per public entry point and
+  validates locktime rules against those facts;
+- content repositories: bytes are read before a call and passed in; verified
+  bytes are returned as data and saved by the application;
+- multi-tenant authorization (`RefundTemplateTxID` is a routing ID, not an auth token).
 
-MasterSeed is the fixed content-proof implementation. MultisigPool v4 is the
-fixed BSV pool-transaction implementation. Neither is an application plugin or
-a replaceable workflow port.
+MasterSeed remains the fixed content-proof implementation. MultisigPool v4
+remains the fixed BSV pool-transaction implementation. Neither is an
+application plugin.
 
 ## Required public boundary
 
-Role workflow constructors may accept stores, signers, content sources/sinks,
-and BSV submission backends. They must not accept replaceable implementations
-for any of the following:
+Role workflow constructors accept exactly one capability:
 
-- deterministic CBOR encoding or strict decoding;
-- signature verification;
-- participant verification;
-- transaction ID calculation;
-- MultisigPool construction, parsing, fee calculation, signature-role checks,
-  signature merging, pool-capacity checks, or refund-expiry rules;
-- BitFS pricing, authorization hashes, sequence derivation, or state-machine
-  decisions.
+~~~go
+type WorkflowConfig struct {
+    PrivateKey *ec.PrivateKey // official BSV Go SDK private key
+}
+~~~
 
-The ordinary Buyer, Seller, and Arbiter constructors must not expose `Clock`.
-Production workflows use the SDK's canonical UTC Unix-second rules and system
-time. Explicit `...At` pure verification functions may remain public for
-replay, conformance vectors, and boundary tests.
+No store, quote store, pending-request store, content sink/source, backend,
+node adapter, clock, signer port, verifier strategy, or locker field exists.
+Every method takes its business
+inputs explicitly (quote, opening proof, previous payment state, delivery
+context, content bytes, seed, block height) and returns only computed wire
+messages, raw transactions, verified evidence, and local role state such as
+`buyer.BuyerOpeningState` or `seller.ContentDeliveryState`. Methods never load,
+save, send, broadcast, or mark uncertain outcomes.
 
-The signing hook is a basic operation and must not return a private key. The
-SDK or MultisigPool adapter constructs the exact message or transaction digest,
-asks the hook to sign it, normalizes any protocol-required sighash byte itself,
-and verifies the returned signature before accepting or persisting it.
-
-No role workflow may know an HTTP endpoint, WebSocket, libp2p peer, queue, CLI,
-or browser transport. It returns and consumes typed protocol messages and the
-existing deterministic wire encodings. BSV submission hooks express acceptance
-semantics, not transport protocols, and SDK code validates both the submitted
-transaction and the returned acceptance identity.
-
-## Implementation tasks
-
-1. Replace `PrivateKeyProvider` transaction signing with the external basic
-   `Signer` operation. No exported production API may return `*ec.PrivateKey`.
-2. Make role workflows construct and use the repository's concrete
-   MultisigPool engine/adapters from the participant keys in the current quote,
-   opening request, or opening proof. Remove injectable Buyer/Seller/Arbiter
-   transaction ports and participant verifiers from workflow configuration.
-3. Fold pool-opening verification and transaction-ID calculation into that
-   concrete engine. Replace opening-hook aggregates with storage and BSV
-   submission dependencies only. Every generated signature and complete proof
-   must be verified by the core before persistence or return.
-4. Make standard ECDSA verification a core implementation detail. Remove
-   quote/content/authorization verifier callbacks from role workflow
-   configuration while retaining pure lower-level verification APIs where they
-   are useful to protocol users.
-5. Remove public workflow `Clock` configuration. Preserve deterministic `At`
-   verification entry points and update tests to exercise exact expiry
-   boundaries without changing the production constructor surface.
-6. Keep peer transport absent. Keep BSV backends narrow and ensure the core
-   verifies transaction bytes before submission and verifies txid, spend
-   anchor, and sequence after non-final acceptance.
-7. Preserve strict Build/Read/Verify behavior for all 001–007 messages. Inputs
-   must not ask applications to repeat price, sequence, participant, fee, or
-   hash values that the SDK can derive from verified evidence.
-8. Update integration tests, package tests, examples, generated API comments,
-   and both website languages to describe only the new boundary. Remove all
-   production references that call transaction engines or verifiers external
-   hooks.
+Signing is not a hook: it always uses the constructor-supplied official BSV
+private key through the SDK's fixed implementations. Message signatures hash
+the canonical CBOR once with SHA-256, sign the pre-computed digest with
+`(*ec.PrivateKey).Sign`, normalize to low-S DER, and are re-verified by a fixed
+verifier against the derived role key before they can leave a method;
+transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and
+are never hashed twice. Pure Build/Read/Verify functions that need no signing
+remain public pure functions and are never forced through a Workflow.
 
 ## Acceptance checks
 
-- `go test ./...` passes, including the normal purchase, retry, close, refund,
-  and Seller+Arbiter settlement paths.
-- A test signer can implement the complete flow with `PublicKey` and `Sign`
-  only; it never exposes an EC private key.
-- Buyer, Seller, and Arbiter workflow configs contain no `Clock`, generic
-  signature verifier, participant verifier, opening-hook aggregate, or
-  replaceable transaction-engine port.
-- Deliberately malformed opening, payment, close, and arbitration bytes are
-  rejected by the fixed core even when storage and BSV backends behave
-  permissively.
-- Signing-hook output is checked for the expected role before it is returned,
-  persisted, merged, or submitted.
-- There is no peer transport implementation or transport-specific field in the
-  public protocol and role-workflow API.
+- `buyer.WorkflowConfig`, `seller.WorkflowConfig`, and
+  `arbitration.WorkflowConfig` contain nothing but `PrivateKey`, and the
+  constructors reject nil keys.
+- No code path loads state by `RefundTemplateTxID` inside the SDK; callers supply it.
+- No method performs persistence, network sends, or broadcasts; raw
+  transactions are returned for the application to submit.
+- Static searches find no `FileStore`, `MemoryStore`, `FileQuoteStore`,
+  `PoolStore`, `PendingRequestStore`, lease types, process locks, or backend
+  adapters anywhere outside historical documents.
+- Wire fixtures for 001–007 and MultisigPool transactions are byte-identical
+  before and after the switch; `MajorVersion == 4` with no v5.
+- Stale sequence, wrong opening/role/hash, amount regressions, and expiry
+  violations are still rejected.
 - English and Simplified Chinese documentation agree with the compiled API.
 
 ## Out of scope
 
-- Implementing HTTP, WebSocket, libp2p, queue, CLI, or browser transport.
-- Binding the signer hook to KeyHold or any other custody product.
+- Any future database/file adapter as SDK work: persistence belongs to the
+  application stack by design.
+- Transport implementations of any kind.
 - Replacing MasterSeed or MultisigPool through application configuration.
-- Designing a new wire protocol or changing the normative 001–007 business
-  behavior unless a current implementation bug makes that necessary.
+- Changing the normative 001–007 wire behavior.

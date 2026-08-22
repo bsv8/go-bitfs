@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
@@ -15,6 +16,7 @@ import (
 func TestV4ArbitrationRequestRoundTrip(t *testing.T) {
 	request := &ArbitrationRequest{
 		Version:                    MajorVersion,
+		RefundTemplateTxID:         pool.RefundTemplateTxID(bytes.Repeat([]byte{9}, 32)),
 		PoolOpeningProofCBOR:       []byte{1, 2},
 		PaymentAuthorizationCBOR:   []byte{3, 4},
 		UnsignedStateTxRaw:         []byte{5, 6},
@@ -24,7 +26,7 @@ func TestV4ArbitrationRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, err := hex.DecodeString("8504420102420304420506420708")
+	expected, err := hex.DecodeString("86045820" + strings.Repeat("09", 32) + "420102420304420506420708")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,12 +46,12 @@ func TestV4ArbitrationRequestRoundTrip(t *testing.T) {
 }
 
 func TestV4ArbitrationResponseBindsTwoHashes(t *testing.T) {
-	response := &ArbitrationResponse{Version: MajorVersion, PaymentAuthorizationHash: bytes.Repeat([]byte{1}, 32), UnsignedStateTxHash: bytes.Repeat([]byte{2}, 32), ArbiterTransactionSignature: []byte{3}}
+	response := &ArbitrationResponse{Version: MajorVersion, RefundTemplateTxID: pool.RefundTemplateTxID(bytes.Repeat([]byte{7}, 32)), PaymentAuthorizationHash: bytes.Repeat([]byte{1}, 32), UnsignedStateTxHash: bytes.Repeat([]byte{2}, 32), ArbiterTransactionSignature: []byte{3}}
 	raw, err := MarshalResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, err := hex.DecodeString("840458200101010101010101010101010101010101010101010101010101010101010101582002020202020202020202020202020202020202020202020202020202020202024103")
+	expected, err := hex.DecodeString("85045820" + strings.Repeat("07", 32) + "5820" + strings.Repeat("01", 32) + "5820" + strings.Repeat("02", 32) + "4103")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,10 +67,27 @@ func TestV4ArbitrationResponseBindsTwoHashes(t *testing.T) {
 	}
 }
 
+func TestLegacyArbitrationArraysRejectMissingRefundTemplateTxID(t *testing.T) {
+	legacyRequest, err := arbitrationEnc.Marshal([]any{MajorVersion, []byte{1}, []byte{2}, []byte{3}, []byte{4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalRequest(legacyRequest); err == nil {
+		t.Fatal("legacy five-element 007 arbitration request decoded")
+	}
+	legacyResponse, err := arbitrationEnc.Marshal([]any{MajorVersion, []byte{1}, []byte{2}, []byte{3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalResponse(legacyResponse); err == nil {
+		t.Fatal("legacy four-element 007 arbitration response decoded")
+	}
+}
+
 func TestSignPaymentRejectsInvalidBuyerAuthorization(t *testing.T) {
 	proofCBOR, authorization := testArbitrationEvidence(t)
 	workflow, err := NewWorkflow(WorkflowConfig{
-		Signer: testArbitrationSigner{},
+		PrivateKey: testArbitrationKey(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +104,7 @@ func TestSignPaymentRejectsInvalidBuyerAuthorization(t *testing.T) {
 func TestSignPaymentRejectsCandidateValidationFailure(t *testing.T) {
 	proofCBOR, authorization := testArbitrationEvidence(t)
 	workflow, err := NewWorkflow(WorkflowConfig{
-		Signer: testArbitrationSigner{},
+		PrivateKey: testArbitrationKey(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,12 +118,14 @@ func TestSignPaymentRejectsCandidateValidationFailure(t *testing.T) {
 	}
 }
 
-type testArbitrationSigner struct{}
-
-func (testArbitrationSigner) PublicKey(context.Context) ([]byte, error) {
-	return arbitrationTestPubkey("3333333333333333333333333333333333333333333333333333333333333333"), nil
+func testArbitrationKey(t *testing.T) *ec.PrivateKey {
+	t.Helper()
+	key, err := ec.PrivateKeyFromHex(string(bytes.Repeat([]byte("77"), 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
-func (testArbitrationSigner) Sign(context.Context, []byte) ([]byte, error) { return []byte{9}, nil }
 
 func testArbitrationEvidence(t *testing.T) ([]byte, []byte) {
 	t.Helper()
@@ -120,7 +141,7 @@ func testArbitrationEvidence(t *testing.T) ([]byte, []byte) {
 		t.Fatal(err)
 	}
 	terms, err := bitfs.EncodeContentRequestTerms(&bitfs.ContentRequestTerms{
-		QuoteTermsHash: bytes.Repeat([]byte{3}, sha256.Size), SpendTxID: spend, BasePaymentSequence: 1, PaymentSequenceAfter: 2,
+		QuoteTermsHash: bytes.Repeat([]byte{3}, sha256.Size), RefundTemplateTxID: spend, BasePaymentSequence: 1, PaymentSequenceAfter: 2,
 		SellerAmountAfterSat: 100, MinerFeeRateSatPerKB: 1, BuyerPubkey: buyer, SellerPubkey: seller, SelectedArbiterPubkey: arbiter,
 		ContentType: bitfs.ContentSeed, ContentHash: bytes.Repeat([]byte{4}, sha256.Size), DeliveryDeadlineUnix: 100,
 	})

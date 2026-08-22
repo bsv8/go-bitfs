@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"time"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/internal/protoclock"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
@@ -41,7 +43,7 @@ type ContentRef struct {
 // callers do not accidentally create a second authorization model.
 type ContentRequestTerms struct {
 	QuoteTermsHash        []byte
-	SpendTxID             []byte
+	RefundTemplateTxID    []byte
 	BasePaymentSequence   uint64
 	PaymentSequenceAfter  uint64
 	SellerAmountAfterSat  uint64
@@ -60,8 +62,11 @@ type SignedContentRequest struct {
 	BuyerSignature []byte
 }
 
-// ContentDeliveryTerms is the unsigned, signed-bytes portion of 004.
+// ContentDeliveryTerms is the unsigned, signed-bytes portion of 004. The
+// seller signature covers the pool's RefundTemplateTxID so an independently
+// delivered credential routes directly to its fee pool.
 type ContentDeliveryTerms struct {
+	RefundTemplateTxID       []byte
 	PaymentAuthorizationHash []byte
 	ContentBytes             []byte
 }
@@ -72,14 +77,6 @@ type SignedContentDelivery struct {
 	SellerSignature []byte
 }
 
-// ContentTermsSigner receives the exact canonical CBOR bytes of a content
-// request or delivery terms document. It must hash those bytes once with
-// SHA-256 and return the resulting DER-only signature.
-type ContentTermsSigner func(termsCBOR []byte) ([]byte, error)
-
-// ContentTermsSignatureVerifier verifies a signature over exact bytes.
-type ContentTermsSignatureVerifier func(pubkey, termsCBOR, signature []byte) error
-
 // EncodeContentRequestTerms returns the exact deterministic CBOR array signed by
 // the buyer for a 003 request. It rejects nil terms and invalid field lengths.
 func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
@@ -89,7 +86,7 @@ func EncodeContentRequestTerms(terms *ContentRequestTerms) ([]byte, error) {
 	return canonicalEnc.Marshal([]any{
 		contentProtocolVersion,
 		bstr(terms.QuoteTermsHash),
-		bstr(terms.SpendTxID),
+		bstr(terms.RefundTemplateTxID),
 		terms.BasePaymentSequence,
 		terms.PaymentSequenceAfter,
 		terms.SellerAmountAfterSat,
@@ -118,8 +115,8 @@ func DecodeContentRequestTerms(data []byte) (*ContentRequestTerms, error) {
 	if err := decode(values[1], &terms.QuoteTermsHash); err != nil {
 		return nil, fmt.Errorf("%w: quote_terms_hash: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[2], &terms.SpendTxID); err != nil {
-		return nil, fmt.Errorf("%w: spend_txid: %v", ErrInvalidEvidence, err)
+	if err := decode(values[2], &terms.RefundTemplateTxID); err != nil {
+		return nil, fmt.Errorf("%w: refund_template_txid: %v", ErrInvalidEvidence, err)
 	}
 	if err := decode(values[3], &terms.BasePaymentSequence); err != nil {
 		return nil, fmt.Errorf("%w: base_payment_sequence: %v", ErrInvalidEvidence, err)
@@ -172,27 +169,29 @@ func PaymentAuthorizationHash(termsCBOR []byte) (Hash32, error) {
 	return Hash32(sha256.Sum256(termsCBOR)), nil
 }
 
-// NewSignedContentRequest deterministically encodes request terms and asks the
-// buyer-supplied signer to sign those exact bytes. The callback must apply the
-// single SHA-256 digest and return DER-only bytes; the fixed verifier checks
-// the signature before the credential is returned.
-func NewSignedContentRequest(terms *ContentRequestTerms, signer ContentTermsSigner) (*SignedContentRequest, error) {
-	if signer == nil {
-		return nil, errors.New("content request signer is required")
+// NewSignedContentRequest deterministically encodes request terms and signs
+// those exact bytes with the official BSV private key through the fixed
+// single-SHA-256 message path. The derived public key must match
+// terms.BuyerPubkey, and the fixed verifier re-checks the signature before the
+// credential is returned. The private key never enters any wire message,
+// local result, log, or persisted structure.
+func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error) {
+	if buyerKey == nil {
+		return nil, errors.New("buyer private key is required")
+	}
+	if !bytes.Equal(buyerKey.PubKey().Compressed(), terms.BuyerPubkey) {
+		return nil, fmt.Errorf("%w: buyer private key does not match request terms pubkey", ErrInvalidEvidence)
 	}
 	termsCBOR, err := EncodeContentRequestTerms(terms)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signer(termsCBOR)
+	signature, err := SignMessage(buyerKey, termsCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("sign content request terms: %w", err)
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("buyer signature is required")
-	}
-	if err := VerifySignature(terms.BuyerPubkey, termsCBOR, signature); err != nil {
-		return nil, fmt.Errorf("%w: buyer signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedContentRequest{
 		TermsCBOR:      append([]byte(nil), termsCBOR...),
@@ -252,6 +251,7 @@ func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 	}
 	return canonicalEnc.Marshal([]any{
 		contentProtocolVersion,
+		bstr(terms.RefundTemplateTxID),
 		bstr(terms.PaymentAuthorizationHash),
 		bstr(terms.ContentBytes),
 	})
@@ -260,7 +260,7 @@ func EncodeContentDeliveryTerms(terms *ContentDeliveryTerms) ([]byte, error) {
 // DecodeContentDeliveryTerms decodes canonical 004 terms and validates its fixed
 // array shape and byte-field lengths.
 func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
-	values, err := decodeArray(data, 3)
+	values, err := decodeArray(data, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode content delivery terms: %v", ErrInvalidEvidence, err)
 	}
@@ -269,10 +269,13 @@ func DecodeContentDeliveryTerms(data []byte) (*ContentDeliveryTerms, error) {
 	if err := decode(values[0], &version); err != nil || version != contentProtocolVersion {
 		return nil, fmt.Errorf("%w: unsupported content delivery terms version", ErrInvalidEvidence)
 	}
-	if err := decode(values[1], &terms.PaymentAuthorizationHash); err != nil {
-		return nil, fmt.Errorf("%w: request terms hash: %v", ErrInvalidEvidence, err)
+	if err := decode(values[1], &terms.RefundTemplateTxID); err != nil {
+		return nil, fmt.Errorf("%w: refund_template_txid: %v", ErrInvalidEvidence, err)
 	}
-	if err := decode(values[2], &terms.ContentBytes); err != nil {
+	if err := decode(values[2], &terms.PaymentAuthorizationHash); err != nil {
+		return nil, fmt.Errorf("%w: payment_authorization_hash: %v", ErrInvalidEvidence, err)
+	}
+	if err := decode(values[3], &terms.ContentBytes); err != nil {
 		return nil, fmt.Errorf("%w: content bytes: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateContentDeliveryTerms(terms); err != nil {
@@ -297,13 +300,13 @@ func ContentDeliveryTermsHash(termsCBOR []byte) (Hash32, error) {
 }
 
 // NewSignedContentDelivery binds payload bytes to the request authorization
-// hash and asks signer to sign the resulting deterministic delivery terms.
-// The callback must apply the single SHA-256 digest and return DER-only bytes;
-// the fixed verifier checks it against the seller key committed by the request
-// before the credential is returned.
-func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, signer ContentTermsSigner) (*SignedContentDelivery, error) {
-	if signer == nil {
-		return nil, errors.New("content delivery signer is required")
+// hash and signs the resulting deterministic delivery terms with the official
+// BSV private key through the fixed single-SHA-256 message path. The derived
+// public key must match the seller key committed by the request, and the fixed
+// verifier re-checks the signature before the credential is returned.
+func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error) {
+	if sellerKey == nil {
+		return nil, errors.New("seller private key is required")
 	}
 	if request == nil {
 		return nil, errors.New("signed content request is required")
@@ -312,26 +315,27 @@ func NewSignedContentDelivery(request *SignedContentRequest, payload []byte, sig
 	if err != nil {
 		return nil, err
 	}
+	requestTerms, err := DecodeContentRequestTerms(request.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(sellerKey.PubKey().Compressed(), requestTerms.SellerPubkey) {
+		return nil, fmt.Errorf("%w: seller private key does not match request terms pubkey", ErrInvalidEvidence)
+	}
 	terms, err := EncodeContentDeliveryTerms(&ContentDeliveryTerms{
+		RefundTemplateTxID:       append([]byte(nil), requestTerms.RefundTemplateTxID...),
 		PaymentAuthorizationHash: requestHash[:],
 		ContentBytes:             append([]byte(nil), payload...),
 	})
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signer(terms)
+	signature, err := SignMessage(sellerKey, terms)
 	if err != nil {
 		return nil, fmt.Errorf("sign content delivery terms: %w", err)
 	}
 	if len(signature) == 0 {
 		return nil, errors.New("seller signature is required")
-	}
-	requestTerms, err := DecodeContentRequestTerms(request.TermsCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := VerifySignature(requestTerms.SellerPubkey, terms, signature); err != nil {
-		return nil, fmt.Errorf("%w: seller signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedContentDelivery{TermsCBOR: terms, SellerSignature: append([]byte(nil), signature...)}, nil
 }
@@ -380,6 +384,17 @@ func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
 	return cloneSignedContentDelivery(delivery), nil
 }
 
+// refundTemplateTxIDIsZero reports whether a decoded hash is the all-zero "unset"
+// sentinel, which must never enter encoding, storage, or network paths.
+func refundTemplateTxIDIsZero(raw []byte) bool {
+	for _, b := range raw {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidateContentRequestTerms checks the 003 version, quote hash, pool reference,
 // content selector, arbiter key, size, and delivery deadline before signing.
 func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
@@ -389,8 +404,11 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 	if len(terms.QuoteTermsHash) != sha256.Size {
 		return errors.New("quote_terms_hash must be 32 bytes")
 	}
-	if len(terms.SpendTxID) != sha256.Size {
-		return errors.New("spend_txid must be 32 bytes")
+	if len(terms.RefundTemplateTxID) != sha256.Size {
+		return errors.New("refund_template_txid must be 32 bytes")
+	}
+	if refundTemplateTxIDIsZero(terms.RefundTemplateTxID) {
+		return errors.New("refund_template_txid must not be all zero")
 	}
 	if terms.PaymentSequenceAfter == 0 || terms.BasePaymentSequence == ^uint64(0) || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) {
 		return errors.New("payment_sequence_after must equal base_payment_sequence plus one")
@@ -421,6 +439,12 @@ func ValidateContentRequestTerms(terms *ContentRequestTerms) error {
 func ValidateContentDeliveryTerms(terms *ContentDeliveryTerms) error {
 	if terms == nil {
 		return errors.New("content delivery terms are required")
+	}
+	if len(terms.RefundTemplateTxID) != sha256.Size {
+		return errors.New("refund_template_txid must be 32 bytes")
+	}
+	if refundTemplateTxIDIsZero(terms.RefundTemplateTxID) {
+		return errors.New("refund_template_txid must not be all zero")
 	}
 	if len(terms.PaymentAuthorizationHash) != sha256.Size {
 		return errors.New("payment_authorization_hash must be 32 bytes")
@@ -556,19 +580,59 @@ func mapMasterSeedError(err error) error {
 	return errors.Join(ErrInvalidEvidence, err)
 }
 
-// VerifySignedContentRequestAt verifies the quote binding, buyer signature,
-// arbiter selection and request deadline. Pool ownership and current sequence
-// are deliberately delegated to the pool workflow layer.
-func VerifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	return verifySignedContentRequestAtContext(context.Background(), request, quote, now, quoteVerifier, buyerVerifier, nil, false)
+// VerifySignedContentRequest verifies the quote binding, buyer signature,
+// arbiter selection, quote expiry, and request deadline. It reads system UTC
+// exactly once at entry and uses only the fixed SDK verifiers.
+func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, error) {
+	at := protoclock.Now()
+	terms, quoteTerms, err := verifyContentRequestEvidence(context.Background(), request, quote, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	return terms, nil
+}
+
+// VerifySignedContentRequestWithSeed additionally proves that a block hash is
+// present in the quote's seed. It reads UTC once at entry like every other
+// public verification entry point.
+func VerifySignedContentRequestWithSeed(request *SignedContentRequest, quote *SignedFileQuote, seed []byte) (*ContentRequestTerms, error) {
+	at := protoclock.Now()
+	terms, quoteTerms, err := verifyContentRequestEvidence(context.Background(), request, quote, seed, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkContentRequestTiming(terms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	return terms, nil
+}
+
+// checkContentRequestTiming 应用 003 请求的两项当前时间比较：报价过期与交付
+// 截止。at 必须是公开入口唯一一次读取的时间；跨包调用方用返回的 terms 自行
+// 做同样的纯比较（见 buyer/seller 包内同名逻辑）。
+func checkContentRequestTiming(terms *ContentRequestTerms, quoteTerms *FileQuoteTerms, at time.Time) error {
+	if !at.Before(time.Unix(quoteTerms.QuoteExpiresAtUnix, 0)) {
+		return fmt.Errorf("%w: file quote is expired", ErrQuoteExpired)
+	}
+	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
+		return fmt.Errorf("%w: delivery deadline has passed", ErrDeliveryDeadline)
+	}
+	if terms.DeliveryDeadlineUnix > quoteTerms.QuoteExpiresAtUnix {
+		return fmt.Errorf("%w: delivery deadline exceeds quote expiry", ErrDeliveryDeadline)
+	}
+	return nil
 }
 
 // VerifySignedContentRequestStandalone verifies the self-contained buyer
-// authorization used by arbitration. It deliberately does not load or
-// validate a quote, delivery, payload, or payment history.
-func VerifySignedContentRequestStandalone(request *SignedContentRequest, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	if request == nil || buyerVerifier == nil {
-		return nil, errors.New("signed content request and buyer verifier are required")
+// authorization used by arbitration with the fixed SDK verifier. It
+// deliberately does not load or validate a quote, delivery, payload, or
+// payment history.
+func VerifySignedContentRequestStandalone(request *SignedContentRequest) (*ContentRequestTerms, error) {
+	if request == nil {
+		return nil, errors.New("signed content request is required")
 	}
 	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
 	if err != nil {
@@ -577,129 +641,125 @@ func VerifySignedContentRequestStandalone(request *SignedContentRequest, buyerVe
 	if terms.PaymentSequenceAfter == 0 || terms.PaymentSequenceAfter != terms.BasePaymentSequence+1 || terms.PaymentSequenceAfter > uint64(^uint32(0)-1) || len(terms.BuyerPubkey) == 0 || len(terms.SellerPubkey) == 0 {
 		return nil, fmt.Errorf("%w: final payment authorization economic fields are incomplete", ErrInvalidEvidence)
 	}
-	if err := buyerVerifier(terms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
+	if err := VerifySignature(terms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
 		return nil, fmt.Errorf("%w: buyer authorization signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return terms, nil
 }
 
-// VerifySignedContentRequestWithSeedAt is the workflow-level form of
-// VerifySignedContentRequestAt. It additionally proves that a block hash is
-// present in the quote's seed.
-func VerifySignedContentRequestWithSeedAt(request *SignedContentRequest, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	return VerifySignedContentRequestWithSeedAtContext(context.Background(), request, quote, seed, now, quoteVerifier, buyerVerifier)
+// VerifyContentRequestEvidence 验证时间无关的 003 证据：结构、报价绑定、
+// 参与方密钥、仲裁者选择、内容引用和买方签名。它不检查报价过期或交付截止
+// 时间；调用方用返回的 terms 与报价 terms 结合自己读取的一次时间判断。
+func VerifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote) (*ContentRequestTerms, *FileQuoteTerms, error) {
+	return verifyContentRequestEvidence(context.Background(), request, quote, nil, false)
 }
 
-// VerifySignedContentRequestWithSeedAtContext is the context-aware workflow
-// verifier; cancellation is propagated through seed scanning.
-func VerifySignedContentRequestWithSeedAtContext(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier) (*ContentRequestTerms, error) {
-	return verifySignedContentRequestAtContext(ctx, request, quote, now, quoteVerifier, buyerVerifier, seed, true)
+func VerifyContentRequestEvidenceWithSeed(request *SignedContentRequest, quote *SignedFileQuote, seed []byte) (*ContentRequestTerms, *FileQuoteTerms, error) {
+	return verifyContentRequestEvidence(context.Background(), request, quote, seed, true)
 }
 
-func verifySignedContentRequestAt(request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, error) {
-	return verifySignedContentRequestAtContext(context.Background(), request, quote, now, quoteVerifier, buyerVerifier, seed, requireBlockMembership)
+func VerifyContentDeliveryEvidence(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
+	return verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, nil, false)
 }
 
-func verifySignedContentRequestAtContext(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, error) {
+func VerifyContentDeliveryEvidenceWithSeed(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
+	return verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, seed, true)
+}
+
+// verifyContentRequestEvidence 是时间无关的 003 纯证据验证。
+func verifyContentRequestEvidence(ctx context.Context, request *SignedContentRequest, quote *SignedFileQuote, seed []byte, requireBlockMembership bool) (*ContentRequestTerms, *FileQuoteTerms, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
-		return nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
+		return nil, nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
 	}
-	quoteTerms, err := VerifySignedFileQuoteAt(quote, now, quoteVerifier)
+	quoteTerms, err := VerifyFileQuoteEvidence(quote)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	terms, err := DecodeContentRequestTerms(request.TermsCBOR)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	quoteHash, _ := FileQuoteTermsHash(quote.TermsCBOR)
 	if !bytes.Equal(terms.QuoteTermsHash, quoteHash[:]) {
-		return nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
+		return nil, nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
 	}
 	if !bytes.Equal(terms.BuyerPubkey, quoteTerms.BuyerPubkey) || !bytes.Equal(terms.SellerPubkey, quote.SellerPubkey) {
-		return nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
-	}
-	if !now.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
-		return nil, fmt.Errorf("%w: delivery deadline has passed", ErrDeliveryDeadline)
-	}
-	if terms.DeliveryDeadlineUnix > quoteTerms.QuoteExpiresAtUnix {
-		return nil, fmt.Errorf("%w: delivery deadline exceeds quote expiry", ErrDeliveryDeadline)
+		return nil, nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
 	}
 	if err := VerifyContentReferenceContext(ctx, quoteTerms, terms.ContentType, terms.ContentHash, seed, requireBlockMembership); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !containsBytes(quoteTerms.SupportedArbiterPubkeysCBOR, terms.SelectedArbiterPubkey) {
-		return nil, fmt.Errorf("%w: selected arbiter is not allowed by quote", ErrInvalidEvidence)
+		return nil, nil, fmt.Errorf("%w: selected arbiter is not allowed by quote", ErrInvalidEvidence)
 	}
-	if buyerVerifier == nil {
-		return nil, errors.New("buyer signature verifier is required")
+	if err := VerifySignature(quoteTerms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
+		return nil, nil, fmt.Errorf("%w: buyer signature invalid: %v", ErrInvalidEvidence, err)
 	}
-	if err := buyerVerifier(quoteTerms.BuyerPubkey, request.TermsCBOR, request.BuyerSignature); err != nil {
-		return nil, fmt.Errorf("%w: buyer signature invalid: %v", ErrInvalidEvidence, err)
-	}
-	return terms, nil
+	return terms, quoteTerms, nil
 }
 
-// VerifySignedContentDeliveryAt verifies the exact request reference, seller
-// signature and raw content hash. The caller may additionally validate a block
-// against a previously received seed index.
-func VerifySignedContentDeliveryAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
-	return verifySignedContentDeliveryAtContext(context.Background(), request, delivery, quote, nil, now, quoteVerifier, buyerVerifier, sellerVerifier, false)
-}
-
-// VerifySignedContentDeliveryWithSeedAt additionally validates block
-// membership and the exact full/tail block size derived from the seed.
-func VerifySignedContentDeliveryWithSeedAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
-	return VerifySignedContentDeliveryWithSeedAtContext(context.Background(), request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier)
-}
-
-func verifySignedContentDeliveryAt(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier, requireBlockMembership bool) ([]byte, error) {
-	return verifySignedContentDeliveryAtContext(context.Background(), request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier, requireBlockMembership)
-}
-
-// VerifySignedContentDeliveryWithSeedAtContext verifies delivery content with
-// a caller-owned seed while preserving cancellation during seed scans.
-func VerifySignedContentDeliveryWithSeedAtContext(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier) ([]byte, error) {
-	return verifySignedContentDeliveryAtContext(ctx, request, delivery, quote, seed, now, quoteVerifier, buyerVerifier, sellerVerifier, true)
-}
-
-func verifySignedContentDeliveryAtContext(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, now time.Time, quoteVerifier QuoteTermsSignatureVerifier, buyerVerifier ContentTermsSignatureVerifier, sellerVerifier ContentTermsSignatureVerifier, requireBlockMembership bool) ([]byte, error) {
+// verifyContentDeliveryEvidence 是时间无关的 004 纯证据验证；payload 校验中
+// 的块扫描保持不变，但所有"是否已过期/超时"的比较都留给公开入口或调用方。
+func verifyContentDeliveryEvidence(ctx context.Context, request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte, requireBlockMembership bool) ([]byte, *ContentRequestTerms, *FileQuoteTerms, error) {
 	if delivery == nil || len(delivery.SellerSignature) == 0 {
-		return nil, fmt.Errorf("%w: signed content delivery is required", ErrInvalidEvidence)
+		return nil, nil, nil, fmt.Errorf("%w: signed content delivery is required", ErrInvalidEvidence)
 	}
 	requestSeed := seed
 	requestMembership := requireBlockMembership
-	// Payload verification performs the single authoritative block scan; the
-	// request half still validates all signatures and quote bindings first.
 	if requireBlockMembership {
 		requestSeed, requestMembership = nil, false
 	}
-	requestTerms, err := verifySignedContentRequestAtContext(ctx, request, quote, now, quoteVerifier, buyerVerifier, requestSeed, requestMembership)
+	requestTerms, quoteTerms, err := verifyContentRequestEvidence(ctx, request, quote, requestSeed, requestMembership)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	deliveryTerms, err := DecodeContentDeliveryTerms(delivery.TermsCBOR)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
+	}
+	if !bytes.Equal(deliveryTerms.RefundTemplateTxID, requestTerms.RefundTemplateTxID) {
+		return nil, nil, nil, fmt.Errorf("%w: delivery refund_template_txid does not reference supplied request", ErrInvalidEvidence)
 	}
 	requestHash, _ := PaymentAuthorizationHash(request.TermsCBOR)
 	if !bytes.Equal(deliveryTerms.PaymentAuthorizationHash, requestHash[:]) {
-		return nil, fmt.Errorf("%w: delivery does not reference supplied request", ErrInvalidEvidence)
+		return nil, nil, nil, fmt.Errorf("%w: delivery does not reference supplied request", ErrInvalidEvidence)
 	}
-	if sellerVerifier == nil {
-		return nil, errors.New("seller signature verifier is required")
+	if err := VerifySignature(quote.SellerPubkey, delivery.TermsCBOR, delivery.SellerSignature); err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: seller signature invalid: %v", ErrInvalidEvidence, err)
 	}
-	if err := sellerVerifier(quote.SellerPubkey, delivery.TermsCBOR, delivery.SellerSignature); err != nil {
-		return nil, fmt.Errorf("%w: seller signature invalid: %v", ErrInvalidEvidence, err)
+	if err := VerifyContentPayloadContext(ctx, quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, deliveryTerms.ContentBytes, seed, requireBlockMembership); err != nil {
+		return nil, nil, nil, err
 	}
-	quoteTerms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	return append([]byte(nil), deliveryTerms.ContentBytes...), requestTerms, quoteTerms, nil
+}
+
+// VerifySignedContentDelivery verifies the exact request reference, seller
+// signature, content binding and the 003 timing facts (quote expiry, delivery
+// deadline) with system UTC read exactly once at entry.
+func VerifySignedContentDelivery(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote) ([]byte, error) {
+	at := protoclock.Now()
+	payload, requestTerms, quoteTerms, err := verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, nil, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := VerifyContentPayloadContext(ctx, quoteTerms, requestTerms.ContentType, requestTerms.ContentHash, deliveryTerms.ContentBytes, seed, requireBlockMembership); err != nil {
+	if err := checkContentRequestTiming(requestTerms, quoteTerms, at); err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), deliveryTerms.ContentBytes...), nil
+	return payload, nil
+}
+
+// VerifySignedContentDeliveryWithSeed additionally validates block membership
+// and the exact full/tail block size derived from a caller-owned seed.
+func VerifySignedContentDeliveryWithSeed(request *SignedContentRequest, delivery *SignedContentDelivery, quote *SignedFileQuote, seed []byte) ([]byte, error) {
+	at := protoclock.Now()
+	payload, requestTerms, quoteTerms, err := verifyContentDeliveryEvidence(context.Background(), request, delivery, quote, seed, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkContentRequestTiming(requestTerms, quoteTerms, at); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 func containsBytes(encodedPubkeys []byte, wanted []byte) bool {
@@ -721,7 +781,7 @@ func cloneContentRequestTerms(terms *ContentRequestTerms) *ContentRequestTerms {
 	}
 	cloned := *terms
 	cloned.QuoteTermsHash = append([]byte(nil), terms.QuoteTermsHash...)
-	cloned.SpendTxID = append([]byte(nil), terms.SpendTxID...)
+	cloned.RefundTemplateTxID = append([]byte(nil), terms.RefundTemplateTxID...)
 	cloned.BuyerPubkey = append([]byte(nil), terms.BuyerPubkey...)
 	cloned.SellerPubkey = append([]byte(nil), terms.SellerPubkey...)
 	cloned.SelectedArbiterPubkey = append([]byte(nil), terms.SelectedArbiterPubkey...)
@@ -740,7 +800,7 @@ func cloneContentDeliveryTerms(terms *ContentDeliveryTerms) *ContentDeliveryTerm
 	if terms == nil {
 		return nil
 	}
-	return &ContentDeliveryTerms{PaymentAuthorizationHash: append([]byte(nil), terms.PaymentAuthorizationHash...), ContentBytes: append([]byte(nil), terms.ContentBytes...)}
+	return &ContentDeliveryTerms{RefundTemplateTxID: append([]byte(nil), terms.RefundTemplateTxID...), PaymentAuthorizationHash: append([]byte(nil), terms.PaymentAuthorizationHash...), ContentBytes: append([]byte(nil), terms.ContentBytes...)}
 }
 
 func cloneSignedContentDelivery(delivery *SignedContentDelivery) *SignedContentDelivery {

@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"context"
 	"crypto/sha256"
 )
 
@@ -30,11 +29,17 @@ const PoolOutputIndex uint32 = 0
 // 切片，因此可以直接比较，也能保证值始终具有 SHA-256 的固定宽度。
 type Hash32 [sha256.Size]byte
 
+// RefundTemplateTxID 是费用池的统一关联 ID：未嵌入角色签名的规范退款模板
+// 交易的 TxID。它只标识资金池本身，不标识同一资金池内的某次关闭或付款尝试，
+// 也不是最终广播退款交易的链上 txid。普通内容哈希继续使用各自的 Hash32，
+// 不能把所有 32 字节值混成资金池关联 ID。
+type RefundTemplateTxID [sha256.Size]byte
+
 // Reference 标识内容请求所使用的结算资金池以及请求建立在其上的付款序号。
 type Reference struct {
-	// SpendTxID 是资金池的支出锚点，即预签名退款交易的交易 ID。
-	// 后续付款状态和内容请求都必须属于该资金池。
-	SpendTxID Hash32
+	// RefundTemplateTxID 是费用池的统一关联 ID，即未嵌入角色签名的规范退款
+	// 模板交易的交易 ID。后续付款状态和内容请求都必须属于该资金池。
+	RefundTemplateTxID RefundTemplateTxID
 	// BasePaymentSequence 是内容请求发起前已接受状态的付款序号。
 	// 内容交付产生的新付款通常必须以该序号为基准，并递增一个序号。
 	BasePaymentSequence uint32
@@ -49,7 +54,7 @@ type OpeningProof struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
 	// RefundTx 是预签名退款交易的原始序列化字节。
-	// 该交易构成资金池的支出锚点，并由买方和卖方共同提供退款签名。
+	// 该交易构成资金池的关联 ID 源，并由买方和卖方共同提供退款签名。
 	RefundTx []byte
 	// BuyerPubKey 是买方的 33 字节压缩 secp256k1 公钥。
 	BuyerPubKey []byte
@@ -71,10 +76,14 @@ type OpeningProof struct {
 // OpeningDetails 是从 OpeningProof 原始证据即时计算出的只读视图。
 // 它不属于协议消息，也不会被编码或持久化为 OpeningProof 的字段。
 type OpeningDetails struct {
-	SpendTxID          Hash32
+	RefundTemplateTxID RefundTemplateTxID
 	FundingTxID        Hash32
 	PoolOutputSatoshis uint64
 	PoolLockingScript  []byte
+	// RefundLockTime 是从规范退款模板派生的 nLockTime 原始值，供 SDK 内部
+	// 协议操作和调用方审计使用。公开 Workflow 的当前时间判断始终由 SDK 读取
+	// 系统 UTC；调用方只提供区块高度。
+	RefundLockTime uint32
 }
 
 // RefundPresignRequest 包含买方请求卖方预签退款交易时发送的开池条款和交易材料。
@@ -99,30 +108,41 @@ type RefundPresignRequest struct {
 	BuyerRefundSignature []byte
 }
 
-// RefundPresignResponse 携带卖方对预签名退款交易的 DER 签名。
+// RefundPresignResponse 携带卖方对预签名退款交易的 DER 签名以及该请求的
+// 统一关联 ID。
 type RefundPresignResponse struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
+	// RefundTemplateTxID 是费用池统一关联 ID，由卖方从收到的 request 的
+	// 规范退款模板重新派生，不允许调用方任意填写。
+	RefundTemplateTxID RefundTemplateTxID
 	// SellerRefundSignature 是卖方对 RefundPresignRequest.RefundTx 的签名原始字节。
 	SellerRefundSignature []byte
 }
 
-// FundingTxDelivery 携带买方在退款交易验证完成后公开的、已由买方签名的资金交易。
+// FundingTxDelivery 携带买方在退款交易验证完成后公开的、已由买方签名的资金交易，
+// 以及用于路由到对应费用池的统一关联 ID。
 type FundingTxDelivery struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
+	// RefundTemplateTxID 是费用池统一关联 ID，只能从买方已验证的 OpeningProof
+	// 派生，不得由调用方另行拼接。
+	RefundTemplateTxID RefundTemplateTxID
 	// FundingTx 是买方资金交易的原始序列化字节，卖方据此验证交易 ID、输入和池输出。
 	FundingTx []byte
 }
 
 // PaymentUpdate 是 v4 协议 005 使用的付款更新传输容器。
 //
-// 它携带未签名的状态交易和独立传输的买方签名，绝不携带只有部分解锁
-// 脚本的交易。接收方应分别验证授权哈希、交易内容和买方签名，然后再与
-// 卖方签名合并为可接受的 PaymentState。
+// 它携带费用池统一关联 ID、未签名的状态交易和独立传输的买方签名，绝不携带
+// 只有部分解锁脚本的交易。接收方应分别验证关联 ID、授权哈希、交易内容和
+// 买方签名，然后再与卖方签名合并为可接受的 PaymentState。
 type PaymentUpdate struct {
 	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
 	Version uint64
+	// RefundTemplateTxID 是费用池统一关联 ID，即未嵌入角色签名的规范退款
+	// 模板交易 ID。它不是买方交易签名的替代物。
+	RefundTemplateTxID RefundTemplateTxID
 	// PaymentAuthorizationHash 是内容请求条款规范编码的 SHA-256 哈希，长度固定为 32 字节。
 	// 它把本次付款绑定到具体的内容授权，而不是仅绑定到交易字节。
 	PaymentAuthorizationHash []byte
@@ -134,15 +154,17 @@ type PaymentUpdate struct {
 	BuyerTransactionSignature []byte
 }
 
-// PaymentState 表示节点已经接受的、签名完整合并后的付款状态。
+// PaymentState 表示角色签名完整合并后的付款状态。
 //
 // RawTx 必须是完整可验证的交易，不能是未签名交易，也不能是只有一个角色
 // 签名的中间交易。若工作流需要跨 API 边界传递独立签名，可以保存在下面的
-// 签名字段中，但这些字段不改变 RawTx 必须完整的约束。
+// 签名字段中，但这些字段不改变 RawTx 必须完整的约束。是否已被节点接受由
+// 调用方根据自己的广播与对账结果决定，SDK 不做此声明。
 type PaymentState struct {
-	// SpendTxID 是该付款所属资金池的支出锚点，即预签名退款交易 ID。
-	SpendTxID Hash32
-	// RawTx 是节点接受的完整付款状态交易原始字节。
+	// RefundTemplateTxID 是该付款所属费用池的统一关联 ID，即未嵌入角色签名的
+	// 规范退款模板交易 ID，而非最终链上退款 txid。
+	RefundTemplateTxID RefundTemplateTxID
+	// RawTx 是签名完整的付款状态交易原始字节。
 	RawTx []byte
 	// PaymentSequence 是该状态在资金池付款链中的序号。
 	// 普通内容交付更新必须相对于上一状态恰好递增 1。
@@ -180,8 +202,9 @@ type SignedPayment struct {
 // 它只描述未签名交易及其可验证的状态元数据，不包含解锁脚本，也不包含
 // 任何嵌入式签名；各角色应在此对象基础上独立生成签名。
 type UnsignedPayment struct {
-	// SpendTxID 是该付款所属资金池的支出锚点，即预签名退款交易 ID。
-	SpendTxID Hash32
+	// RefundTemplateTxID 是该付款所属费用池的统一关联 ID，即未嵌入角色签名的
+	// 规范退款模板交易 ID。
+	RefundTemplateTxID RefundTemplateTxID
 	// RawTx 是未签名付款交易的原始字节，不得包含解锁脚本或交易签名。
 	RawTx []byte
 	// PaymentSequence 是待签名付款状态的序号。
@@ -202,7 +225,7 @@ type UnsignedPayment struct {
 type PaymentUpdateInput struct {
 	// Opening 是用于验证资金池身份、输出和参与方密钥的开池证据。
 	Opening *OpeningProof
-	// Previous 是上一笔已被接受的付款状态；首次构造付款时可表示初始退款状态。
+	// Previous 是上一笔已接受的付款状态；首次构造付款时可表示初始退款状态。
 	Previous *PaymentState
 	// PaymentSequenceAfter 是新付款状态的目标序号，通常必须为上一序号加 1。
 	PaymentSequenceAfter uint32
@@ -210,115 +233,16 @@ type PaymentUpdateInput struct {
 	SellerAmountAfterSat uint64
 }
 
-// CloseInput 提供立即关闭资金池、构造最终付款交易所需的开池证据和最新状态。
+// CloseInput 提供立即关闭资金池、构造最终付款交易所需的开池证据、调用方
+// 选定的基准状态和业务目标金额。Base 是否为业务最新状态、目标金额是否符合
+// 订单或账本，由调用方决定；SDK 只验证协议编码与守恒边界。
 type CloseInput struct {
 	// Opening 是用于验证资金池身份和多签交易规则的开池证据。
 	Opening *OpeningProof
-	// Latest 是当前已接受的最新付款状态，关闭交易应从该状态继续构造。
-	Latest *PaymentState
-	// SellerAmountAfterSat 是最终关闭状态中卖方的累计金额，单位为 satoshi。
+	// Base 是调用方选定的基准付款状态；SDK 不声称它是数据库最新状态。
+	Base *PaymentState
+	// SellerAmountAfterSat 是候选最终关闭状态中卖方的累计金额，单位为 satoshi。
 	SellerAmountAfterSat uint64
-}
-
-// UpdateAcceptance 描述节点接受一笔非最终付款更新后的结果。
-type UpdateAcceptance struct {
-	// TxID 是节点接受的付款更新交易 ID。
-	TxID Hash32
-	// SpendTxID 是该更新所属资金池的支出锚点。
-	SpendTxID Hash32
-	// PaymentSequence 是节点接受的付款状态序号。
-	PaymentSequence uint32
-}
-
-// OpeningProofStore 按 SpendTxID 持久化和读取已验证的 002 开池证据。
-// SpendTxID 是预签名退款交易证据的规范交易 ID，也是资金池的稳定主键。
-type OpeningProofStore interface {
-	// SaveOpeningProof 保存开池证据；实现通常应校验其身份与已有记录一致。
-	SaveOpeningProof(context.Context, *OpeningProof) error
-	// LoadOpeningProof 根据资金池支出锚点读取开池证据。
-	LoadOpeningProof(context.Context, Hash32) (*OpeningProof, error)
-}
-
-// PendingOpeningProofStore 在资金交易尚未被接受前保存开池证据，
-// 并允许在资金交易原文公开后按 FundingTxID 找回该证据。
-type PendingOpeningProofStore interface {
-	// SaveOpeningProof 保存尚未完成资金交付确认的开池证据。
-	SaveOpeningProof(context.Context, *OpeningProof) error
-	// LoadOpeningProofByFundingTxID 根据公开的资金交易 ID 读取对应开池证据。
-	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
-}
-
-// PoolStore 汇合开池证据、已接受付款状态的持久化能力，以及资金池健康检查和关闭对账能力。
-// 内容交付使用的并发租约由 PendingRequestStore 单独提供。
-type PoolStore interface {
-	OpeningProofStore
-	// LoadOpeningProofByFundingTxID 根据资金交易 ID 读取开池证据。
-	LoadOpeningProofByFundingTxID(context.Context, Hash32) (*OpeningProof, error)
-	// SaveAcceptedPayment 保存节点已接受的完整付款状态。
-	SaveAcceptedPayment(context.Context, *PaymentState) error
-	// LoadAcceptedPayment 根据资金池支出锚点读取当前已接受付款状态。
-	LoadAcceptedPayment(context.Context, Hash32) (*PaymentState, error)
-	// EnsurePoolHealthy 检查资金池是否处于可继续付款的健康状态。
-	EnsurePoolHealthy(context.Context, Hash32) error
-	// EnsurePoolOpen 检查资金池是否仍处于开放状态。
-	EnsurePoolOpen(context.Context, Hash32) error
-	// MarkPoolClosing 将资金池标记为正在关闭，阻止不兼容的新付款进入。
-	MarkPoolClosing(context.Context, Hash32) error
-	// ReconcilePoolClosing 对正在关闭的资金池执行外部链状态对账。
-	ReconcilePoolClosing(context.Context, Hash32) error
-	// MarkExternalStateUncertain 标记本地提交结果与外部节点结果不明确的状态。
-	MarkExternalStateUncertain(context.Context, Hash32, Hash32) error
-	// ReconcileExternalState 根据外部状态重新确认本地付款状态。
-	ReconcileExternalState(context.Context, Hash32, *PaymentState) error
-}
-
-// PendingRequest 记录内容交付租约的归属及其基准状态，用于串行化同一资金池的交付操作。
-type PendingRequest struct {
-	// SpendTxID 是该租约保护的资金池支出锚点。
-	SpendTxID Hash32
-	// BasePaymentSequence 是内容交付前已接受状态的付款序号。
-	BasePaymentSequence uint32
-	// BaseSellerAmountSat 是内容交付前已接受状态中的卖方累计金额，单位为 satoshi。
-	BaseSellerAmountSat uint64
-	// ContentRequestHash 是已签名 003 内容请求规范条款的哈希值。
-	ContentRequestHash Hash32
-	// ExpectedSellerAmountSat 是本次交付承诺增加给卖方的精确金额，单位为 satoshi。
-	ExpectedSellerAmountSat uint64
-}
-
-// PendingAcquireResult 表示交付租约的获取结果：新获取、同一请求已持有，或发生所有权冲突。
-type PendingAcquireResult uint8
-
-const (
-	// PendingAcquired 表示已成功获取该资金池的交付租约。
-	PendingAcquired PendingAcquireResult = 1
-	// PendingAlreadyHeld 表示完全相同的内容请求已经持有该租约，可按幂等请求处理。
-	PendingAlreadyHeld PendingAcquireResult = 2
-	// PendingConflict 表示当前请求哈希与已有租约所有者冲突，不能并行交付。
-	PendingConflict PendingAcquireResult = 3
-)
-
-// PendingRequestStore 管理以资金池支出交易 ID 为键的内容请求交付租约。
-type PendingRequestStore interface {
-	// TryAcquire 尝试获取请求中的交付租约，并返回获取、已持有或冲突结果。
-	TryAcquire(context.Context, PendingRequest) (PendingAcquireResult, error)
-	// Load 读取指定资金池当前持有的交付租约；不存在时由实现返回相应错误或空值。
-	Load(context.Context, Hash32) (*PendingRequest, error)
-	// Release 释放指定资金池上由给定内容请求哈希持有的租约。
-	Release(context.Context, Hash32, Hash32) error
-}
-
-// Signer 向资金池工作流提供规范的压缩公钥和仅生成 DER 签名的基础签名能力。
-//
-// PublicKey 必须返回有效的 33 字节压缩 secp256k1 公钥。角色工作流传入的
-// message 始终是 SDK 计算出的 32 字节摘要：001/003/004 消息使用规范 CBOR
-// 字节执行一次 SHA-256，资金池交易则使用固定的 sighash 摘要。实现应只返回
-// DER 签名，并将私钥保管在 SDK 之外。
-type Signer interface {
-	// PublicKey 返回当前签名角色的规范压缩 secp256k1 公钥。
-	PublicKey(context.Context) ([]byte, error)
-	// Sign 对给定的 32 字节摘要签名，并返回不包含额外封装的 DER 签名。
-	Sign(context.Context, []byte) ([]byte, error)
 }
 
 // OpeningInput 仅包含构造资金池所需的通用输入数据。

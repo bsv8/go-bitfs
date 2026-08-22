@@ -6,14 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
-	"time"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
 )
 
 func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +26,7 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 	}
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   7,
 		PaymentSequenceAfter:  8,
 		SellerAmountAfterSat:  10,
@@ -35,8 +36,8 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
-		DeliveryDeadlineUnix:  200,
-	}, quoteTestSigner)
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
+	}, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,11 +52,11 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 	if !bytes.Equal(decodedRequest.TermsCBOR, request.TermsCBOR) {
 		t.Fatal("request terms changed after round trip")
 	}
-	if _, err := VerifySignedContentRequestAt(decodedRequest, quote, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier); err != nil {
-		t.Fatalf("VerifySignedContentRequestAt() error = %v", err)
+	if _, err := VerifySignedContentRequest(decodedRequest, quote); err != nil {
+		t.Fatalf("VerifySignedContentRequest() error = %v", err)
 	}
 
-	delivery, err := NewSignedContentDelivery(decodedRequest, content, quoteTestSigner)
+	delivery, err := NewSignedContentDelivery(decodedRequest, content, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +68,9 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := VerifySignedContentDeliveryAt(decodedRequest, decodedDelivery, quote, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier, quoteTestVerifier)
+	got, err := VerifySignedContentDelivery(decodedRequest, decodedDelivery, quote)
 	if err != nil {
-		t.Fatalf("VerifySignedContentDeliveryAt() error = %v", err)
+		t.Fatalf("VerifySignedContentDelivery() error = %v", err)
 	}
 	if !bytes.Equal(got, content) {
 		t.Fatalf("verified content = %q, want %q", got, content)
@@ -78,11 +79,11 @@ func TestContentRequestAndDeliveryRoundTrip(t *testing.T) {
 
 func TestContentIdentityKeysRequireCompressedEncoding(t *testing.T) {
 	terms := &ContentRequestTerms{
-		QuoteTermsHash: bytes.Repeat([]byte{1}, 32), SpendTxID: bytes.Repeat([]byte{2}, 32),
+		QuoteTermsHash: bytes.Repeat([]byte{1}, 32), RefundTemplateTxID: bytes.Repeat([]byte{2}, 32),
 		BasePaymentSequence: 1, PaymentSequenceAfter: 2, SellerAmountAfterSat: 1,
 		MinerFeeRateSatPerKB: 1, BuyerPubkey: quoteTestKey().PubKey().Uncompressed(),
 		SellerPubkey: quoteTestPubkey(), SelectedArbiterPubkey: quoteTestArbiterPubkey(),
-		ContentType: ContentSeed, ContentHash: bytes.Repeat([]byte{3}, 32), DeliveryDeadlineUnix: 200,
+		ContentType: ContentSeed, ContentHash: bytes.Repeat([]byte{3}, 32), DeliveryDeadlineUnix: quoteDeadline(t),
 	}
 	if _, err := EncodeContentRequestTerms(terms); err == nil {
 		t.Fatal("uncompressed content buyer key was accepted")
@@ -92,7 +93,7 @@ func TestContentIdentityKeysRequireCompressedEncoding(t *testing.T) {
 func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 	terms := &ContentRequestTerms{
 		QuoteTermsHash:        bytes.Repeat([]byte{0x01}, sha256.Size),
-		SpendTxID:             bytes.Repeat([]byte{0x02}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x02}, sha256.Size),
 		BasePaymentSequence:   3,
 		PaymentSequenceAfter:  4,
 		SellerAmountAfterSat:  125,
@@ -102,13 +103,13 @@ func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{0x04}, sha256.Size),
-		DeliveryDeadlineUnix:  200,
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
 	}
-	request, err := NewSignedContentRequest(terms, quoteTestSigner)
+	request, err := NewSignedContentRequest(terms, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestStandalone(request, quoteTestVerifier); err != nil {
+	if _, err := VerifySignedContentRequestStandalone(request); err != nil {
 		t.Fatalf("standalone authorization rejected: %v", err)
 	}
 
@@ -117,13 +118,13 @@ func TestStandaloneContentAuthorizationBindsEconomicTerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestStandalone(request, quoteTestVerifier); err == nil {
+	if _, err := VerifySignedContentRequestStandalone(request); err == nil {
 		t.Fatal("standalone authorization accepted changed economic terms")
 	}
 }
 
 func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
 	contentHash := sha256.Sum256([]byte("block"))
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
@@ -141,12 +142,12 @@ func TestContentRequestRejectsWrongQuoteAndArbiter(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
-		DeliveryDeadlineUnix:  200,
-	}, quoteTestSigner)
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
+	}, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestAt(request, quote, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier); err == nil {
+	if _, err := VerifySignedContentRequest(request, quote); err == nil {
 		t.Fatal("request with an unsupported arbiter was accepted")
 	}
 }
@@ -158,7 +159,7 @@ func TestContentDeliveryRejectsChangedPayload(t *testing.T) {
 	contentHash := sha256.Sum256(content)
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
@@ -168,12 +169,12 @@ func TestContentDeliveryRejectsChangedPayload(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           contentHash[:],
-		DeliveryDeadlineUnix:  200,
-	}, quoteTestSigner)
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
+	}, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := NewSignedContentDelivery(request, content, quoteTestSigner)
+	delivery, err := NewSignedContentDelivery(request, content, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestContentDeliveryRejectsChangedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentDeliveryAt(request, delivery, quote, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier, quoteTestVerifier); err == nil {
+	if _, err := VerifySignedContentDelivery(request, delivery, quote); err == nil {
 		t.Fatal("delivery with changed payload was accepted")
 	}
 }
@@ -204,7 +205,7 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 	terms := quoteTestTerms(t)
 	terms.FileSize = uint64(len(content))
 	terms.SeedHash = seedHash.Bytes()
-	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 	}
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
@@ -224,25 +225,25 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           blockHash[:],
-		DeliveryDeadlineUnix:  200,
-	}, quoteTestSigner)
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
+	}, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestWithSeedAt(request, quote, seed, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier); err != nil {
+	if _, err := VerifySignedContentRequestWithSeed(request, quote, seed); err != nil {
 		t.Fatalf("committed block was rejected: %v", err)
 	}
-	delivery, err := NewSignedContentDelivery(request, content, quoteTestSigner)
+	delivery, err := NewSignedContentDelivery(request, content, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentDeliveryWithSeedAt(request, delivery, quote, seed, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier, quoteTestVerifier); err != nil {
+	if _, err := VerifySignedContentDeliveryWithSeed(request, delivery, quote, seed); err != nil {
 		t.Fatalf("committed block delivery was rejected: %v", err)
 	}
 	otherHash := sha256.Sum256([]byte("other block"))
 	request.TermsCBOR, err = EncodeContentRequestTerms(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
@@ -252,12 +253,12 @@ func TestContentBlockMustBeCommittedByQuoteSeed(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           otherHash[:],
-		DeliveryDeadlineUnix:  200,
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestWithSeedAt(request, quote, seed, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier); err == nil {
+	if _, err := VerifySignedContentRequestWithSeed(request, quote, seed); err == nil {
 		t.Fatal("uncommitted block was accepted")
 	}
 }
@@ -273,14 +274,14 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 	terms := quoteTestTerms(t)
 	terms.FileSize = 5
 	terms.SeedHash = seedHash.Bytes()
-	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	quoteHash, _ := FileQuoteTermsHash(quote.TermsCBOR)
 	request, err := NewSignedContentRequest(&ContentRequestTerms{
 		QuoteTermsHash:        quoteHash[:],
-		SpendTxID:             bytes.Repeat([]byte{0x09}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x09}, sha256.Size),
 		BasePaymentSequence:   1,
 		PaymentSequenceAfter:  2,
 		SellerAmountAfterSat:  10,
@@ -290,16 +291,16 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentSeed,
 		ContentHash:           seedHash.Bytes(),
-		DeliveryDeadlineUnix:  200,
-	}, quoteTestSigner)
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
+	}, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := NewSignedContentDelivery(request, seed, quoteTestSigner)
+	delivery, err := NewSignedContentDelivery(request, seed, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentDeliveryWithSeedAt(request, delivery, quote, nil, time.Unix(100, 0), quoteTestVerifier, quoteTestVerifier, quoteTestVerifier); err != nil {
+	if _, err := VerifySignedContentDeliveryWithSeed(request, delivery, quote, nil); err != nil {
 		t.Fatalf("valid seed delivery was rejected: %v", err)
 	}
 }
@@ -307,7 +308,7 @@ func TestSeedDeliveryRequiresCanonicalSeedPayload(t *testing.T) {
 func TestContentCBORVector(t *testing.T) {
 	terms := &ContentRequestTerms{
 		QuoteTermsHash:        bytes.Repeat([]byte{0x01}, sha256.Size),
-		SpendTxID:             bytes.Repeat([]byte{0x02}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{0x02}, sha256.Size),
 		BasePaymentSequence:   3,
 		PaymentSequenceAfter:  4,
 		SellerAmountAfterSat:  125,
@@ -317,7 +318,7 @@ func TestContentCBORVector(t *testing.T) {
 		SelectedArbiterPubkey: quoteTestOtherArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{0x05}, sha256.Size),
-		DeliveryDeadlineUnix:  99,
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
 	}
 	raw, err := EncodeContentRequestTerms(terms)
 	if err != nil {
@@ -334,11 +335,11 @@ func TestContentCBORVector(t *testing.T) {
 func TestContentRequestRejectsLegacyWeakTerms(t *testing.T) {
 	terms := &ContentRequestTerms{
 		QuoteTermsHash:        bytes.Repeat([]byte{1}, sha256.Size),
-		SpendTxID:             bytes.Repeat([]byte{2}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{2}, sha256.Size),
 		SelectedArbiterPubkey: quoteTestArbiterPubkey(),
 		ContentType:           ContentBlock,
 		ContentHash:           bytes.Repeat([]byte{4}, sha256.Size),
-		DeliveryDeadlineUnix:  100,
+		DeliveryDeadlineUnix:  quoteDeadline(t), // 与报价同刻或更晚由断言覆盖
 	}
 	if _, err := EncodeContentRequestTerms(terms); err == nil {
 		t.Fatal("legacy weak content request terms were accepted")
@@ -475,9 +476,75 @@ func mustContentQuote(t *testing.T, fileSize uint64) *SignedFileQuote {
 	t.Helper()
 	terms := quoteTestTerms(t)
 	terms.FileSize = fileSize
-	quote, err := NewSignedFileQuote(terms, quoteTestPubkey(), "file.bin", quoteTestSigner)
+	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return quote
+}
+
+func TestContentTermsRejectAllZeroRefundTemplateTxID(t *testing.T) {
+	base := ContentRequestTerms{
+		QuoteTermsHash:        bytes.Repeat([]byte{1}, sha256.Size),
+		RefundTemplateTxID:    bytes.Repeat([]byte{2}, sha256.Size),
+		BasePaymentSequence:   1,
+		PaymentSequenceAfter:  2,
+		SellerAmountAfterSat:  10,
+		MinerFeeRateSatPerKB:  1,
+		BuyerPubkey:           contentTestPubkey("11"),
+		SellerPubkey:          contentTestPubkey("22"),
+		SelectedArbiterPubkey: contentTestPubkey("33"),
+		ContentType:           ContentSeed,
+		ContentHash:           bytes.Repeat([]byte{4}, sha256.Size),
+		DeliveryDeadlineUnix:  2_000_000_000,
+	}
+	zero := base
+	zero.RefundTemplateTxID = make([]byte, sha256.Size)
+	if err := ValidateContentRequestTerms(&zero); err == nil || !strings.Contains(err.Error(), "must not be all zero") {
+		t.Fatalf("003 accepted all-zero refund_template_txid: %v", err)
+	}
+	if _, err := EncodeContentRequestTerms(&zero); err == nil {
+		t.Fatal("003 encoder accepted all-zero refund_template_txid")
+	}
+	short := base
+	short.RefundTemplateTxID = bytes.Repeat([]byte{2}, 31)
+	if err := ValidateContentRequestTerms(&short); err == nil {
+		t.Fatal("003 accepted 31-byte refund_template_txid")
+	}
+	delivery := ContentDeliveryTerms{
+		RefundTemplateTxID:       bytes.Repeat([]byte{2}, sha256.Size),
+		PaymentAuthorizationHash: bytes.Repeat([]byte{3}, sha256.Size),
+		ContentBytes:             []byte("payload"),
+	}
+	if err := ValidateContentDeliveryTerms(&delivery); err != nil {
+		t.Fatal(err)
+	}
+	zeroDelivery := delivery
+	zeroDelivery.RefundTemplateTxID = make([]byte, sha256.Size)
+	if err := ValidateContentDeliveryTerms(&zeroDelivery); err == nil || !strings.Contains(err.Error(), "must not be all zero") {
+		t.Fatalf("004 accepted all-zero refund_template_txid: %v", err)
+	}
+	if _, err := EncodeContentDeliveryTerms(&zeroDelivery); err == nil {
+		t.Fatal("004 encoder accepted all-zero refund_template_txid")
+	}
+	shortDelivery := delivery
+	shortDelivery.RefundTemplateTxID = bytes.Repeat([]byte{2}, 33)
+	if err := ValidateContentDeliveryTerms(&shortDelivery); err == nil {
+		t.Fatal("004 accepted 33-byte refund_template_txid")
+	}
+	legacyDelivery, err := canonicalEnc.Marshal([]any{contentProtocolVersion, delivery.PaymentAuthorizationHash, delivery.ContentBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeContentDeliveryTerms(legacyDelivery); err == nil {
+		t.Fatal("legacy three-element 004 content delivery terms decoded")
+	}
+}
+
+func contentTestPubkey(hexKey string) []byte {
+	key, err := ec.PrivateKeyFromHex(strings.Repeat(hexKey, 64)[:64])
+	if err != nil {
+		panic(err)
+	}
+	return key.PubKey().Compressed()
 }

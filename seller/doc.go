@@ -1,10 +1,15 @@
-// Package seller implements the seller-side BitFS v4 workflow.
+// Package seller implements the stateless seller-side protocol orchestrator
+// for BitFS v4 messages 001–007. A Workflow holds only the official BSV private key: it
+// never loads or saves state, never reads or stores content, never holds a
+// lease or lock, never broadcasts a transaction, and never queries a node or
+// store; it reads system UTC exactly once at the start of each operation.
+// Every business input (quote, opening proof, previous payment state,
+// delivery context, content bytes, seed bytes, and block height) is passed
+// explicitly by the calling application, and every method
+// returns only computed wire messages, raw transactions, verified evidence,
+// and local role state that the application must persist itself.
 //
-// A Workflow creates signed quotes, coordinates pool opening, validates content
-// requests, delivers signed content, advances cumulative payments, and prepares
-// arbitration evidence. Wallet, storage, content, and raw BSV backend
-// capabilities remain application-owned and are supplied through WorkflowConfig.
-// A seller typically creates a 001 quote, completes 002, serves validated 003
-// requests with 004 deliveries, accepts 005 payments, and builds 007 evidence
-// only when the buyer-authorized state requires arbitration.
+// Reading content from storage, persisting proofs and payments, sending wire
+// messages, broadcasting transactions, retrying, and reconciling node results
+// are all caller responsibilities.
 package seller

@@ -2,7 +2,6 @@ package wire
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"testing"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
@@ -20,14 +19,7 @@ func TestNewWirePreservesTypedCBOR(t *testing.T) {
 		QuoteExpiresAtUnix:          200,
 		SupportedArbiterPubkeysCBOR: mustArbiterCBOR(t),
 	}
-	quote, err := bitfs.NewSignedFileQuote(terms, wireTestPubkey(), "file.bin", func(raw []byte) ([]byte, error) {
-		digest := sha256.Sum256(raw)
-		signature, err := wireTestKey().Sign(digest[:])
-		if err != nil {
-			return nil, err
-		}
-		return signature.Serialize(), nil
-	})
+	quote, err := bitfs.NewSignedFileQuote(terms, wireTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +42,7 @@ func TestNewWirePreservesTypedCBOR(t *testing.T) {
 func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 	update := &pool.PaymentUpdate{
 		Version:                   pool.MajorVersion,
+		RefundTemplateTxID:        pool.RefundTemplateTxID(bytes.Repeat([]byte{7}, 32)),
 		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, 32),
 		UnsignedStateTxRaw:        []byte{2, 3},
 		BuyerTransactionSignature: []byte{4},

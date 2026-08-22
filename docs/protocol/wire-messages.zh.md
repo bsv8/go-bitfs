@@ -38,7 +38,7 @@
 1. **Packet 信封不签名**。`Kind` 只是传输层路由标签；签名永远覆盖内层规范 CBOR 字节。
 2. **所有解码器都是严格的**：定长数组、禁用 CBOR tag、禁用不定长编码、解码后重新编码必须逐字节相等（deterministic round-trip 校验）。
 3. **签名与原文分离传输**（detached signature）：交易里不含角色签名，签名作为独立字段传递，由接收方合并。
-4. **单一真值**：`RefundTxHash`（预签名退款交易的 txid）是整个资金池的统一关联 ID，
+4. **单一真值**：`RefundTemplateTxID`（预签名退款交易的 txid）是整个资金池的统一关联 ID，
    绝不在报文里重复携带可由其他字段推导的值。
 
 ### 1.3 报文与规格步骤对照
@@ -172,7 +172,9 @@ Go 结构体 `RefundPresignRequest`（pool/types.go）：
 
 **合理性分析**
 
-- ✅ **不携带 RefundTxHash**：哈希由卖方从 `RefundTx` 规范重推导（`RefundPresignRequestHash`），
+- ✅ **不携带 RefundTemplateTxID**：卖方通过 `DeriveRefundTemplateTxIDFromRequest`
+  从已完成协议验证的规范未签名 `RefundTx` 派生模板交易 TxID
+  （`Transaction.TxID().CloneBytes()`），
   从根上消灭了"哈希与交易不一致"的多真值问题。
 - ✅ **不携带 FundingTx 原文**：资金交易 ID 和输出索引从 `RefundTx` 的 input 推导。
   买方的资金交易此时还是私有的——只有拿到卖方退款签名后才公开（0203），
@@ -187,7 +189,7 @@ Go 结构体 `RefundPresignRequest`（pool/types.go）：
 编码（`EncodeRefundPresignResponse`，4 元数组）：
 
 ```
-[4, 13, refund_tx_hash, seller_refund_signature]
+[4, 13, refund_template_txid, seller_refund_signature]
 ```
 
 Go 结构体 `RefundPresignResponse`：
@@ -196,16 +198,16 @@ Go 结构体 `RefundPresignResponse`：
 |---|---|
 | `Version` | 主版本 4 |
 | （内嵌 kind `13`） | CBOR 层的消息种类标签，与传输层 Kind 3 呼应，防跨类重放 |
-| `RefundTxHash` | 池关联 ID。**由卖方从收到的请求规范重推导，不允许调用方自填** |
+| `RefundTemplateTxID` | 池关联 ID。**由卖方从收到的请求规范重推导，不允许调用方自填** |
 | `SellerRefundSignature` | 卖方对 `RefundTx` 的 DER 签名 |
 
 **合理性分析**
 
-- ✅ 关联 ID 由响应方重推导而非回显请求值，买方用它匹配本地 pending 记录
-  （`PendingPoolOpening`），天然抗篡改。
+- ✅ 关联 ID 由响应方重推导而非回显请求值，买方用它匹配自己保存的本地
+  `BuyerOpeningState`（应用私有状态，非 wire 报文），天然抗篡改。
 - ✅ 内嵌 kind 标签（13/14）让 CBOR 文档自带类型，即使传输层贴错 Kind 也无法跨类解码成功。
-- ✅ 买方收到后的处理是崩溃安全的：先原子持久化完整 `OpeningProof` 和初始退款状态，
-  再删 pending 记录；重复投递同一响应可幂等重放（`AcceptRefundPresign` 的 replay 分支）。
+- ✅ 买方收到后的处理由应用负责：先持久化完整 `OpeningProof` 和初始退款状态，
+  再继续后续步骤；SDK 不做任何保存。
 
 ---
 
@@ -214,7 +216,7 @@ Go 结构体 `RefundPresignResponse`：
 编码（`EncodeFundingTxDelivery`，4 元数组）：
 
 ```
-[4, 14, refund_tx_hash, funding_tx]
+[4, 14, refund_template_txid, funding_tx]
 ```
 
 Go 结构体 `FundingTxDelivery`：
@@ -223,7 +225,7 @@ Go 结构体 `FundingTxDelivery`：
 |---|---|
 | `Version` | 主版本 4 |
 | （内嵌 kind `14`） | CBOR 层消息种类标签 |
-| `RefundTxHash` | 池关联 ID，只能从买方已验证并持久化的 OpeningProof 派生 |
+| `RefundTemplateTxID` | 池关联 ID，只能从买方已验证并持久化的 OpeningProof 派生 |
 | `FundingTx` | 买方签名的资金交易原始字节；其第 0 个输出（`PoolOutputIndex = 0`）是池输出 |
 
 **合理性分析**
@@ -247,7 +249,7 @@ Go 结构体 `FundingTxDelivery`：
 内层条款（`EncodeContentRequestTerms`，13 元数组）：
 
 ```
-[4, quote_terms_hash, refund_tx_hash, base_payment_sequence, payment_sequence_after,
+[4, quote_terms_hash, refund_template_txid, base_payment_sequence, payment_sequence_after,
  seller_amount_after_sat, miner_fee_rate_sat_per_kb,
  buyer_pubkey, seller_pubkey, selected_arbiter_pubkey,
  content_type, content_hash, delivery_deadline_unix]
@@ -260,7 +262,7 @@ Go 结构体 `ContentRequestTerms` / `SignedContentRequest`：
 | `TermsCBOR` | 条款规范字节，买方签名的直接对象；其 SHA-256 即 `PaymentAuthorizationHash` |
 | `BuyerSignature` | 买方对条款的 DER 签名 |
 | `QuoteTermsHash` | 引用的 001 报价条款哈希，把本次购买锚定到具体报价 |
-| `RefundTxHash` | 所在资金池的关联 ID |
+| `RefundTemplateTxID` | 所在资金池的关联 ID |
 | `BasePaymentSequence` | 发起请求时已接受状态的付款序号 |
 | `PaymentSequenceAfter` | 本次付款的目标序号，**必须等于 base + 1**（强校验） |
 | `SellerAmountAfterSat` | 付款后卖方累计应得金额（聪），即本次内容的价格承诺 |
@@ -295,7 +297,7 @@ Go 结构体 `ContentRequestTerms` / `SignedContentRequest`：
 内层条款（`EncodeContentDeliveryTerms`，4 元数组）：
 
 ```
-[4, refund_tx_hash, payment_authorization_hash, content_bytes]
+[4, refund_template_txid, payment_authorization_hash, content_bytes]
 ```
 
 Go 结构体 `ContentDeliveryTerms` / `SignedContentDelivery`：
@@ -304,7 +306,7 @@ Go 结构体 `ContentDeliveryTerms` / `SignedContentDelivery`：
 |---|---|
 | `TermsCBOR` | 交付条款规范字节，卖方签名的直接对象 |
 | `SellerSignature` | 卖方对交付条款的 DER 签名（密钥须等于 003 里承诺的 SellerPubkey） |
-| `RefundTxHash` | 所属资金池关联 ID，使凭据可独立路由 |
+| `RefundTemplateTxID` | 所属资金池关联 ID，使凭据可独立路由 |
 | `PaymentAuthorizationHash` | 所响应的 003 条款哈希，把交付钉死到一次授权 |
 | `ContentBytes` | 实际载荷：种子或单个数据块，长度不得超过一个 MasterSeed 块 |
 
@@ -324,7 +326,7 @@ Go 结构体 `ContentDeliveryTerms` / `SignedContentDelivery`：
 编码（`EncodePaymentUpdate`，5 元数组）：
 
 ```
-[4, refund_tx_hash, payment_authorization_hash, unsigned_state_tx, buyer_signature]
+[4, refund_template_txid, payment_authorization_hash, unsigned_state_tx, buyer_signature]
 ```
 
 Go 结构体 `PaymentUpdate`：
@@ -332,7 +334,7 @@ Go 结构体 `PaymentUpdate`：
 | 字段 | 含义 |
 |---|---|
 | `Version` | 主版本 4 |
-| `RefundTxHash` | 池关联 ID；不是买方签名的替代物 |
+| `RefundTemplateTxID` | 池关联 ID；不是买方签名的替代物 |
 | `PaymentAuthorizationHash` | 绑定的 003 授权哈希——把付款绑到内容，而不只是绑到交易字节 |
 | `UnsignedStateTxRaw` | 下一笔付款状态交易的**未签名**原始字节（三输出：买方/卖方/仲裁人分配） |
 | `BuyerTransactionSignature` | 买方针对该交易 sighash 的 DER 签名，与交易分离传输 |
@@ -343,8 +345,8 @@ Go 结构体 `PaymentUpdate`：
   接收方分别验证关联 ID、授权哈希、交易内容和签名后再合并，杜绝脚本拼接攻击面。
 - ✅ 序号与金额不在信封里重复出现——它们编码在状态交易内部，由引擎解析并校验
   （恰好 +1、卖方累计额与 003 承诺一致、容量检查 `CheckPaymentCapacity`）。
-- ✅ 卖方 `AcceptPayment` 的次序是"先验签、再自己签名、提交节点、节点确认后才落库"，
-  外部结果不确定时标记 `MarkExternalStateUncertain` 进入对账，不会出现本地领先于链的状态。
+- ✅ 卖方 `AcceptPayment` 的次序是"先验签、再自己签名、合并完整交易后返回"，
+  广播与记录结果是调用方应用的职责；SDK 不提交节点，也不维护"本地领先于链"之类的运行状态。
 
 ---
 
@@ -353,7 +355,7 @@ Go 结构体 `PaymentUpdate`：
 编码（`MarshalRequest`，6 元数组）：
 
 ```
-[4, refund_tx_hash, opening_proof_cbor, payment_authorization_cbor,
+[4, refund_template_txid, opening_proof_cbor, payment_authorization_cbor,
  unsigned_state_tx, seller_signature]
 ```
 
@@ -362,7 +364,7 @@ Go 结构体 `ArbitrationRequest`：
 | 字段 | 含义 |
 |---|---|
 | `Version` | 主版本 4 |
-| `RefundTxHash` | 池关联 ID，置于首字段，使请求可脱离任何连接/会话独立路由 |
+| `RefundTemplateTxID` | 池关联 ID，置于首字段，使请求可脱离任何连接/会话独立路由 |
 | `PoolOpeningProofCBOR` | 完整 002 开池证据的规范 CBOR（9 元数组：RefundTx、三方公钥、费率、双方退款签名、FundingTx） |
 | `PaymentAuthorizationCBOR` | 完整的 003 已签名授权凭据（standalone 形式） |
 | `UnsignedStateTxRaw` | 卖方按授权构造的候选状态交易未签名原文 |
@@ -389,7 +391,7 @@ Go 结构体 `ArbitrationRequest`：
 编码（`MarshalResponse`，5 元数组）：
 
 ```
-[4, refund_tx_hash, payment_authorization_hash, unsigned_state_tx_hash, arbiter_signature]
+[4, refund_template_txid, payment_authorization_hash, unsigned_state_tx_hash, arbiter_signature]
 ```
 
 Go 结构体 `ArbitrationResponse`：
@@ -397,7 +399,7 @@ Go 结构体 `ArbitrationResponse`：
 | 字段 | 含义 |
 |---|---|
 | `Version` | 主版本 4 |
-| `RefundTxHash` | 经仲裁方验证过的池关联 ID 回执 |
+| `RefundTemplateTxID` | 经仲裁方验证过的池关联 ID 回执 |
 | `PaymentAuthorizationHash` | 仲裁方实际签过的 003 授权字节哈希 |
 | `UnsignedStateTxHash` | 仲裁方实际签过的候选交易字节哈希 |
 | `ArbiterTransactionSignature` | 仲裁人对候选交易 sighash 的 DER 签名 |
@@ -405,8 +407,8 @@ Go 结构体 `ArbitrationResponse`：
 **合理性分析**
 
 - ✅ 两个哈希回执是关键：卖方无需信任"仲裁人签的是哪份东西"——
-  自己重算哈希比对（`SubmitArbitratedPayment`）即可确认签名对象与本地候选一字不差，
-  然后才合并签名提交。哈希回执把信任问题降为字节比较问题。
+  自己重算哈希比对（`CompleteArbitratedPayment`）即可确认签名对象与本地候选一字不差，
+  然后才合并签名返回；广播仍由应用执行。哈希回执把信任问题降为字节比较问题。
 - ✅ 拒绝语义 = 返回错误/无响应，不设"拒绝"标志位，避免半吊子的否定凭据流通。
 - ⚠️ 响应不含候选交易原文：若卖方丢失了自己的候选交易，仅有响应无法重建。
   但候选交易本就由卖方构造并可从持久化状态重推导，此取舍合理。
@@ -415,15 +417,15 @@ Go 结构体 `ArbitrationResponse`：
 
 ## 4. 贯穿全局的三条主线
 
-### 4.1 关联 ID：RefundTxHash
+### 4.1 关联 ID：RefundTemplateTxID
 
 ```
-RefundTx（预签退款交易字节）
-   └── SHA-256 ──► RefundTxHash = 资金池统一关联 ID
-                      ├── 0202/0203/005/007 报文的路由键
-                      ├── 双方 OpeningProofStore 的主键
-                      ├── 买方 PendingPoolOpening 的键
-                      └── 付款状态链（PaymentState.RefundTxHash）的归属标识
+规范未签名 RefundTx（预签退款交易字节）
+   └── Transaction.TxID().CloneBytes() ──► RefundTemplateTxID = 资金池统一关联 ID
+                       ├── 0202/0203/005/007 报文的路由键
+                       ├── 双方本地开池证据记录（应用数据库）的主键
+                       ├── 买方本地 BuyerOpeningState（应用私有状态）的键
+                       └── 付款状态链（PaymentState.RefundTemplateTxID）的归属标识
 ```
 
 规则：凡能从 `RefundTx` 推导的地方一律不重复传；凡携带它的报文都禁止全零值。
@@ -459,7 +461,7 @@ RefundTx（预签退款交易字节）
 1. 买方 `BuildImmediateClose` → 产出 `*pool.UnsignedPayment` + 买方签名
    （`PaymentSequence = ^uint32(0)` 表示终态）。
 2. 卖方 `SignImmediateClose` → 补卖方签名，返回 `*pool.SignedPayment`。
-3. 买方 `SubmitImmediateClose` → 提交节点，确认后落库并对账关闭。
+3. 买方 `CompleteImmediateClose` → 复核完整终态交易并返回；广播与落库由应用执行。
 
 理由：关闭交易与 005 状态交易同构，只是序号为终态哨兵；引入新报文只会增加一套
 编解码与校验面，无安全增益。到期退款路径同理——直接组装 OpeningProof 中已存的

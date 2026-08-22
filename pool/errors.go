@@ -1,33 +1,29 @@
 // Package pool contains the protocol-independent 2-of-3 settlement primitives
 // used by 002, 005, and 006. It validates role-ordered MultisigPool v4 bytes,
-// tracks monotonic payment state, and exposes storage/backend interfaces; it deliberately
-// does not import BitFS quote or content types.
+// tracks monotonic payment state, and exposes pure transaction construction,
+// parsing, signing, and verification capabilities; it deliberately does not
+// import BitFS quote or content types and performs no storage, network, or
+// node side effects.
 package pool
 
 import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+
+	"github.com/bsv8/go-bitfs/internal/refundlock"
 )
 
 var (
 	// ErrInvalidEvidence is returned when pool evidence fails structural or protocol validation.
 	ErrInvalidEvidence = errors.New("invalid pool evidence")
-	// ErrPoolBusy indicates that a pool already has an active delivery.
-	ErrPoolBusy = errors.New("pool busy")
 	// ErrStalePaymentSequence indicates that an update does not extend current state.
 	ErrStalePaymentSequence = errors.New("stale payment sequence")
 	// ErrInsufficientBalance indicates that a payment exceeds the pool balance.
 	ErrInsufficientBalance = errors.New("insufficient pool balance")
-	// ErrNonFinalRejected indicates that the node rejected a non-final payment update.
-	ErrNonFinalRejected = errors.New("non-final pool rejected update")
-	// ErrFinalRejected indicates that the node rejected a final transaction.
-	ErrFinalRejected = errors.New("pool node rejected final transaction")
-	// ErrNotExpired indicates that the refund locktime has not yet been reached.
-	ErrNotExpired = errors.New("pool refund expiry has not been reached")
-	// ErrPoolStateUncertain indicates that node acceptance must be reconciled
-	// after local persistence failed.
-	ErrPoolStateUncertain = errors.New("pool state requires external reconciliation")
+	// ErrNotExpired is the internal refundlock sentinel re-exported so callers
+	// matching it via errors.Is observe the "not yet matured" condition.
+	ErrNotExpired = refundlock.ErrNotExpired
 )
 
 func invalid(message string) error { return fmt.Errorf("%w: %s", ErrInvalidEvidence, message) }

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
@@ -22,12 +23,13 @@ func main() {
 	}
 	debug("=== Step 003: Build Content Request ===")
 	debug("[state] quote terms hash: %s", hex.EncodeToString(f.QuoteHash[:]))
-	debug("[state] SpendTxID: %s", hex.EncodeToString(f.Reference.SpendTxID[:]))
+	debug("[state] RefundTemplateTxID: %s", hex.EncodeToString(f.Reference.RefundTemplateTxID[:]))
 	debug("[state] base payment sequence: %d", f.Reference.BasePaymentSequence)
 
-	request, err := f.BuildSeedRequest(ctx)
+	now := time.Now().UTC()
+	request, err := f.BuildSeedRequest(ctx, now)
 	if err != nil {
-		fail(fmt.Errorf("buyer.RequestContent: %w", err))
+		fail(fmt.Errorf("buyer.BuildContentRequest: %w", err))
 	}
 	terms, err := bitfs.DecodeContentRequestTerms(request.TermsCBOR)
 	if err != nil {

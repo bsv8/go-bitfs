@@ -7,7 +7,7 @@ title: 007 · Seller arbitration submission requirements
 
 ## Problem statement
 
-When a seller holds buyer-signed final payment authorization from 003 but the buyer has not signed the corresponding 005, or the normal path cannot complete, an arbiter can supply the second signature for a `Seller+Arbiter` 2-of-3 spend. The arbiter is not a replica of either party's database and cannot receive only a hash or `SpendTxID` and then query a participant for the missing material.
+When a seller holds buyer-signed final payment authorization from 003 but the buyer has not signed the corresponding 005, or the normal path cannot complete, an arbiter can supply the second signature for a `Seller+Arbiter` 2-of-3 spend. The arbiter is not a replica of either party's database and cannot receive only a hash or `RefundTemplateTxID` and then query a participant for the missing material.
 
 The seller MUST submit complete raw credentials and raw signatures.
 

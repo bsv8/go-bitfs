@@ -100,4 +100,4 @@ require(signedQuote.Terms.BuyerPubKey == expectedBuyer)
 print(signedQuote.Terms)
 ```
 
-这个 demo 直接调用 `bitfs.NewSignedFileQuote`，没有强行创建完整的 `seller.Workflow`。因为仅生成报价不需要费用池、内容源、请求存储和后端等后续生命周期依赖；后面的 demo 再用 fixture 把这些步骤串起来。
+这个 demo 直接调用 `bitfs.NewSignedFileQuote`，没有强行创建完整的 `seller.Workflow`。因为仅生成报价只需要纯函数式的签名与编码能力；后面的 demo 再用只持有官方 BSV 私钥的无状态 workflow 和 fixture 把这些步骤串起来。

@@ -11,7 +11,7 @@ After receiving 003, the seller must deliver the seed body or file-chunk body. T
 
 ## Minimal Delivery Relationship
 
-004 references `PaymentAuthorizationHash` together with the content bytes. The seller signs the deterministic CBOR encoding of these two items. The buyer reconstructs all purchase conditions from the 003 it stored locally, verifies the seller identity, content hash, and delivery deadline; only upon passing these checks does payment proceed.
+004 carries the pool `RefundTemplateTxID` correlation ID and references `PaymentAuthorizationHash` together with the content bytes. The seller signs the deterministic CBOR encoding of these three items, so an independently delivered credential routes directly to its fee pool. The buyer re-derives `RefundTemplateTxID` from its stored opening proof, requires it to equal the correlation ID field in both the 003 terms and the signed 004 delivery, and verifies the seller identity, content hash, and delivery deadline; only upon passing these checks does payment proceed.
 
 ```text
 003: Buyer deterministically requests specific content with a signature

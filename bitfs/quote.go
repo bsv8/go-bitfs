@@ -11,7 +11,9 @@ import (
 	"time"
 	"unicode"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/internal/protoclock"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
@@ -24,14 +26,6 @@ const MaxQuoteSeedBlocks uint64 = masterseed.BlockSize / masterseed.DigestSize
 // MaxQuoteFileSize is the largest file a quote can describe while the seed is
 // delivered in one BitFS payload.
 const MaxQuoteFileSize uint64 = MaxQuoteSeedBlocks * BlockSize
-
-// QuoteTermsSigner receives the exact canonical TermsCBOR bytes. It must hash
-// those bytes once with SHA-256 and return the resulting DER-only signature.
-type QuoteTermsSigner func(termsCBOR []byte) ([]byte, error)
-
-// QuoteTermsSignatureVerifier verifies a seller signature over the exact
-// canonical TermsCBOR bytes.
-type QuoteTermsSignatureVerifier func(sellerPubkey, termsCBOR, signature []byte) error
 
 // EncodeSupportedArbiterPubkeys returns the sole allowed representation of the
 // supported-arbiter child structure.
@@ -139,21 +133,23 @@ func FileQuoteTermsHash(termsCBOR []byte) ([sha256.Size]byte, error) {
 }
 
 // NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
-// and asks signTerms to sign those exact bytes. The callback must apply the
-// protocol's single SHA-256 digest and return DER-only bytes; this constructor
-// fixedly re-verifies the signature before returning a portable 001 credential.
-func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedFilename string, signer QuoteTermsSigner) (*SignedFileQuote, error) {
+// signs those exact bytes with the official BSV private key through the fixed
+// single-SHA-256 message path, and fixedly re-verifies the signature with the
+// derived public key before returning a portable 001 credential. The private
+// key never enters any wire message, local result, log, or persisted structure.
+func NewSignedFileQuote(terms *FileQuoteTerms, sellerKey *ec.PrivateKey, recommendedFilename string) (*SignedFileQuote, error) {
+	if sellerKey == nil {
+		return nil, errors.New("seller private key is required")
+	}
+	sellerPubkey := sellerKey.PubKey().Compressed()
 	if err := protocol.ValidateCompressedPubKey(sellerPubkey); err != nil {
 		return nil, fmt.Errorf("seller pubkey: %w", err)
-	}
-	if signer == nil {
-		return nil, errors.New("quote terms signer is required")
 	}
 	termsCBOR, err := EncodeFileQuoteTerms(terms)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := signer(termsCBOR)
+	signature, err := SignMessage(sellerKey, termsCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("sign quote terms: %w", err)
 	}
@@ -172,14 +168,17 @@ func NewSignedFileQuote(terms *FileQuoteTerms, sellerPubkey []byte, recommendedF
 }
 
 // VerifySignedFileQuote verifies structural validity, quote expiry, and the
-// seller signature. It returns independently owned parsed terms.
-func VerifySignedFileQuote(quote *SignedFileQuote, verifier QuoteTermsSignatureVerifier) (*FileQuoteTerms, error) {
-	return VerifySignedFileQuoteAt(quote, time.Now(), verifier)
+// seller signature. It reads system UTC once at entry and always uses the
+// fixed SDK verifier; callers cannot replace either. It returns independently
+// owned parsed terms.
+func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error) {
+	return verifySignedFileQuote(quote, protoclock.Now())
 }
 
-// VerifySignedFileQuoteAt performs structural, expiry, and seller-signature
-// verification using now, allowing callers to test expiry without wall-clock time.
-func VerifySignedFileQuoteAt(quote *SignedFileQuote, now time.Time, verifier QuoteTermsSignatureVerifier) (*FileQuoteTerms, error) {
+// VerifyFileQuoteEvidence 验证时间无关的报价证据：结构、CBOR、压缩公钥与
+// DER 卖方签名。它不检查当前是否过期；过期判断由调用方用返回 terms 的
+// QuoteExpiresAtUnix 与自己读取的一次时间完成。
+func VerifyFileQuoteEvidence(quote *SignedFileQuote) (*FileQuoteTerms, error) {
 	if quote == nil {
 		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)
 	}
@@ -192,17 +191,43 @@ func VerifySignedFileQuoteAt(quote *SignedFileQuote, now time.Time, verifier Quo
 	if len(quote.TermsSignature) == 0 {
 		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
 	}
-	if verifier == nil {
-		return nil, fmt.Errorf("%w: quote terms signature verifier is required", ErrInvalidEvidence)
+	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	if err != nil {
+		return nil, fmt.Errorf("%w: decode file quote terms: %v", ErrInvalidEvidence, err)
+	}
+	if err := ValidateFileQuoteTerms(terms); err != nil {
+		return nil, err
+	}
+	if err := VerifySignature(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
+		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
+	}
+	return terms, nil
+}
+
+// verifySignedFileQuote is the package-private pure helper taking an explicit
+// now; it exists only so boundary tests stay deterministic without a public
+// ...At variant.
+func verifySignedFileQuote(quote *SignedFileQuote, at time.Time) (*FileQuoteTerms, error) {
+	if quote == nil {
+		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)
+	}
+	if len(quote.SellerPubkey) == 0 {
+		return nil, fmt.Errorf("%w: seller pubkey is required", ErrInvalidEvidence)
+	}
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
+		return nil, fmt.Errorf("%w: seller pubkey: %v", ErrInvalidEvidence, err)
+	}
+	if len(quote.TermsSignature) == 0 {
+		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
 	}
 	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode file quote terms: %v", ErrInvalidEvidence, err)
 	}
-	if err := ValidateFileQuoteTermsAt(terms, now); err != nil {
+	if err := validateFileQuoteTermsNotExpired(terms, at); err != nil {
 		return nil, err
 	}
-	if err := verifier(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
+	if err := VerifySignature(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
 		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return terms, nil
@@ -230,8 +255,8 @@ func EncodeSignedFileQuote(quote *SignedFileQuote) ([]byte, error) {
 }
 
 // DecodeSignedFileQuote decodes one canonical quote credential. Signature and
-// expiry verification is intentionally separate so callers can inject their
-// wallet verifier and clock through VerifySignedFileQuoteAt.
+// expiry verification is intentionally separate so callers verify through the
+// fixed VerifySignedFileQuote path.
 func DecodeSignedFileQuote(data []byte) (*SignedFileQuote, error) {
 	values, err := decodeArray(data, 5)
 	if err != nil {
@@ -297,12 +322,14 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 	return nil
 }
 
-// ValidateFileQuoteTermsAt additionally verifies that terms have not expired.
-func ValidateFileQuoteTermsAt(terms *FileQuoteTerms, now time.Time) error {
+// validateFileQuoteTermsNotExpired additionally verifies that terms have not
+// expired at the explicitly provided now. It is not part of the public API;
+// public entries read UTC once and delegate here.
+func validateFileQuoteTermsNotExpired(terms *FileQuoteTerms, at time.Time) error {
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return err
 	}
-	if !now.Before(time.Unix(terms.QuoteExpiresAtUnix, 0)) {
+	if !at.Before(time.Unix(terms.QuoteExpiresAtUnix, 0)) {
 		return fmt.Errorf("%w: file quote is expired", ErrQuoteExpired)
 	}
 	return nil

@@ -7,7 +7,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -108,15 +107,8 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 		QuoteExpiresAtUnix:          expiresAt,
 		SupportedArbiterPubkeysCBOR: arbiterCBOR,
 	}
-	sellerPubkey := privateKey.PubKey().Compressed()
-	quote, err := bitfs.NewSignedFileQuote(terms, sellerPubkey, filename, func(rawTermsCBOR []byte) ([]byte, error) {
-		digest := sha256.Sum256(rawTermsCBOR)
-		signature, err := privateKey.Sign(digest[:])
-		if err != nil {
-			return nil, err
-		}
-		return signature.Serialize(), nil
-	})
+	// 官方 BSV 私钥直接传入 SDK：SDK 内部做一次 SHA-256 并用固定 verifier 自校验。
+	quote, err := bitfs.NewSignedFileQuote(terms, privateKey, filename)
 	if err != nil {
 		return fmt.Errorf("build signed file quote: %w", err)
 	}

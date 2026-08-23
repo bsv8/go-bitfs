@@ -1,5 +1,5 @@
 // Package wire maps transport-level message kinds to the canonical encoders and
-// strict decoders for 001–007. It copies exact CBOR bytes and adds no envelope,
+// strict decoders for 001–008. It copies exact CBOR bytes and adds no envelope,
 // signature, storage, business validation, or network behavior; callers invoke
 // the owning bitfs, pool, or arbitration verifier after decoding.
 package wire
@@ -60,6 +60,18 @@ const (
 	// signature over the independently rebuilt candidate.
 	// Direction: arbiter -> seller.
 	ArbitrationResponse Kind = 9
+	// ArbitrationContentRequest carries a buyer's authenticated retrieval
+	// request for one arbitrated custody record: [4, 10, claim_id, nonce,
+	// buyer_signature]. The Claim ID routes the lookup; only the buyer key
+	// recovered from the stored Claim can authorize it.
+	// Direction: buyer -> arbiter.
+	ArbitrationContentRequest Kind = 10
+	// ArbitrationContentResponse returns one custody record's exact persisted
+	// Kind 8 and Kind 9 bytes embedded verbatim in
+	// [4, 11, exact_kind8_cbor, exact_kind9_cbor]. It adds no outer
+	// signature: the embedded Seller/Arbiter signatures are the evidence.
+	// Direction: arbiter -> buyer.
+	ArbitrationContentResponse Kind = 11
 )
 
 // Packet carries a transport-selected Kind and the exact canonical CBOR bytes
@@ -135,6 +147,18 @@ func Marshal(kind Kind, message any) (Packet, error) {
 			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ArbitrationResponse", kind)
 		}
 		raw, err = arbitration.MarshalResponse(value)
+	case ArbitrationContentRequest:
+		value, ok := message.(*arbitration.ContentRetrievalRequest)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ContentRetrievalRequest", kind)
+		}
+		raw, err = arbitration.MarshalContentRetrievalRequest(value)
+	case ArbitrationContentResponse:
+		value, ok := message.(*arbitration.ContentRetrievalResponse)
+		if !ok {
+			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ContentRetrievalResponse", kind)
+		}
+		raw, err = arbitration.MarshalContentRetrievalResponse(value)
 	default:
 		return Packet{}, fmt.Errorf("unsupported new wire kind %d", kind)
 	}
@@ -169,6 +193,10 @@ func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 		return arbitration.UnmarshalRequest(rawCBOR)
 	case ArbitrationResponse:
 		return arbitration.UnmarshalResponse(rawCBOR)
+	case ArbitrationContentRequest:
+		return arbitration.UnmarshalContentRetrievalRequest(rawCBOR)
+	case ArbitrationContentResponse:
+		return arbitration.UnmarshalContentRetrievalResponse(rawCBOR)
 	default:
 		return nil, fmt.Errorf("unsupported new wire kind %d", kind)
 	}
@@ -308,4 +336,37 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 		return nil, err
 	}
 	return message.(*arbitration.ArbitrationResponse), nil
+}
+
+// MarshalArbitrationContentRequest encodes a buyer's authenticated Kind 10
+// retrieval request.
+func MarshalArbitrationContentRequest(message *arbitration.ContentRetrievalRequest) ([]byte, error) {
+	packet, err := Marshal(ArbitrationContentRequest, message)
+	return packet.CBOR, err
+}
+
+// UnmarshalArbitrationContentRequest strictly decodes a Kind 10 retrieval request.
+func UnmarshalArbitrationContentRequest(rawCBOR []byte) (*arbitration.ContentRetrievalRequest, error) {
+	message, err := Unmarshal(ArbitrationContentRequest, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*arbitration.ContentRetrievalRequest), nil
+}
+
+// MarshalArbitrationContentResponse encodes the four-element Kind 11 custody
+// evidence response with its embedded exact Kind 8/9 bytes.
+func MarshalArbitrationContentResponse(message *arbitration.ContentRetrievalResponse) ([]byte, error) {
+	packet, err := Marshal(ArbitrationContentResponse, message)
+	return packet.CBOR, err
+}
+
+// UnmarshalArbitrationContentResponse strictly decodes a Kind 11 custody
+// evidence response.
+func UnmarshalArbitrationContentResponse(rawCBOR []byte) (*arbitration.ContentRetrievalResponse, error) {
+	message, err := Unmarshal(ArbitrationContentResponse, rawCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return message.(*arbitration.ContentRetrievalResponse), nil
 }

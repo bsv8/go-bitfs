@@ -5,7 +5,7 @@ title: BitFS SDK API framework
 
 # BitFS SDK API framework
 
-go-bitfs is the executable protocol specification for 001–007. It is a
+go-bitfs is the executable protocol specification for 001–008. It is a
 **stateless, infrastructure-side-effect-free protocol SDK**: role workflows
 hold only the official BSV private key passed to `WorkflowConfig{PrivateKey}`
 and perform deterministic Build/Verify/Sign/Merge

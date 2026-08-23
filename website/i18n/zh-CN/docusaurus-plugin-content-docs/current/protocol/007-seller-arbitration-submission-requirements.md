@@ -51,4 +51,4 @@ SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、Refu
 
 ## Seller 完成
 
-Seller 收到 Kind 9 后必须从 Claim primitives 加回执金额独立重建付费 candidate：从自身 Claim 字节重算 Claim ID 并比较，验 Buyer signature、回执消息签名（仲裁方公钥从角色脚本恢复）和 Arbiter transaction signature，再生成自身交易签名。合并只能通过 `MergeArbitratedPoolSellerArbiterSignatures`。广播、对账、Buyer 取件鉴权、retention 和幂等索引均由应用负责。Claim ID、费用、交易签名或回执签名任一篡改都拒绝整个响应。
+Seller 收到 Kind 9 后必须从 Claim primitives 加回执金额独立重建付费 candidate：从自身 Claim 字节重算 Claim ID 并比较，验 Buyer signature、回执消息签名（仲裁方公钥从角色脚本恢复）和 Arbiter transaction signature，再生成自身交易签名。合并只能通过 `MergeArbitratedPoolSellerArbiterSignatures`。广播、对账、retention 和幂等索引均由应用负责；Buyer 取件的 wire 与签名域已由 SDK 通过 008（Kind 10/11）固定，应用仍负责持久化、nonce 原子去重、TLS 传输与 retention。Claim ID、费用、交易签名或回执签名任一篡改都拒绝整个响应。

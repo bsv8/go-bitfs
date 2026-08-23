@@ -8,10 +8,11 @@ title: Core boundary refactor work order
 This page records the acceptance contract of the completed SDK boundary hard
 switch. It supersedes every earlier description in which role workflows could
 accept stores, content sources/sinks, or BSV submission backends. Protocol
-specifications 001–007 remain authoritative for wire bytes and protocol
-behavior; existing 001–006 wire shapes remain fixed, while 007 uses its current
+specifications 001–008 remain authoritative for wire bytes and protocol
+behavior; existing 001–006 wire shapes remain fixed, 007 uses its current
 five-element Kind 8 Claim request plus four-element Kind 9 Receipt response
-shapes and signing domains. The `RefundTemplateTxID`
+shapes and signing domains, and 008 fixes the five-element Kind 10 buyer
+retrieval request plus the four-element Kind 11 custody evidence response. The `RefundTemplateTxID`
 algorithm remains unchanged.
 
 ## Product definition
@@ -80,7 +81,7 @@ remain public pure functions and are never forced through a Workflow.
 - Static searches find no `FileStore`, `MemoryStore`, `FileQuoteStore`,
   `PoolStore`, `PendingRequestStore`, lease types, process locks, or backend
   adapters anywhere outside historical documents.
-- Current wire fixtures for 001–007 and MultisigPool transactions are frozen
+- Current wire fixtures for 001–008 and MultisigPool transactions are frozen
   byte-for-byte; `MajorVersion == 4` with no v5.
 - Stale sequence, wrong opening/role/hash, amount regressions, and expiry
   violations are still rejected.

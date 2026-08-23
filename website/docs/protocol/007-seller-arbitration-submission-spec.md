@@ -145,3 +145,10 @@ Arbiter transaction signature against it. Only then does it create its own
 transaction signature and call `MergeArbitratedPoolSellerArbiterSignatures`.
 The completed state carries `ArbiterAmountSat` equal to the receipt amount and
 a Seller amount equal to the Buyer-authorized absolute amount.
+
+## Retrieval boundary
+
+007 itself ends when the exact canonical Kind 9 is persisted. How a buyer
+retrieves custodied content is fixed separately by step 008 (Kind 10/11):
+the SDK owns the wire shapes and signature domains there, while applications
+own persistence, nonce deduplication, TLS transport, and retention.

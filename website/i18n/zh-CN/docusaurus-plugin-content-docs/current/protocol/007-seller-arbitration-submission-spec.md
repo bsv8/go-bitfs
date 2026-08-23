@@ -70,6 +70,6 @@ PreparePayment(request, blockHeight, arbiterAmountSat)
   -> 持久化/发送精确 Kind 9
 ```
 
-SDK 不提供数据库、对象存储、HTTP、广播、UTXO 查询或费率策略。应用必须保存 exact request/response 字节用于幂等以及托管留存与买方恢复。重放以 exact 字节为门槛，不能只看 Claim ID：只有 Claim ID 与 exact Kind 8 字节完全相同才原样重放保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；同 Claim 但外层签名或 payload 不同时，先用已冻结费用完整验证（无效变体按证据错误拒绝，完全有效的变体记为重复证据冲突）；不同 Claim ID 建立独立记录。
+SDK 不提供数据库、对象存储、HTTP、广播、UTXO 查询或费率策略。应用必须保存 exact request/response 字节用于幂等以及托管留存；买方取件的 wire 与签名域已由 SDK 通过 008（Kind 10/11）固定，持久化、nonce 去重、TLS 与 retention 仍由应用负责。重放以 exact 字节为门槛，不能只看 Claim ID：只有 Claim ID 与 exact Kind 8 字节完全相同才原样重放保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；同 Claim 但外层签名或 payload 不同时，先用已冻结费用完整验证（无效变体按证据错误拒绝，完全有效的变体记为重复证据冲突）；不同 Claim ID 建立独立记录。
 
 卖方收到 Kind 9 后：从自己的 Claim 字节重算 Claim ID 并比较；从角色脚本恢复仲裁方公钥，验证 `[4, 9, exact_receipt_cbor]` 上的回执普通消息签名；用回执金额本地重建 candidate 并验证仲裁交易签名；全部通过后才生成自身交易签名并调用 `MergeArbitratedPoolSellerArbiterSignatures`。完成状态的 `ArbiterAmountSat` 必须等于回执金额，Seller 金额等于 Buyer 授权的绝对金额。

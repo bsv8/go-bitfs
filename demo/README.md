@@ -19,6 +19,7 @@ go-bitfs SDK 是无状态的 BitFS v4 协议库：workflow 对象只持有官方
 | 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款：最小凭证 = 授权哈希 + 买家交易签名，卖家按哈希取回原始 003、本地重建交易并合并（一个批次只生成一个 005） |
 | 006 | [`06_pool_close`](./06_pool_close/) | 双方协商关闭费用池 |
 | 007 | [`07_arbitration`](./07_arbitration/) | 发生争议时由仲裁人签署付款 |
+| 008 | [`08_arbitration_content_retrieval`](./08_arbitration_content_retrieval/) | Seller/Buyer 无法直连时，Buyer 凭 Claim ID + 签名从 Arbiter 取回已托管内容（只读恢复，不产生 005，不关池） |
 
 大多数步骤下面的 `01_...` 是该步骤的完整观察命令。002 是报文流动示例，特意拆成 `0201_...` 到 `0205_...`，每个程序只执行一个角色的一次业务动作，并用 stdin/stdout 传递 wire 报文。本地 checkpoint 与 wire 报文严格分离；跨进程关联只使用 `RefundTemplateTxID`：0203 打印、0204 只读取 `REFUND_TEMPLATE_TXID_HEX`，原 request、私有 FundingTx 和完整 OpeningProof 都由 demo 自己的 JSON checkpoint 按 RefundTemplateTxID 保存和恢复，再显式传给 SDK。002 的 0201 还会在 demo 层通过 JungleBus 地址历史和交易原文重建真实 UTXO；`BITFS_NETWORK` 缺省为 testnet，详情见 [`02_pool_opening`](./02_pool_opening/)。
 
@@ -32,4 +33,4 @@ cp demo/.env.example demo/.env
 
 除 002 外，每个命令会重新创建一套内存 fixture：fixture 扮演调用方应用，显式持有报价、开池证据、最新付款状态、内容字节等全部状态，并在每次 SDK 调用时逐个显式传入，因此可以从任意一步单独运行；SDK 不保存其中任何一项。002 的细分命令则把跨进程需要的开池证据保存在各自的 JSON checkpoint 中，同样由 demo 而不是 SDK 持有。
 
-建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何用一个付款序号授权一组内容 hash，最后看 004–007 如何原子交付批次、按序号恰好推进一次的累计付款、关闭和仲裁。007 中 Seller 用本地 OpeningProof 验证并形成 Claim；Arbiter 只接收 Claim 与精确 payload bundle，独立重建交易，不接收 OpeningProof 或候选交易原文。
+建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何用一个付款序号授权一组内容 hash，最后看 004–007 如何原子交付批次、按序号恰好推进一次的累计付款、关闭和仲裁。007 中 Seller 用本地 OpeningProof 验证并形成 Claim；Arbiter 只接收 Claim 与精确 payload bundle，独立重建交易，不接收 OpeningProof 或候选交易原文。008 演示 Seller/Buyer 无法直连时的只读取件：Buyer 凭 OpeningProof + 精确签名 003 独立重建 Claim ID 并对 `[4,10,claim_id,nonce]` 签名，Arbiter 验签并原子占用 nonce 后返回 exact Kind 8/9，Buyer 完整验收；它不是关池或退款 demo。

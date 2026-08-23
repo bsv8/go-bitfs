@@ -13,6 +13,9 @@ The protocol is documented in the multilingual [Docusaurus site](website/README.
 | 005 | [Cumulative payment](website/docs/protocol/005-cumulative-payment-spec.md) | [Requirements](website/docs/protocol/005-cumulative-payment-requirements.md) |
 | 006 | [Pool close](website/docs/protocol/006-unconditional-pool-close-spec.md) | [Requirements](website/docs/protocol/006-pool-close-requirements.md) |
 | 007 | [Seller arbitration](website/docs/protocol/007-seller-arbitration-submission-spec.md) | [Requirements](website/docs/protocol/007-seller-arbitration-submission-requirements.md) |
+| 008 | [Buyer arbitrated content retrieval](website/docs/protocol/008-buyer-arbitrated-content-retrieval-spec.md) | [Requirements](website/docs/protocol/008-buyer-arbitrated-content-retrieval-requirements.md) |
+
+Step 008 is read-only content recovery from arbiter custody. It is **not** a buyer arbitration close: when the seller is unreachable, the buyer either waits or broadcasts its presigned RefundTx after `nLockTime`.
 
 The current CDDL is under `spec/v4/`. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
 
@@ -21,7 +24,7 @@ The current CDDL is under `spec/v4/`. Transaction scripts, fees, signatures, and
 - `bitfs/`: quote and content credentials, seeds, hashes, and evidence validation.
 - `pool/`: independent 002/005/006 settlement state machine, transaction engine, persistence ports, and memory reference implementation.
 - `buyer/` and `seller/`: role workflows for the v4 protocol.
-- `arbitration/` and `wire/`: arbitration evidence signing and typed protocol message dispatch.
+- `arbitration/` and `wire/`: arbitration custody evidence, buyer retrieval signing, and typed protocol message dispatch.
 
 Run the test suite with:
 

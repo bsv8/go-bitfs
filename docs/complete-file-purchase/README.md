@@ -461,6 +461,68 @@ journal.SaveLatestPayment("seller", &signed.State)
 _, err = broadcaster.Broadcast(signed.RawTx)
 ```
 
+### 6.5 008 买方仲裁托管内容取回（Seller/Buyer 无法直连时）
+
+007 完成后，"Arbiter 持有 Buyer 已授权内容的精确 preimage"已是协议事实。Seller 与 Buyer 无法直连时，Buyer 用自己可独立计算的 Claim ID 取回托管内容。取件是只读恢复：**不生成、不签名、不返回 005**；也不存在 Buyer+Arbiter 关池——Seller 失联或拒绝协商关池时，Buyer 等 refund locktime 成熟后广播 002 的预签名 RefundTx。
+
+```go
+// Buyer：凭本地 OpeningProof + 精确签名 003 构造 Kind 10。
+// nonce 由应用用 crypto/rand 生成 32 字节；SDK 不产生、不保存 nonce。
+nonce := make([]byte, arbitration.RetrievalNonceBytes)
+if _, err := rand.Read(nonce); err != nil { return err }
+retrievalRequest, err := buyerWorkflow.BuildArbitrationContentRequest(ctx,
+    buyerOpening, sent003Authorization, nonce)
+if err != nil { return err }
+rawKind10, err := wire.MarshalArbitrationContentRequest(retrievalRequest)
+if err != nil { return err }
+journal.RecordOutbox("content_retrieval_request", rawKind10) // 发送前持久化 exact Kind 10
+sendToArbiter(rawKind10)
+
+// Arbiter 应用：固定顺序处理。
+func handleContentRetrieval(rawKind10 []byte) ([]byte, error) {
+    request, err := arbitration.UnmarshalContentRetrievalRequest(rawKind10)
+    if err != nil { return nil, err }                          // strict decode 失败 → 拒绝
+    record, ok := custodyStore.Lookup(hex(request.ClaimID))
+    if !ok { return nil, ErrNotFound }                         // 不泄露其他信息
+    if !record.Retrievable() { return nil, ErrNotReady }       // 缺 exact Kind 9 → 不提前释放 payload
+    stored8, err := arbitration.UnmarshalRequest(record.RequestBytes)
+    if err != nil { return nil, ErrCustodyCorrupt }            // 存储损坏：失败关闭并报警
+    stored9, err := arbitration.UnmarshalResponse(record.ResponseBytes)
+    if err != nil { return nil, ErrCustodyCorrupt }
+    if _, err := arbiterWorkflow.VerifyContentRetrievalRequest(request, stored8, stored9); err != nil {
+        return nil, ErrUnauthorized                            // 统一语义，不说明哪个字段失败
+    }
+    if !custodyStore.OccupyNonce(request.ClaimID, request.Nonce) { // 先验签后原子占用
+        return nil, ErrNonceReused                             // 并发由数据库唯一键裁决唯一胜者
+    }
+    response, err := arbitration.BuildContentRetrievalResponse(record.RequestBytes, record.ResponseBytes)
+    if err != nil { return nil, err }                          // 内嵌原文，不重编码
+    return arbitration.MarshalContentRetrievalResponse(response)
+}
+
+// Buyer：完整验收（时间无关）并保存。
+rawKind11 := recvFromArbiter()
+kind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+if err != nil { return err }
+verified, err := buyerWorkflow.AcceptArbitratedContent(ctx, quote, buyerOpening,
+    previous, sent003Authorization, retrievalRequest, kind11, buyer.ArbitratedContentInput{})
+if err != nil { return err } // 本地 expected ClaimCBOR 与内嵌 ClaimCBOR 必须逐字节相等
+journal.SaveExactKind11AndPayloads(rawKind11, verified.Payloads)
+_ = verified.ClaimID; _ = verified.Receipt // 审计数据按应用策略落盘
+```
+
+验收错误对照：
+
+| 场景 | 正确做法 |
+|---|---|
+| Claim ID 查不到 | `NotFound`；不泄露 Claim 是否存在或其他字段信息。 |
+| 只有 Kind 8，Kind 9 未签署 | `NotReady`；Buyer 稍后用新 nonce 重试。 |
+| Buyer 签名不属于 Claim 的 Buyer key | 统一 `Unauthorized`。 |
+| `(ClaimID, Nonce)` 已占用 | `NonceReused`；换新 nonce 重签重试。 |
+| retention 结束且已安全删除 | `Gone`；不代理、不返回空 payload、不触发关池。 |
+| 发送超时 / 未收完 | 不复用旧 nonce；新 nonce 新签名重发，Arbiter 重返同一份 exact Kind 8/9。 |
+| 取件时 Quote/deadline/refund 已过期 | 只要记录仍在 retention 内就正常验收——事后取件不重新执行时间门禁。 |
+
 ## 7. 错误分类与重试策略
 
 | 场景 | 正确做法 |

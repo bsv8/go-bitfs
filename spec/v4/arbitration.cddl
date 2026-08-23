@@ -34,3 +34,46 @@ arbiter-receipt-signature = bstr .size (1..256)
 ; candidate locally; no raw transaction, payload hash, or unsigned tx hash
 ; travels on the wire. Legacy five-element Kind 9 responses are rejected
 ; outright; there is no dual-shape decoding in this protocol version.
+
+; ---------------------------------------------------------------------------
+; 008 Buyer arbitrated content retrieval (hard-switched with Kind 10/11).
+; The Claim ID is shared verbatim with Kind 8/9 above:
+; arbitration_claim_id = SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor])).
+
+arbitration-content-request = [
+  4, 10, arbitration-claim-id, retrieval-nonce,
+  buyer-retrieval-signature
+]
+
+retrieval-nonce = bstr .size 32
+buyer-retrieval-signature = bstr .size (1..256)
+
+; The Buyer signing domain is exactly deterministic-CBOR of the first four
+; elements: SignMessage(BuyerKey, deterministic-CBOR([4, 10, claim_id,
+; nonce])). The bare Claim ID, the bare nonce, any string concatenation, hex,
+; JSON, or the complete five-element request are never signed. The nonce is a
+; 32-byte application-generated cryptographic random value; all-zero is
+; rejected by the Go verifier because CDDL cannot express it.
+
+arbitration-content-response = [
+  4, 11, exact-arbitration-request-cbor,
+  exact-arbitration-response-cbor
+]
+
+exact-arbitration-request-cbor =
+  bstr .size (1..16843609) .cbor arbitration-request
+
+exact-arbitration-response-cbor =
+  bstr .size (1..568) .cbor arbitration-response
+
+; Kind 11 adds no third outer signature: the embedded exact Kind 8 carries the
+; SellerClaimSignature over [4, 8, claim_cbor] and the payload bundle, and the
+; embedded exact Kind 9 carries the ArbiterReceiptSignature over
+; [4, 9, receipt_cbor] plus the Arbiter transaction signature. A receiver MUST
+; fully verify that whole evidence chain — both child signatures, the Claim ID
+; equality across Kind 10 / Kind 8 Claim / Kind 9 Receipt, per-payload hashes
+; against the ordered content hashes, and the rebuilt-candidate transaction
+; signature — not merely decode the `.cbor` shapes above. Payloads appear only
+; once, inside the embedded Kind 8. Kind 11 expresses successful retrieval
+; only: NotFound/NotReady/Unauthorized/NonceReused/Gone travel on the
+; application error channel, never as a structurally valid Kind 11.

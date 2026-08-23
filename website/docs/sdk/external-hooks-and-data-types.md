@@ -127,7 +127,7 @@ transaction without embedded role signatures (CDDL label
 `refund-template-txid`). It is not a SHA-256 of raw bytes, not a byte-reversed
 hash, and not the txid of the final broadcast refund transaction.
 
-The wire package maps these values to canonical 001–007 CBOR. Transport
+The wire package maps these values to canonical 001–008 CBOR. Transport
 (HTTP, WebSocket, queue, CLI, or browser messaging) is deliberately absent;
 all environments carry the same bytes and use the same role methods.
 

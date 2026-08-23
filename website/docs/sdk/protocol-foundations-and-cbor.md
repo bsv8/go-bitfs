@@ -77,18 +77,21 @@ var (
 
 CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or application code. Applications MUST NOT re-encode protocol objects with another CBOR library or convert structs to JSON and sign the result.
 
-`wire` does not wrap the established 001–007 messages in a global envelope, which would alter their signed bytes and array layouts. The transport route, endpoint, or caller supplies the message kind; the CBOR body remains the exact deterministic bytes defined by each specification.
+`wire` does not wrap the established 001–008 messages in a global envelope, which would alter their signed bytes and array layouts. The transport route, endpoint, or caller supplies the message kind; the CBOR body remains the exact deterministic bytes defined by each specification.
 
 ```go
 // package wire
 // Kind is known to the transport and selects a decoder; it never identifies a
 // pool instance. Kind is distinct from signed body type numbers: the legacy
-// 001–006 CBOR bodies carry no kind element, while the Kind 8/9 bodies embed
-// their own body type as the second array element and sign it — Seller signs
-// exactly [4, 8, arbitration_claim_cbor] and the Arbiter signs exactly
-// [4, 9, arbitration_receipt_cbor]. Messages that define RefundTemplateTxID
-// carry it in the CBOR document. The 0201 presign request derives it from
-// RefundTx and has no separate correlation ID field.
+// 001–006 CBOR bodies carry no kind element, while the Kind 8/9/10/11 bodies
+// embed their own body type as the second array element and sign it — Seller
+// signs exactly [4, 8, arbitration_claim_cbor], the Arbiter signs exactly
+// [4, 9, arbitration_receipt_cbor], and the Buyer retrieval request signs
+// exactly deterministic-CBOR([4, 10, claim_id, nonce]) while Kind 11 adds no
+// new outer signature over its embedded exact Kind 8/9 children. Messages
+// that define RefundTemplateTxID carry it in the CBOR document. The 0201
+// presign request derives it from RefundTx and has no separate correlation
+// ID field.
 type Kind uint16
 
 const (

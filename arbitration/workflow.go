@@ -455,6 +455,56 @@ func validateRequestEvidence(request *ArbitrationRequest, arbiterAmountSat uint6
 	return claim, terms, payloads, unsigned, claimID, append([]byte(nil), authHash[:]...), keys, nil
 }
 
+// BuiltClaim is the shared, time-independent result of assembling the exact
+// Kind 8 Claim evidence from a complete OpeningProof and the Buyer-signed 003.
+// Seller arbitration (007) and buyer content retrieval (008) both consume this
+// single builder so both roles always derive byte-identical ClaimCBOR and
+// ClaimID from the same opening plus authorization.
+type BuiltClaim struct {
+	// Claim is the decoded, deep-copied Claim evidence behind ClaimCBOR.
+	Claim *ArbitrationClaim
+	// ClaimCBOR is the exact canonical five-element Claim child document.
+	ClaimCBOR []byte
+	// ClaimID is SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor])).
+	ClaimID []byte
+	// Terms are the decoded 003 terms carried by the authorization.
+	Terms *bitfs.ContentRequestTerms
+}
+
+// BuildClaimFromAuthorization derives the pool output facts from the supplied
+// OpeningProof, verifies that the signed 003 belongs to that exact opening,
+// assembles and canonically encodes the Claim, and computes its Claim ID. It
+// clones every input, applies no clock or block-height gate, and produces no
+// signature; deadline/refund gates remain with the calling workflows.
+func BuildClaimFromAuthorization(opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest) (*BuiltClaim, error) {
+	opening = pool.CloneOpeningProof(opening)
+	authorization = bitfs.CloneSignedContentRequest(authorization)
+	details, err := pool.DeriveOpeningDetails(opening)
+	if err != nil {
+		return nil, err
+	}
+	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, opening)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", pool.ErrInvalidEvidence, err)
+	}
+	claim := &ArbitrationClaim{
+		PoolOutputSatoshis:      details.PoolOutputSatoshis,
+		PoolOutputLockingScript: details.PoolLockingScript,
+		RefundTemplateRaw:       opening.RefundTx,
+		TermsCBOR:               authorization.TermsCBOR,
+		BuyerSignature:          authorization.BuyerSignature,
+	}
+	claimCBOR, err := MarshalClaim(claim)
+	if err != nil {
+		return nil, err
+	}
+	claimID, err := ArbitrationClaimID(claimCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return &BuiltClaim{Claim: cloneClaim(claim), ClaimCBOR: claimCBOR, ClaimID: claimID, Terms: terms}, nil
+}
+
 func ValidateClaim(claim *ArbitrationClaim) error {
 	if claim == nil || claim.PoolOutputSatoshis == 0 || len(claim.PoolOutputLockingScript) == 0 || len(claim.RefundTemplateRaw) == 0 || len(claim.TermsCBOR) == 0 || len(claim.BuyerSignature) == 0 {
 		return fmt.Errorf("%w: arbitration Claim is incomplete", pool.ErrInvalidEvidence)

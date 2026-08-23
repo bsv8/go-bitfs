@@ -589,3 +589,52 @@ func sellerProducedSignatures(signed *pool.SignedPayment) [][]byte {
 	}
 	return [][]byte{signed.State.SellerTransactionSignature}
 }
+
+// TestSharedClaimBuilderProducesIdenticalClaimEvidence proves the 007 seller
+// path and the 008 buyer retrieval path share one Claim builder: for the same
+// OpeningProof plus exact signed 003, both sides get byte-identical ClaimCBOR
+// and therefore the identical ArbitrationClaimID, and the golden Kind 8 bytes
+// stay unchanged after the shared-builder switch.
+func TestSharedClaimBuilderProducesIdenticalClaimEvidence(t *testing.T) {
+	f := newSellerFixture(t)
+	opened := f.openPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitrationRequest, err := f.Seller.BuildArbitrationRequest(ctx, opened.Opening, request, delivery, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellerClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Buyer 侧：仅凭 opening + 精确签名 003，无 Seller Claim 签名与 payload。
+	built, err := arbitration.BuildClaimFromAuthorization(opened.Opening, request)
+	if err != nil {
+		t.Fatalf("buyer-side shared builder failed: %v", err)
+	}
+	if !bytes.Equal(built.ClaimCBOR, arbitrationRequest.ClaimCBOR) {
+		t.Fatal("shared builder produced different ClaimCBOR than the seller Kind 8")
+	}
+	if !bytes.Equal(built.ClaimID, sellerClaimID) {
+		t.Fatal("shared builder produced a different Claim ID than the seller path")
+	}
+	// Kind 8 golden 形状在共享 builder 切换后保持不变。
+	rawKind8, err := arbitration.MarshalRequest(arbitrationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawKind8) < 2 || rawKind8[0] != 0x85 || rawKind8[1] != 0x04 || rawKind8[2] != 0x08 {
+		t.Fatalf("seller Kind 8 shape drifted: %x", rawKind8[:3])
+	}
+}

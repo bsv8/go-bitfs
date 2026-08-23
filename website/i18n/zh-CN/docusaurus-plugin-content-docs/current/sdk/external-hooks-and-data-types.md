@@ -52,7 +52,7 @@ SDK 没有时钟注入，也不访问节点，更不接收 `now` 参数。每个
 
 贯穿这些类型的关联字段是 `pool.RefundTemplateTxID`——一个专用 `[32]byte` 类型，承载未嵌入角色签名的规范退款模板交易的 canonical TxID（CDDL 标签 `refund-template-txid`）。它不是原始字节的 SHA-256，不是翻转字节序的哈希，也不是最终广播退款交易的链上 txid。
 
-wire 包把这些值映射为规范化的 001–007 CBOR。传输（HTTP、WebSocket、队列、CLI 或浏览器消息）刻意缺席；所有环境承载同样的字节、使用同样的角色方法。
+wire 包把这些值映射为规范化的 001–008 CBOR。传输（HTTP、WebSocket、队列、CLI 或浏览器消息）刻意缺席；所有环境承载同样的字节、使用同样的角色方法。
 
 ## 什么不是扩展点
 

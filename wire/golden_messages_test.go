@@ -363,3 +363,105 @@ func TestGoldenWireBytes007(t *testing.T) {
 		t.Fatalf("paid fee drifted: receipt %d unsigned %d want %d", receipt.ArbiterAmountSat, unsigned.ArbiterAmountSat, arbitrationFeeSat)
 	}
 }
+
+// TestGoldenWireBytes008 freezes the Kind 10 retrieval request and the Kind
+// 11 custody evidence response against compatibility breaks. The embedded
+// Kind 8/9 are exactly the already-frozen 007 golden bytes; nothing is
+// recomputed or rewritten for 008.
+func TestGoldenWireBytes008(t *testing.T) {
+	request, arbiter := wireArbitrationEvidence(t)
+	claimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const arbitrationFeeSat = uint64(500)
+	prepared, err := arbiter.PreparePayment(nil, request, 900000, arbitrationFeeSat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := arbiter.SignPreparedPayment(nil, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactKind8, err := MarshalArbitrationRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactKind9, err := MarshalArbitrationResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes.Repeat([]byte{0xa7}, 32)
+	signingDomain, err := arbitration.BuyerRetrievalSigningCBOR(claimID, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyerSig, err := bitfs.SignMessage(mustGoldenKey(t, "55"), signingDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalRequest := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), nonce...), BuyerSignature: buyerSig}
+	rawRequest, err := MarshalArbitrationContentRequest(retrievalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalResponse := &arbitration.ContentRetrievalResponse{Version: arbitration.MajorVersion, ArbitrationRequestCBOR: append([]byte(nil), exactKind8...), ArbitrationResponseCBOR: append([]byte(nil), exactKind9...)}
+	rawResponse, err := MarshalArbitrationContentResponse(retrievalResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]byte{
+		"signingDomain": signingDomain,
+		"buyerSig":      buyerSig,
+		"request":       rawRequest,
+		"response":      rawResponse,
+	}
+	want := map[string]string{
+		"claimID": "21d2abc826024bdd797c620fd99e159107c8ba331b43c9c6682da968ef069c92",
+		// deterministic-CBOR([4, 10, claim_id, nonce_a7*32])
+		"signingDomain": "84040a582021d2abc826024bdd797c620fd99e159107c8ba331b43c9c6682da968ef069c925820a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+		"buyerSig":      "304402207423087fee48adc903ec132c351878df9c91ce8804b004f734bfcf65e23f897202200b630e7c7be5b52a1d897edf363b87b3a4bb3428c636ff43e733b67dbbae245a",
+		// [4, 10, claim_id, nonce, buyer_signature]
+		"request": "85040a582021d2abc826024bdd797c620fd99e159107c8ba331b43c9c6682da968ef069c925820a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a75846304402207423087fee48adc903ec132c351878df9c91ce8804b004f734bfcf65e23f897202200b630e7c7be5b52a1d897edf363b87b3a4bb3428c636ff43e733b67dbbae245a",
+		// [4, 11, exact_kind8_cbor, exact_kind9_cbor]; the children are the
+		// already-frozen 007 golden request/response bytes, verbatim.
+		"response": "84040b5902208504085901c8851a000186a058695221029ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b2102466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f2721023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b153ae58990100000001d4d85eaee88d6d1c68c1132d77e82ddec873cdd69dfc74a3048dcfe239bfd8df000000000002000000039f860100000000001976a914e1fae3324e28a4ef5ee01f14dd337ac6c85d1d9088ac00000000000000001976a914531260aa2a199e228c537dfa42c82bea2c7c1f4d88ac00000000000000001976a9143bc28d6d92d9073fb5e3adf481795eaf446bceed88ac009435775872865820010101010101010101010101010101010101010101010101010101010101010158201471b6de28f056c2e6818fad24ee6621618dc4e0869c86c3b185db7ddf8725610318645823815820239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e51a773594645846304402201da8f281734183760083ef98a3e841c9e630b5f29e12c5ffd166d748d1d94a1c02203995171e0d5b76c7b6c51d029df05815c2e19406d4fcc2531f3c567f6cb703fe58463044022003172b7f261668c5a5f6128dbc5c1439dd4725ca1ff8ab585cb4b42d15fdf76702202e4db4ef869671ddb6718907a098e24125e36106e79cf1a5ba475233eb773e584981477061796c6f616458be840409587083582021d2abc826024bdd797c620fd99e159107c8ba331b43c9c6682da968ef069c921901f458483045022100cd71f61c0c205466528f91351de587163677276592ee81fb78ff612c190d9b83022006a4a0d978d72622ec0e3db0aa6040bec639aa6fc2d3ce7753037756600879cc4158473045022100e4e045fdab4682d2f2265a28680c95a09f1b2e067ba432595b5becef96e008dd02205c81121a0ea01de3479871a3a1b7fad3771f81632c0372642583d1e2fc453bcf",
+	}
+	for name, value := range got {
+		if hex.EncodeToString(value) != want[name] {
+			t.Fatalf("golden 008 %s mismatch:\n got %s\nwant %s", name, hex.EncodeToString(value), want[name])
+		}
+	}
+	if hex.EncodeToString(claimID) != want["claimID"] {
+		t.Fatalf("golden 008 claim ID drifted: %s", hex.EncodeToString(claimID))
+	}
+	// 内嵌 Kind 8/9 必须与既有 007 golden 逐字节相同，绝不为 008 重算或改写。
+	decodedResponse, err := UnmarshalArbitrationContentResponse(rawResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decodedResponse.ArbitrationRequestCBOR, exactKind8) || !bytes.Equal(decodedResponse.ArbitrationResponseCBOR, exactKind9) {
+		t.Fatal("embedded Kind 8/9 are not byte-identical to the persisted evidence")
+	}
+	if len(rawRequest) == 0 || rawRequest[0] != 0x85 || rawRequest[1] != 0x04 || rawRequest[2] != 0x0a {
+		t.Fatalf("Kind 10 must be a five-element [4,10,...] array: %x", rawRequest)
+	}
+	if len(rawResponse) == 0 || rawResponse[0] != 0x84 || rawResponse[1] != 0x04 || rawResponse[2] != 0x0b {
+		t.Fatalf("Kind 11 must be a four-element [4,11,...] array: %x", rawResponse)
+	}
+	decodedRequest, err := UnmarshalArbitrationContentRequest(rawRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decodedRequest.ClaimID, claimID) || !bytes.Equal(decodedRequest.Nonce, nonce) || !bytes.Equal(decodedRequest.BuyerSignature, buyerSig) {
+		t.Fatal("Kind 10 round trip changed fields")
+	}
+	againRequest, err := MarshalArbitrationContentRequest(decodedRequest)
+	if err != nil || !bytes.Equal(rawRequest, againRequest) {
+		t.Fatal("Kind 10 decode/encode round trip changed bytes")
+	}
+	againResponse, err := MarshalArbitrationContentResponse(decodedResponse)
+	if err != nil || !bytes.Equal(rawResponse, againResponse) {
+		t.Fatal("Kind 11 decode/encode round trip changed bytes")
+	}
+}

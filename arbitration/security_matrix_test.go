@@ -621,3 +621,158 @@ func TestPreparedPaymentGettersReturnDeepCopies(t *testing.T) {
 		t.Fatal("UnsignedPayment getter returned internal references")
 	}
 }
+
+// TestContentRetrievalSignatureReplayMatrix pins the Kind 10 authorization
+// boundary: a buyer signature over [4,10,claim_id,nonce] authorizes exactly
+// one Claim ID with exactly one nonce under kind 10 — the same bytes signed
+// for a different Claim, a different nonce, or any other signing domain are
+// all rejected by the fixed verifier.
+func TestContentRetrievalSignatureReplayMatrix(t *testing.T) {
+	evidence := makeArbitrationEvidence(t)
+	workflow := mustArbiterWorkflow(t)
+	_, prepared := mustSignPrepared(t, evidence)
+	response, err := workflow.SignPreparedPayment(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedRequest := prepared.Request()
+	claimID, err := ArbitrationClaimID(storedRequest.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signing, err := BuyerRetrievalSigningCBOR(claimID, testRetrievalNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyerSig, err := bitfs.SignMessage(evidence.keys[0], signing)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 同一签名贴到另一个 Claim ID。
+	other := makeArbitrationEvidenceWithPayloads(t, [][]byte{mustDigest(t, "matrix-other")}, [][]byte{[]byte("matrix-other")})
+	_, preparedOther := mustSignPrepared(t, other)
+	responseOther, err := workflow.SignPreparedPayment(context.Background(), preparedOther)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedOther := preparedOther.Request()
+	otherID, err := ArbitrationClaimID(storedOther.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reusedForOther := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), otherID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	if _, err := workflow.VerifyContentRetrievalRequest(reusedForOther, storedRequest, response); err == nil {
+		t.Fatal("Kind 10 signature authorized a different Claim ID")
+	}
+	if _, err := workflow.VerifyContentRetrievalRequest(reusedForOther, storedOther, responseOther); err == nil {
+		t.Fatal("Kind 10 signature signed over another claim's domain verified elsewhere")
+	}
+
+	// 同一签名贴到不同 nonce。
+	freshNonce := bytes.Repeat([]byte{0x5a}, RetrievalNonceBytes)
+	reusedNonce := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), freshNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	if _, err := workflow.VerifyContentRetrievalRequest(reusedNonce, storedRequest, response); err == nil {
+		t.Fatal("Kind 10 signature authorized a different nonce")
+	}
+
+	// Kind 混淆：把 Kind 9 的回执签名当作 Kind 10 签名、反之亦然，都必须失败。
+	wrongKindDomain, err := SellerClaimSigningCBOR(storedRequest.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind8Signed, err := bitfs.SignMessage(evidence.keys[0], wrongKindDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossKind := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: kind8Signed}
+	if _, err := workflow.VerifyContentRetrievalRequest(crossKind, storedRequest, response); err == nil {
+		t.Fatal("a [4,8,...]-domain signature authorized retrieval")
+	}
+	receiptDomain, err := ArbiterReceiptSigningCBOR(response.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind9Signed, err := bitfs.SignMessage(evidence.keys[0], receiptDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossKind2 := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: kind9Signed}
+	if _, err := workflow.VerifyContentRetrievalRequest(crossKind2, storedRequest, response); err == nil {
+		t.Fatal("a [4,9,...]-domain signature authorized retrieval")
+	}
+
+	// 正向基线：精确 (ClaimID, nonce) 组合通过。
+	validRequest := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	if _, err := workflow.VerifyContentRetrievalRequest(validRequest, storedRequest, response); err != nil {
+		t.Fatalf("exact replay-key request was rejected: %v", err)
+	}
+}
+
+// TestStoredCustodyPairCrossSplicingIsRejected covers record-level attacks:
+// one record's exact Kind 8 paired with another record's Kind 9, and a
+// receipt transplanted onto foreign claim bytes, must both fail even though
+// every individual document is internally valid.
+func TestStoredCustodyPairCrossSplicingIsRejected(t *testing.T) {
+	first := makeArbitrationEvidenceWithPayloads(t, [][]byte{mustDigest(t, "splice-one")}, [][]byte{[]byte("splice-one")})
+	second := makeArbitrationEvidenceWithPayloads(t, [][]byte{mustDigest(t, "splice-two")}, [][]byte{[]byte("splice-two")})
+	workflow := mustArbiterWorkflow(t)
+	preparedFirst, err := workflow.PreparePayment(context.Background(), first.request, 900000, testArbitrationFeeSat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedSecond, err := workflow.PreparePayment(context.Background(), second.request, 900000, testArbitrationFeeSat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseFirst, err := workflow.SignPreparedPayment(context.Background(), preparedFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseSecond, err := workflow.SignPreparedPayment(context.Background(), preparedSecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	splicedA := &ArbitrationResponse{Version: MajorVersion, ReceiptCBOR: responseSecond.ReceiptCBOR, ArbiterReceiptSignature: responseSecond.ArbiterReceiptSignature}
+	if _, err := VerifyCustodiedContent(first.request, splicedA); err == nil {
+		t.Fatal("record A accepted record B's receipt response")
+	}
+	splicedB := &ArbitrationResponse{Version: MajorVersion, ReceiptCBOR: responseFirst.ReceiptCBOR, ArbiterReceiptSignature: responseFirst.ArbiterReceiptSignature}
+	if _, err := VerifyCustodiedContent(second.request, splicedB); err == nil {
+		t.Fatal("record B accepted record A's receipt response")
+	}
+}
+
+// TestBuyerDerivesSameClaimIDWithoutSellerEvidence proves the retrieval-side
+// property that makes Claim-ID routing work offline: from only the
+// OpeningProof plus the exact signed 003 — no Seller Claim signature, no
+// payload bundle, no Kind 9 — the shared builder produces byte-identical
+// ClaimCBOR and therefore the identical ArbitrationClaimID.
+func TestBuyerDerivesSameClaimIDWithoutSellerEvidence(t *testing.T) {
+	evidence := makeArbitrationEvidence(t)
+	sellerClaimID, err := ArbitrationClaimID(evidence.request.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := UnmarshalClaim(evidence.request.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization := &bitfs.SignedContentRequest{TermsCBOR: append([]byte(nil), claim.TermsCBOR...), BuyerSignature: append([]byte(nil), claim.BuyerSignature...)}
+	built, err := BuildClaimFromAuthorization(evidence.proof, authorization)
+	if err != nil {
+		t.Fatalf("buyer-side shared builder failed without seller evidence: %v", err)
+	}
+	if !bytes.Equal(built.ClaimCBOR, evidence.request.ClaimCBOR) {
+		t.Fatal("shared builder produced different ClaimCBOR than the seller path")
+	}
+	if !bytes.Equal(built.ClaimID, sellerClaimID) {
+		t.Fatal("buyer-derived Claim ID differs from the seller/arbiter Claim ID")
+	}
+	// 输入克隆证明：调用方缓冲区被篡改后再次构建仍得到原始结果。
+	authorization.TermsCBOR[len(authorization.TermsCBOR)-1] ^= 1
+	if _, err := BuildClaimFromAuthorization(evidence.proof, authorization); err == nil {
+		t.Fatal("tampered authorization was accepted by the shared builder")
+	}
+}

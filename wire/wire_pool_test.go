@@ -312,3 +312,108 @@ func wireTestBuyerKey(t *testing.T) *ec.PrivateKey {
 	}
 	return key
 }
+
+func TestArbitrationContentMessagesTypedRoundTrip(t *testing.T) {
+	request, arbiter := wireArbitrationEvidence(t)
+	claimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactKind8, err := MarshalArbitrationRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := arbiter.PreparePayment(context.Background(), request, 900000, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := arbiter.SignPreparedPayment(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactKind9, err := MarshalArbitrationResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalResponseStruct, err := arbitration.BuildContentRetrievalResponse(exactKind8, exactKind9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw11, err := Marshal(ArbitrationContentResponse, retrievalResponseStruct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signingDomain, err := arbitration.BuyerRetrievalSigningCBOR(claimID, bytes.Repeat([]byte{0x71}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyerSig, err := bitfs.SignMessage(wireTestBuyerKey(t), signingDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalRequest := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: bytes.Repeat([]byte{0x71}, 32), BuyerSignature: buyerSig}
+	rawPacket10, err := Marshal(ArbitrationContentRequest, retrievalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10 := rawPacket10.CBOR
+	if len(raw10) == 0 || raw10[0] != 0x85 || raw10[1] != 0x04 || raw10[2] != 0x0a {
+		t.Fatalf("Kind 10 must be a five-element [4,10,...] array: %x", raw10)
+	}
+	if len(raw11.CBOR) == 0 || raw11.CBOR[0] != 0x84 || raw11.CBOR[1] != 0x04 || raw11.CBOR[2] != 0x0b {
+		t.Fatalf("Kind 11 must be a four-element [4,11,...] array: %x", raw11.CBOR)
+	}
+
+	decoded10, err := Unmarshal(ArbitrationContentRequest, raw10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed10, ok := decoded10.(*arbitration.ContentRetrievalRequest)
+	if !ok || !bytes.Equal(typed10.ClaimID, claimID) || !bytes.Equal(typed10.Nonce, retrievalRequest.Nonce) || !bytes.Equal(typed10.BuyerSignature, buyerSig) {
+		t.Fatal("Kind 10 typed round trip changed fields")
+	}
+	decoded11, err := Unmarshal(ArbitrationContentResponse, raw11.CBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed11, ok := decoded11.(*arbitration.ContentRetrievalResponse)
+	if !ok || !bytes.Equal(typed11.ArbitrationRequestCBOR, exactKind8) || !bytes.Equal(typed11.ArbitrationResponseCBOR, exactKind9) {
+		t.Fatal("embedded Kind 8/9 exact bytes did not survive the Kind 11 round trip")
+	}
+
+	// 错误 Go 类型必须被拒绝。
+	if _, err := Marshal(ArbitrationContentRequest, response); err == nil {
+		t.Fatal("wire kind 10 accepted a foreign Go type")
+	}
+	if _, err := Marshal(ArbitrationContentResponse, retrievalRequest); err == nil {
+		t.Fatal("wire kind 11 accepted a foreign Go type")
+	}
+
+	// transport Kind 必须与 CBOR 本体第二项一致：贴错一律失败。
+	if _, err := Unmarshal(ArbitrationContentResponse, raw10); err == nil {
+		t.Fatal("Kind 10 body decoded as Kind 11")
+	}
+	if _, err := Unmarshal(ArbitrationContentRequest, raw11.CBOR); err == nil {
+		t.Fatal("Kind 11 body decoded as Kind 10")
+	}
+	// 8/9/10/11 交叉解码全部拒绝。
+	if _, err := Unmarshal(ArbitrationRequest, raw10); err == nil {
+		t.Fatal("Kind 10 body decoded as Kind 8")
+	}
+	if _, err := Unmarshal(ArbitrationResponse, raw10); err == nil {
+		t.Fatal("Kind 10 body decoded as Kind 9")
+	}
+	if _, err := Unmarshal(ArbitrationRequest, raw11.CBOR); err == nil {
+		t.Fatal("Kind 11 body decoded as Kind 8")
+	}
+	if _, err := Unmarshal(ArbitrationResponse, raw11.CBOR); err == nil {
+		t.Fatal("Kind 11 body decoded as Kind 9")
+	}
+	if _, err := Unmarshal(ArbitrationContentRequest, exactKind9); err == nil {
+		t.Fatal("Kind 9 body decoded as Kind 10")
+	}
+	if _, err := Unmarshal(ArbitrationContentResponse, exactKind8); err == nil {
+		t.Fatal("Kind 8 body decoded as Kind 11")
+	}
+}

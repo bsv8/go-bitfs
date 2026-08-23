@@ -5,7 +5,7 @@ title: Migrating from bsv8-gateway
 
 # Migrating from bsv8-gateway
 
-`go-bitfs` is now the single source of truth for the BitFS v4 file exchange, arbitration, and MultisigPool v4 fee pool protocol. The CDDL files under the directory named `spec/v1` are retained solely for historical path compatibility and MUST NOT be used for the current protocol; the current source of truth is `spec/v4` and the v4 documents numbered 001–007.
+`go-bitfs` is now the single source of truth for the BitFS v4 file exchange, arbitration, and MultisigPool v4 fee pool protocol. The CDDL files under the directory named `spec/v1` are retained solely for historical path compatibility and MUST NOT be used for the current protocol; the current source of truth is `spec/v4` and the v4 documents numbered 001–008.
 
 - Remove all dependencies on `proto/bitfs/*` and its generated code; the current BitFS business wire schema is governed by the v4 CDDL and deterministic CBOR defined in 001, 003, and 004.
 - Remove all dependencies on the legacy fee pool proto and gRPC generated code; the current 002, 005, 006, and 007 are governed by the v4 pool/arbitration CDDL and the published MultisigPool transaction bytes.

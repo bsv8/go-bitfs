@@ -93,6 +93,30 @@ func (workflow *Workflow) CompleteImmediateClose(ctx context.Context, opening *p
 // 把保存的退款签名合并为可广播交易。SDK 不因存在某笔本地付款状态而拒绝构造。
 // 广播是应用的职责；SDK 绝不提交任何东西。
 func (workflow *Workflow) BuildRefundAfterExpiry(ctx context.Context, opening *pool.OpeningProof, blockHeight uint32) ([]byte, *pool.PaymentState, error)
+
+// BuildArbitrationContentRequest 通过共享 Claim builder 从买方自己的 opening
+// 加精确签名 003 独立重建 Claim ID，用固定消息路径签署 [4, 10, claim_id, nonce]
+// 并立即自验，返回深拷贝 Kind 10。nonce 是应用生成的 32 字节随机值；取件是
+// 事后恢复，不重新应用任何报价/截止/退款时间门禁。
+func (workflow *Workflow) BuildArbitrationContentRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, nonce []byte) (*arbitration.ContentRetrievalRequest, error)
+
+// AcceptArbitratedContent 在完全不读时钟的前提下端到端验收 Kind 11 响应：
+// 时间无关的 quote/003/opening 证据验证、exact Kind 10 校验、内嵌 ClaimCBOR
+// 与本地重建逐字节比较、完整托管证据链（Seller Claim、Receipt Claim ID、
+// 回执签名、交易签名）、payload membership/长度/定价与 previous 连续性。
+type ArbitratedContentInput struct {
+    Seed []byte // 取回批次包含任何块时必须提供
+}
+
+type VerifiedArbitratedContent struct {
+    ClaimID  []byte                          // 已验证的仲裁 Claim 身份
+    Payloads [][]byte                        // 按授权顺序排列的已验证内容
+    Receipt  *arbitration.ArbitrationReceipt // Kind 9 审计数据
+}
+
+// 返回值刻意没有 PaymentUpdate：008 验收绝不产生 005、绝不签买方交易、
+// 绝不构造关池交易。
+func (workflow *Workflow) AcceptArbitratedContent(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, authorization *bitfs.SignedContentRequest, retrievalRequest *arbitration.ContentRetrievalRequest, retrievalResponse *arbitration.ContentRetrievalResponse, input ArbitratedContentInput) (*VerifiedArbitratedContent, error)
 ```
 
 配套输入类型：
@@ -231,6 +255,55 @@ func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, p
 // PreparedPayment 深复制 getter：Request()、ContentPayloadsCBOR()、
 // ContentPayloads()、ClaimID()、ArbiterAmountSat()、PaymentAuthorizationHash()、
 // UnsignedPayment()、DeadlineUnix()、PreparedAt()。
+
+// ContentRetrievalRequest 是精确五元 Kind 10 报文。
+type ContentRetrievalRequest struct {
+    Version        uint64
+    ClaimID        []byte // 32 字节
+    Nonce          []byte // 32 字节且非全零
+    BuyerSignature []byte
+}
+
+// ContentRetrievalResponse 是精确四元 Kind 11 报文，原样内嵌已持久化的
+// exact Kind 8/9 字节；payload 只在内嵌 Kind 8 中出现一次。
+// Kind 11 不存在第三条外层签名。
+type ContentRetrievalResponse struct {
+    Version                 uint64
+    ArbitrationRequestCBOR  []byte
+    ArbitrationResponseCBOR []byte
+}
+
+// VerifiedCustodiedContent 是完整托管证据验证后的深拷贝结果。
+type VerifiedCustodiedContent struct {
+    ClaimID      []byte
+    PayloadsCBOR []byte
+    Payloads     [][]byte
+    Receipt      *ArbitrationReceipt
+    Request      *ArbitrationRequest
+    Response     *ArbitrationResponse
+}
+
+func BuyerRetrievalSigningCBOR(claimID, nonce []byte) ([]byte, error)
+func MarshalContentRetrievalRequest(request *ContentRetrievalRequest) ([]byte, error)
+func UnmarshalContentRetrievalRequest(raw []byte) (*ContentRetrievalRequest, error)
+func ValidateContentRetrievalResponse(response *ContentRetrievalResponse) error
+func MarshalContentRetrievalResponse(response *ContentRetrievalResponse) ([]byte, error)
+func UnmarshalContentRetrievalResponse(raw []byte) (*ContentRetrievalResponse, error)
+
+// VerifyCustodiedContent 执行完整的时间无关证据链：两份子文档 strict decode、
+// Seller Claim 签名、Buyer terms 签名、payload 数量/顺序/hash、与 Receipt 的
+// Claim ID 一致性、回执签名以及按回执费用重建 candidate 后的交易签名。
+// 它从不读时钟。
+func VerifyCustodiedContent(arbitrationRequest *ArbitrationRequest, arbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error)
+
+// VerifyContentRetrievalRequest 用存储记录鉴权一个 Kind 10：先完整托管验证，
+// 再检查仲裁方 key，最后用从存储 Claim 恢复的买方公钥验证 [4, 10, claim_id,
+// nonce] 签名。查找、nonce 原子性、retention 与传输仍由应用负责。
+func (workflow *Workflow) VerifyContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest, storedArbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error)
+
+// BuildContentRetrievalResponse 先 strict decode 并完整验证两份精确持久化
+// 托管文档，再把原文逐字节嵌入 Kind 11，绝不重编码。
+func BuildContentRetrievalResponse(exactKind8, exactKind9 []byte) (*ContentRetrievalResponse, error)
 ```
 
 pool 包还刻意公开一个供 007 证据路径使用的纯函数：
@@ -355,6 +428,36 @@ broadcast(final.RawTx)
 
 raw, state, _ := buyerWorkflow.BuildRefundAfterExpiry(ctx, opening, currentHeight)
 broadcast(raw)
+```
+
+### 8. 买方取回仲裁托管内容（008）
+
+Seller 与 Buyer 无法直连但都能连接仲裁方时：
+
+```go
+// Buyer：只凭 opening + 精确签名 003 本地重建 Claim ID；
+// nonce 来自应用的 crypto/rand 随机源。
+nonce := make([]byte, arbitration.RetrievalNonceBytes)
+rand.Read(nonce)
+retrievalRequest, err := buyerWorkflow.BuildArbitrationContentRequest(ctx,
+    opening, sent003Authorization, nonce)
+rawKind10, err := wire.MarshalArbitrationContentRequest(retrievalRequest)
+journal.RecordOutbox("kind10", rawKind10) // 发送前持久化 exact Kind 10
+sendToArbiter(rawKind10)
+
+// 仲裁方应用：strict decode -> 查找 -> Retrievable 判定 ->
+// VerifyContentRetrievalRequest（先验签）-> nonce 原子 CAS ->
+// BuildContentRetrievalResponse 内嵌 exact Kind 8/9 原文。
+rawKind11 := handleContentRetrieval(rawKind10)
+sendToBuyer(rawKind11)
+
+// Buyer：完整时间无关验收；全程不读时钟。
+kind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+verified, err := buyerWorkflow.AcceptArbitratedContent(ctx, quote, opening,
+    latest, sent003Authorization, retrievalRequest, kind11, buyer.ArbitratedContentInput{Seed: seedBytes})
+for _, payload := range verified.Payloads { save(payload) } // 应用落盘
+// verified 没有 PaymentUpdate：008 绝不产生 005，也绝有关池。若 Seller 从未
+// 提交 007，Buyer 只能等待或等 nLockTime 到期后广播预签名 RefundTx。
 ```
 
 在每一种结局中，SDK 只负责计算与验证；发送、广播、持久化、重试与对账都是应用动作。

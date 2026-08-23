@@ -18,8 +18,17 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 		forbidden []string
 	}{
 		"docs/protocol/wire-messages.zh.md": {
-			required:  []string{"[4, 8, arbitration_claim_cbor", "[4, 9, arbitration_receipt_cbor", "arbitration_claim_id, arbiter_amount_sat, arbiter_transaction_signature", "原子持久化 exact request/payload/Claim ID/费用"},
-			forbidden: []string{"开池证据+授权+候选交易", "开池证据编码（内嵌 007）", "Kind 不进入签名字节", "[4, 9, arbitration_result_cbor", "request_commitment", "content_payloads_hash", "unsigned_state_tx_hash"},
+			required: []string{"[4, 8, arbitration_claim_cbor", "[4, 9, arbitration_receipt_cbor", "arbitration_claim_id, arbiter_amount_sat, arbiter_transaction_signature", "原子持久化 exact request/payload/Claim ID/费用",
+				// 008 当前真值：Kind 10/11 形状、Buyer 签名域、exact Kind 8/9 内嵌
+				// 与"取件 wire 由 SDK 固定"的边界表述。
+				"[4, 10, arbitration_claim_id, retrieval_nonce, buyer_retrieval_signature]",
+				"[4, 11, exact_arbitration_request_cbor, exact_arbitration_response_cbor]",
+				"deterministic-CBOR(`[4, 10, claim_id, nonce]`)",
+				"存储、nonce 去重和传输仍由应用负责",
+				"Buyer 关池不在协议内：协商走 006，或等 nLockTime 后广播 002 的预签名 RefundTx"},
+			forbidden: []string{"开池证据+授权+候选交易", "开池证据编码（内嵌 007）", "Kind 不进入签名字节", "[4, 9, arbitration_result_cbor", "request_commitment", "content_payloads_hash", "unsigned_state_tx_hash",
+				// 禁止回归：把 008 写成关池/005 或宣称链上结算。
+				"取件后发送 005", "Kind 11 证明交易已上链", "Arbiter 帮 Buyer 关池"},
 		},
 		"website/docs/protocol/003-content-request-requirements.md": {
 			required:  []string{"A 007 Claim does not carry that OpeningProof", "independently rebuild the candidate"},
@@ -67,18 +76,67 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 			forbidden: []string{"三个 Result hash", "五元 Kind 9 响应有效", "ArbiterAmountSat = 0"},
 		},
 		"spec/v4/bitfs.cddl": {
-			required:  []string{"hard-switched five times"},
-			forbidden: []string{"hard-switched three times", "hard-switched four times before launch"},
+			required:  []string{"hard-switched six times", "008 added Buyer custody retrieval"},
+			forbidden: []string{"hard-switched three times", "hard-switched four times before launch", "hard-switched five times"},
 		},
 		"spec/v4/arbitration.cddl": {
-			required: []string{"arbitration-request", "arbitration-response", "arbitration-receipt = [arbitration-claim-id, arbiter-amount-sat, arbiter-transaction-signature]", "arbiter-amount-sat = uint .gt 0"},
+			required: []string{"arbitration-request", "arbitration-response", "arbitration-receipt = [arbitration-claim-id, arbiter-amount-sat, arbiter-transaction-signature]", "arbiter-amount-sat = uint .gt 0",
+				// 008 唯一形状：Kind 10/11、Buyer 签名域与完整验证要求。
+				"arbitration-content-request", "arbitration-content-response",
+				"retrieval-nonce = bstr .size 32", "buyer-retrieval-signature = bstr .size (1..256)",
+				"SignMessage(BuyerKey, deterministic-CBOR([4, 10, claim_id,",
+				"MUST\n; fully verify that whole evidence chain"},
+		},
+		"website/docs/protocol/008-buyer-arbitrated-content-retrieval-spec.md": {
+			required: []string{
+				"ArbitrationContentRequest",
+				"ArbitrationContentResponse",
+				"SignMessage(BuyerKey, buyer_retrieval_signing_cbor)",
+				"SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))",
+				"deterministic-CBOR([4, 10, claim_id, nonce])",
+				"No third outer signature exists on Kind 11",
+				"byte-for-byte equal to the locally rebuilt expected ClaimCBOR",
+				"does not produce a 005 PaymentUpdate",
+				"= 16,844,188 bytes",
+			},
+			forbidden: []string{"buyer+arbiter close transaction exists", "BuyerClose", "reuses Kind 6 ContentDelivery"},
+		},
+		"website/docs/protocol/008-buyer-arbitrated-content-retrieval-requirements.md": {
+			required: []string{
+				"MUST NOT provide buyer arbitration close",
+				"atomically occupy unique (ClaimID, Nonce)",
+				"TLS or an equivalently secure transport",
+				"a new nonce for every retry",
+				"Gone after retention ends with safe deletion",
+			},
+			forbidden: []string{"Claim ID alone authorizes download", "AcceptDelivery(ctx"},
+		},
+		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/protocol/008-buyer-arbitrated-content-retrieval-spec.md": {
+			required: []string{
+				"[4, 10, arbitration_claim_id, retrieval_nonce, buyer_retrieval_signature]",
+				"[4, 11, exact_arbitration_request_cbor, exact_arbitration_response_cbor]",
+				"deterministic-CBOR([4, 10, claim_id, nonce])",
+				"逐字节等于本地重建的 expected ClaimCBOR",
+				"不产生 005 PaymentUpdate",
+			},
+			forbidden: []string{"复用 Kind 6 ContentDelivery"},
+		},
+		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/protocol/008-buyer-arbitrated-content-retrieval-requirements.md": {
+			required: []string{
+				"MUST NOT 提供 Buyer 仲裁关池",
+				"原子占用 unique (ClaimID, Nonce)",
+				"TLS 或等价安全传输",
+				"每次重试使用新 nonce",
+				"安全删除后返回 Gone",
+			},
+			forbidden: []string{"仅凭 Claim ID 即可下载"},
 		},
 		"website/docs/sdk/core-boundary-refactor-work-order.md": {
-			required:  []string{"Current wire fixtures for 001–007", "five-element Kind 8 Claim request plus four-element Kind 9 Receipt response"},
+			required:  []string{"Current wire fixtures for 001–008", "five-element Kind 8 Claim request plus four-element Kind 9 Receipt response", "four-element Kind 11 custody evidence response"},
 			forbidden: []string{"before and after the switch", "Changing the normative 001–007 wire behavior", "five-element Claim/Result"},
 		},
 		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/sdk/core-boundary-refactor-work-order.md": {
-			required:  []string{"五元 Kind 8 Claim 请求加四元 Kind 9 回执响应"},
+			required:  []string{"五元 Kind 8 Claim 请求加四元 Kind 9 回执响应", "五元 Kind 10 买方取件请求加四元 Kind 11 托管证据响应"},
 			forbidden: []string{"五元 Claim/Result"},
 		},
 		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/sdk/role-workflow-api.md": {
@@ -91,7 +149,8 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 			required: []string{
 				"[4, 8, arbitration_claim_cbor]",
 				"[4, 9, arbitration_receipt_cbor]",
-				"the Kind 8/9 bodies embed\n// their own body type as the second array element and sign it",
+				"the Kind 8/9/10/11 bodies\n// embed their own body type as the second array element and sign it",
+				"deterministic-CBOR([4, 10, claim_id, nonce])",
 			},
 			forbidden: []string{
 				"It is not part of a\n// signed 001–007 CBOR body",
@@ -105,6 +164,7 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 				"[4, 8, arbitration_claim_cbor]",
 				"[4, 9, arbitration_receipt_cbor]",
 				"而 Kind 8/9\n// 的本体在数组第二项显式携带自己的报文类型并进入签名域",
+				"deterministic-CBOR([4, 10, claim_id, nonce])",
 			},
 			forbidden: []string{
 				"它不进入 001–007 的已签名 CBOR 本体",

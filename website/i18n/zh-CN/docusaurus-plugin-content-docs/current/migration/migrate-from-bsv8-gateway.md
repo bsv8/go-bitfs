@@ -5,7 +5,7 @@ title: 从 bsv8-gateway 迁移
 
 # 从 bsv8-gateway 迁移
 
-`go-bitfs` 现在是 BitFS v4 文件交换、仲裁与 MultisigPool v4 费用池协议的唯一来源。目录名为 `spec/v1` 的 CDDL 文件仅因历史路径保留，不能用于当前协议；当前真值是 `spec/v4` 和 001–007 的 v4 文档。
+`go-bitfs` 现在是 BitFS v4 文件交换、仲裁与 MultisigPool v4 费用池协议的唯一来源。目录名为 `spec/v1` 的 CDDL 文件仅因历史路径保留，不能用于当前协议；当前真值是 `spec/v4` 和 001–008 的 v4 文档。
 
 - 删除对 `proto/bitfs/*` 及其生成代码的依赖；当前 BitFS 业务 wire schema 以 001/003/004 对应的 v4 CDDL 和 deterministic CBOR 为准。
 - 删除对旧费用池 proto 与 gRPC 生成代码的依赖；当前 002/005/006/007 以 v4 pool/arbitration CDDL 和发布版 MultisigPool 交易字节为准。

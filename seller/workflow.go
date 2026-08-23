@@ -552,8 +552,9 @@ func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.
 }
 
 // BuildArbitrationRequest verifies the local opening, Buyer authorization and
-// existing 004 delivery, then signs only the compact Claim evidence. It does
-// not construct or sign an arbitration transaction.
+// existing 004 delivery, then signs only the compact Claim evidence through
+// the arbitration package's shared Claim builder. It does not construct or
+// sign an arbitration transaction.
 func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -578,10 +579,13 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 	if err := checkSellerPoolNotExpired(opening, at, blockHeight); err != nil {
 		return nil, err
 	}
-	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, opening)
+	// 共享 Claim builder：与 Buyer 取件路径使用同一份纯函数，保证双方从相同
+	// opening + 精确签名 003 得到逐字节相同的 ClaimCBOR 与 Claim ID。
+	built, err := arbitration.BuildClaimFromAuthorization(opening, authorization)
 	if err != nil {
-		return nil, fmt.Errorf("verify payment authorization: %w", err)
+		return nil, fmt.Errorf("build arbitration Claim: %w", err)
 	}
+	terms := built.Terms
 	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
 		return nil, fmt.Errorf("%w: delivery deadline has passed", pool.ErrInvalidEvidence)
 	}
@@ -611,21 +615,7 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 			return nil, fmt.Errorf("%w: 004 payload #%d does not match 003 hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	details, err := pool.DeriveOpeningDetails(opening)
-	if err != nil {
-		return nil, err
-	}
-	claim := &arbitration.ArbitrationClaim{
-		PoolOutputSatoshis:      details.PoolOutputSatoshis,
-		PoolOutputLockingScript: details.PoolLockingScript,
-		RefundTemplateRaw:       opening.RefundTx,
-		TermsCBOR:               authorization.TermsCBOR,
-		BuyerSignature:          authorization.BuyerSignature,
-	}
-	claimCBOR, err := arbitration.MarshalClaim(claim)
-	if err != nil {
-		return nil, err
-	}
+	claimCBOR := built.ClaimCBOR
 	signingCBOR, err := arbitration.SellerClaimSigningCBOR(claimCBOR)
 	if err != nil {
 		return nil, err

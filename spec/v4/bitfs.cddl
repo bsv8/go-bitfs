@@ -1,6 +1,6 @@
 ; v4 wire family. Quote remains independently versioned; pool/content/arbitration
 ; messages carry their own strict major and are not decoded as older payloads.
-; This v4 was hard-switched five times before launch: first RefundTemplateTxID became
+; This v4 was hard-switched six times before launch: first RefundTemplateTxID became
 ; the unified pool correlation ID, then 003/004 were switched to one payment
 ; sequence authorizing an ordered content-hash batch and one delivery package
 ; atomically carrying the same batch (see content.cddl), then 005 was
@@ -8,11 +8,14 @@
 ; transaction signature — with both sides deterministically rebuilding the state
 ; transaction locally (see payment.cddl), then 007 switched to the
 ; five-element Claim/payload custody request and five-element Result response
-; with independent candidate reconstruction, and finally 007 was hard-switched
+; with independent candidate reconstruction, then 007 was hard-switched
 ; again to paid arbitration: a four-element Kind 9 receipt response carrying a
 ; three-element Receipt (Claim ID, positive arbiter amount, arbitration
 ; transaction signature) signed over [4, 9, exact_receipt_cbor] (see
-; arbitration.cddl). Only post-switch structures are accepted; pre-switch v4
-; bytes, legacy aliases, and any dual-shape decoding do not exist in this
-; protocol version.
+; arbitration.cddl), and finally 008 added Buyer custody retrieval: a
+; five-element Kind 10 Buyer-signed request routed by ArbitrationClaimID plus
+; a four-element Kind 11 response embedding the exact persisted Kind 8/9
+; bytes (see arbitration.cddl). Only post-switch structures are accepted;
+; pre-switch v4 bytes, legacy aliases, and any dual-shape decoding do not
+; exist in this protocol version.
 wire-family = "bitfs.protocol.v4"

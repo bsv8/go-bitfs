@@ -1,7 +1,7 @@
 # BitFS v4 报文体系总览（买方 / 卖方 / 仲裁方）
 
 本文基于核心代码整理：`wire/wire.go`（报文分发）、`bitfs/quote.go` 与 `bitfs/content.go`（001–004）、
-`pool/types.go` 与 `pool/cbor.go`（002/005）、`arbitration/workflow.go`（007）、
+`pool/types.go` 与 `pool/cbor.go`（002/005）、`arbitration/workflow.go` 与 `arbitration/content_retrieval.go`（007/008）、
 `buyer/workflow.go` / `seller/workflow.go`（角色工作流），并与 `spec/v4/*.cddl` 对照。
 
 ---
@@ -12,9 +12,9 @@
 
 | 角色 | 包 | 职责 |
 |---|---|---|
-| 买方 Buyer | `buyer/workflow.go` | 验收报价、发起开池、请求内容、验收交付、签署累计付款 |
+| 买方 Buyer | `buyer/workflow.go` | 验收报价、发起开池、请求内容、验收交付、签署累计付款、构造取件请求并验收仲裁内容 |
 | 卖方 Seller | `seller/workflow.go` | 签发报价、预签退款、验收资金交易、交付内容、验收付款、发起仲裁 |
-| 仲裁方 Arbiter | `arbitration/workflow.go` | 验证并托管 payload，独立重建付款交易，持久化后追加交易签名 |
+| 仲裁方 Arbiter | `arbitration/workflow.go` | 验证并托管 payload，独立重建付款交易，持久化后追加交易签名，按 Buyer 签名鉴权返回托管证据 |
 
 三方公钥构成 2-of-3 多签资金池（MultisigPool v4）。任何两方合作即可推进或关闭资金池，
 这正是"正常走买卖双方、纠纷走仲裁"的密码学基础。
@@ -30,7 +30,7 @@
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
    bitfs 包         pool 包       arbitration 包
-  (001/003/004)   (002/005)        (007)
+  (001/003/004)   (002/005)      (007/008)
 ```
 
 关键原则：
@@ -54,6 +54,8 @@
 | 7 | `CumulativePayment` | 005 累计付款更新 | 买方 → 卖方 | `*pool.PaymentUpdate` |
 | 8 | `ArbitrationRequest` | 007 仲裁证据包 | 卖方 → 仲裁方 | `*arbitration.ArbitrationRequest` |
 | 9 | `ArbitrationResponse` | 007 仲裁签名结果 | 仲裁方 → 卖方 | `*arbitration.ArbitrationResponse` |
+| 10 | `ArbitrationContentRequest` | 008 托管内容取回请求 | 买方 → 仲裁方 | `*arbitration.ContentRetrievalRequest` |
+| 11 | `ArbitrationContentResponse` | 008 托管内容取回响应 | 仲裁方 → 买方 | `*arbitration.ContentRetrievalResponse` |
 
 > 注：002 在线上拆成 0201/0202/0203 三步；006（无条件关闭池）不产生新报文类型，
 > 复用 `UnsignedPayment` + 双方签名在 API 层传递（见 §5）。
@@ -88,6 +90,11 @@ sequenceDiagram
 	S->>A: Kind 8  ArbitrationRequest（Claim+payload 托管证据+卖方 Claim 签名）
     A->>S: Kind 9  ArbitrationResponse（三元回执 ClaimID/费用/交易签名 + 回执签名）
     Note over S: 卖方合并双方签名并广播
+
+    Note over B,A: 阶段四点五：买方取件（008，Seller/Buyer 无法直连时）
+    B->>A: Kind 10 ArbitrationContentRequest（ClaimID + nonce + Buyer 签名）
+    A->>B: Kind 11 ArbitrationContentResponse（内嵌 exact Kind 8/9）
+    Note over B: Buyer 本地完整验收证据链与 payload，只保存内容
 
     Note over B,S: 阶段五：关闭（006，无新报文）
     B->>S: UnsignedPayment + 买方签名（API 层，立即关闭）
@@ -400,7 +407,62 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 
 仲裁方签名域严格为 deterministic-CBOR(`[4, 9, exact_receipt_cbor]`) 的普通消息签名。它把精确 Claim ID、精确仲裁金额和精确交易签名字节绑定在一起；交易签名继续负责授权真实池交易。两种签名职责不同，不能互相替代，也不能用回执签名直接填入 2-of-3 解锁脚本。
 
-应用固定执行 `PreparePayment(request, blockHeight, arbiterAmountSat) → 原子持久化 exact request/payload/Claim ID/费用 → SignPreparedPayment → 原子持久化 exact canonical Kind 9 bytes → 发送`。费用由应用先按策略计算（例如按 exact `len(ContentPayloadsCBOR)` 整数阶梯计价），SDK 只验证正数与余额，不注入任何费率策略。SDK 在持久化前绝不产生任何签名。重放以 exact 字节为门槛：只有 Claim ID 与 exact Kind 8 字节完全相同才重发已保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层 Seller signature 或 payload 不同时，先用已冻结费用完整执行 PreparePayment——验证失败按 invalid evidence 拒绝且不计冲突，完全有效的变体才是重复证据冲突；不同 Claim ID 建立独立记录。卖方收到响应后从 Claim primitives 独立重算 Claim ID 并比较，从 pool script 恢复 Arbiter 公钥验证回执消息签名，用回执金额调用唯一 candidate builder 重建交易并验证仲裁交易签名，最后才生成 Seller transaction signature，并通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。旧五元 Kind 9 被严格拒绝；Kind 9 只表达成功响应，拒绝路径走应用错误通道。广播、Buyer 取件鉴权、retention、幂等和重试由应用负责。
+应用固定执行 `PreparePayment(request, blockHeight, arbiterAmountSat) → 原子持久化 exact request/payload/Claim ID/费用 → SignPreparedPayment → 原子持久化 exact canonical Kind 9 bytes → 发送`。费用由应用先按策略计算（例如按 exact `len(ContentPayloadsCBOR)` 整数阶梯计价），SDK 只验证正数与余额，不注入任何费率策略。SDK 在持久化前绝不产生任何签名。重放以 exact 字节为门槛：只有 Claim ID 与 exact Kind 8 字节完全相同才重发已保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层 Seller signature 或 payload 不同时，先用已冻结费用完整执行 PreparePayment——验证失败按 invalid evidence 拒绝且不计冲突，完全有效的变体才是重复证据冲突；不同 Claim ID 建立独立记录。卖方收到响应后从 Claim primitives 独立重算 Claim ID 并比较，从 pool script 恢复 Arbiter 公钥验证回执消息签名，用回执金额调用唯一 candidate builder 重建交易并验证仲裁交易签名，最后才生成 Seller transaction signature，并通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。旧五元 Kind 9 被严格拒绝；Kind 9 只表达成功响应，拒绝路径走应用错误通道。广播、retention、幂等和重试由应用负责；Buyer 取件的 wire 与签名域已由 SDK 通过 008 的 Kind 10/11 固定（见 §3.10/§3.11），存储、nonce 去重和传输仍由应用负责。
+
+---
+
+### 3.10 Kind 10 · 托管内容取回请求（008）— 买方 → 仲裁方
+
+编码（`MarshalContentRetrievalRequest`，五元数组，最大 330 字节）：
+
+```
+[4, 10, arbitration_claim_id, retrieval_nonce, buyer_retrieval_signature]
+```
+
+字段约束：
+
+- `arbitration_claim_id`：32 字节，即 Seller 托管记录的 Claim ID
+  `SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))`；
+- `retrieval_nonce`：32 字节，禁止全零，由买方**应用**用密码学安全随机源生成后显式传入 SDK；
+- `buyer_retrieval_signature`：1–256 字节 DER 签名。
+
+买方签名域严格为 deterministic-CBOR(`[4, 10, claim_id, nonce]`)，经固定 `SignMessage` 路径（内部再 SHA-256 一次，low-S DER）。不签 Claim ID 裸 bytes、nonce 裸 bytes、字符串拼接、hex、JSON、完整五元请求或仲裁交易 sighash。
+
+**合理性分析**
+
+- ✅ Kind 10 不携带 BuyerPubKey、RefundTemplateTxID、PaymentAuthorizationHash、OpeningProof、TermsCBOR 或 ClaimCBOR：仲裁方从 Claim ID 对应的已存 Claim 恢复 Buyer 公钥验签，Claim ID 本身不是 bearer token。
+- ✅ Buyer 无需 Seller Claim 签名、payload 或 Kind 9——只凭本地 OpeningProof + 精确签名 003 就能通过共享 builder 得到相同 Claim ID 并签名。
+- ✅ nonce 是请求重放键而非长期 token：同一 `(ClaimID, Nonce)` 只能被应用原子占用一次；超时后换新 nonce 重签即可。
+- ⚠️ 取件是事后恢复：builder 不重新应用"003 delivery deadline 未过"或"refund 未到期"；这些时间门禁在 Arbiter 签署 Kind 9 之前已经执行。
+
+### 3.11 Kind 11 · 托管内容取回响应（008）— 仲裁方 → 买方
+
+编码（`MarshalContentRetrievalResponse`，四元数组，上限 = 3 + (5+16,843,609) + (3+568) = 16,844,188 字节）：
+
+```
+[4, 11, exact_arbitration_request_cbor, exact_arbitration_response_cbor]
+```
+
+两个子文档都是 `bstr` 嵌入的**原样字节**：
+
+- `exact_arbitration_request_cbor` 是托管库中保存的 exact canonical Kind 8（含 ClaimCBOR、SellerClaimSignature、ContentPayloadsCBOR）；
+- `exact_arbitration_response_cbor` 是同一条记录中已持久化的 exact canonical Kind 9（含 Receipt 与 ArbiterReceiptSignature）。
+
+外壳不新增第三条 Arbiter 签名，因为证据链已经闭合：
+
+```
+SellerClaimSignature   -> exact ClaimCBOR -> Buyer signed TermsCBOR -> ordered content hashes
+ArbiterReceiptSignature-> exact ReceiptCBOR -> same Claim ID -> fee + Arbiter transaction signature
+ContentPayloadsCBOR[i] -> SHA-256 -> ordered content hashes[i]
+```
+
+Buyer 必须整链验证：strict decode 两份内嵌文档 → 从 Kind 8 Claim 重算 Claim ID 并与 Kind 10 和 Kind 9 Receipt 同时比较 → 从 pool script 恢复角色公钥验 Seller/Arbiter 签名 → 用回执费用重建 candidate 验证交易签名 → payload 数量/顺序/hash 复核 → 本地 expected ClaimCBOR 与内嵌 ClaimCBOR **逐字节相等**。payload 只在内嵌 Kind 8 中出现一次；Kind 11 不重复 claim_id、payload、Receipt 或任何公钥材料。
+
+**合理性分析**
+
+- ✅ 内嵌原文而非重编码：返回值必须与持久化字节逐字节相等，不存在第二份托管真值。
+- ✅ 拒绝不编码进 Kind 11：NotFound/NotReady/Unauthorized/NonceReused/Gone 全部走应用错误通道，不存在 optional status union。
+- ✅ 时间无关验收：已签署托管证据在 deadline/refund 成熟之后仍然可验证、可取回（受 retention 约束），不需要假时钟或假区块高度。
 
 ---
 
@@ -442,6 +504,8 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 007 Claim | 卖方 | 精确 Claim signing domain `[4,8,claim_cbor]` |
 | 007 回执 | 仲裁方 | 精确回执 signing domain `[4,9,receipt_cbor]` |
 | 007 候选交易 | Seller + Arbiter（各自独立重建） | 同一 canonical candidate 的 `ForkID|All` sighash |
+| 008 取件请求 | 买方 | 精确取件 signing domain `[4,10,claim_id,nonce]` |
+| 008 响应外壳 | （无新签名） | 只封装已签的 exact Kind 8/9，Buyer 验证内嵌 Seller/Arbiter 全链签名 |
 
 ---
 
@@ -473,10 +537,13 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 7 | 005 付款更新 | ✅ 合理 | 最小凭证：授权哈希 + 买方对本地重建交易的分离签名；哈希仅作查找键不可解码 |
 | 8 | 007 仲裁请求 | ✅ 合理 | Seller Claim + 精确 payload；仲裁方验证并托管后独立构造 |
 | 9 | 007 回执响应 | ✅ 合理 | Claim ID + 正仲裁费 + 交易签名三元回执；回执签名与交易签名职责分离 |
+| 10 | 008 取件请求 | ✅ 合理 | Claim ID 路由 + nonce 重放键 + Buyer 签名鉴权；不携带任何可推导字段 |
+| 11 | 008 取回响应 | ✅ 合理 | 内嵌 exact Kind 8/9 原文；无新外层签名但证据链完整闭合，payload 只出现一次 |
 
 整体评价：报文集合没有冗余类型，每个字段要么被签名覆盖、要么可从签名材料推导、
 要么明确标注为非经济事实（如 RecommendedFilename）。"单一真值 + 分离签名 +
-严格规范编码 + 幂等重放"四个纪律在全部九类报文中贯彻一致。
+严格规范编码 + 幂等重放"四个纪律在全部十一类报文中贯彻一致。
+Buyer 关池不在协议内：协商走 006，或等 nLockTime 后广播 002 的预签名 RefundTx。
 
 ---
 
@@ -491,6 +558,8 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 池报文 CBOR 编解码 | `pool/cbor.go` |
 | 007 Claim/回执与两段式签名工作流 | `arbitration/workflow.go` |
 | 仲裁请求/回执响应与验证工作流 | `arbitration/workflow.go:50`–`arbitration/workflow.go:151` |
-| 买方工作流（001–006） | `buyer/workflow.go` |
+| 008 Kind 10/11 编解码、托管证据验证与取件签名域 | `arbitration/content_retrieval.go` |
+| 共享 Claim builder（Seller 007 与 Buyer 008 同源） | `arbitration/workflow.go`（`BuildClaimFromAuthorization`） |
+| 买方工作流（001–006 + 008 取件） | `buyer/workflow.go` |
 | 卖方工作流（001–007） | `seller/workflow.go` |
 | CDDL 规范 | `spec/v4/{bitfs,content,pool,payment,arbitration}.cddl` |

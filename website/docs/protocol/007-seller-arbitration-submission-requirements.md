@@ -102,6 +102,8 @@ Receipt message signature (with the Arbiter key recovered from the role-ordered
 pool script), and Arbiter transaction signature before creating its own
 transaction signature. It then merges only through
 `MergeArbitratedPoolSellerArbiterSignatures`. Broadcasting, reconciliation,
-Buyer retrieval authorization, retention, and idempotency are application
-responsibilities. Any tampering with the Claim ID, fee, transaction signature,
+retention, and idempotency are application responsibilities. Buyer retrieval
+wire and signatures are fixed by the SDK through step 008 (Kind 10/11); the
+application still owns persistence, nonce deduplication, TLS transport, and
+retention. Any tampering with the Claim ID, fee, transaction signature,
 or receipt signature rejects the whole response.

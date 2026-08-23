@@ -5,6 +5,7 @@
 package integration
 
 import (
+	"crypto/rand"
 	"testing"
 	"time"
 
@@ -230,5 +231,74 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	}
 	if receipt.ArbiterAmountSat != arbiterAmountSat || signedArbitrated.State.ArbiterAmountSat != arbiterAmountSat {
 		t.Fatal("documented arbitration flow lost the explicit positive fee")
+	}
+}
+
+// TestDocumentedArbitrationRetrievalAPISignaturesCompileAndRun mirrors the
+// 008 pseudo-code in docs/complete-file-purchase/README.md: the buyer builds
+// a Kind 10 from opening + signed 003 with an application-generated nonce,
+// the application looks up its custody store and answers with exact Kind 11,
+// and the buyer accepts without ever producing a payment update. Public API
+// access never needs arbitration package internals.
+func TestDocumentedArbitrationRetrievalAPISignaturesCompileAndRun(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+	store := newMemoryArbitrationCustodyStore()
+	ctx := f.ctx
+	blockHeight := uint32(900000)
+
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(time.Now().UTC().Add(30 * time.Minute).Unix())}
+	request003, err := f.buyer.BuildContentRequest(ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _, err := f.seller.BuildContentDelivery(ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request003, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(ctx, f.completed.Opening, request003, delivery, blockHeight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind8, err := arbitration.MarshalRequest(arbitrationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.handleArbitrationRequest(rawKind8, f.arbiter, blockHeight); err != nil {
+		t.Fatal(err)
+	}
+
+	// README §6.5: nonce comes from the application's crypto/rand source.
+	nonce := make([]byte, arbitration.RetrievalNonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	retrievalRequest, err := f.buyer.BuildArbitrationContentRequest(ctx, f.completed.Opening, request003, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind10, err := arbitration.MarshalContentRetrievalRequest(retrievalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedKind10, err := wire.UnmarshalArbitrationContentRequest(rawKind10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedKind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := f.buyer.AcceptArbitratedContent(ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request003, decodedKind10, decodedKind11, buyer.ArbitratedContentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := verified.Receipt
+	if receipt == nil || receipt.ArbiterAmountSat == 0 || len(verified.Payloads) == 0 {
+		t.Fatal("documented retrieval flow returned incomplete audit data")
 	}
 }

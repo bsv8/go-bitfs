@@ -5,6 +5,7 @@ package integration
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -184,4 +185,99 @@ func mustDeliveryForTwoPools(t *testing.T, f *protocolFixture, target *poolState
 		t.Fatal(err)
 	}
 	return delivery
+}
+
+// TestCrossPoolArbitrationRetrievalIsRefused extends cross-pool isolation to
+// 008: only the exact (Claim ID, opening, authorization, Buyer key) tuple can
+// retrieve its own payload. Pool B's opening or authorization combined with
+// pool A's custody record — or vice versa — is refused, and the matching
+// combination succeeds.
+func TestCrossPoolArbitrationRetrievalIsRefused(t *testing.T) {
+	f := newProtocolFixture(t)
+	poolA := f.openNamedPool(t, 100000)
+	poolB := f.openNamedPool(t, 110000)
+	store := newMemoryArbitrationCustodyStore()
+
+	buildChainFor := func(state *poolState) (*bitfs.SignedContentRequest, []byte) {
+		input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+		request003, err := f.buyer.BuildContentRequest(f.ctx, f.quote, state.buyerAcc.Opening, state.sellerAcc.InitialPayment, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, state.sellerAcc.Opening, state.sellerAcc.InitialPayment, request003, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, state.sellerAcc.Opening, request003, delivery, f.facts())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rawKind8, err := arbitration.MarshalRequest(arbitrationRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return request003, rawKind8
+	}
+
+	requestA, rawKind8A := buildChainFor(poolA)
+	requestB, rawKind8B := buildChainFor(poolB)
+	for _, raw := range [][]byte{rawKind8A, rawKind8B} {
+		if _, err := store.handleArbitrationRequest(raw, f.arbiter, f.facts()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimIDA := mustClaimIDOf(t, rawKind8A)
+
+	nonceA := bytes.Repeat([]byte{0x61}, 32)
+	nonceB := bytes.Repeat([]byte{0x62}, 32)
+	request10A, err := f.buyer.BuildArbitrationContentRequest(f.ctx, poolA.buyerAcc.Opening, requestA, nonceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request10B, err := f.buyer.BuildArbitrationContentRequest(f.ctx, poolB.buyerAcc.Opening, requestB, nonceB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10A, err := arbitration.MarshalContentRetrievalRequest(request10A)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10B, err := arbitration.MarshalContentRetrievalRequest(request10B)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 正向：完全匹配的组合各自取回自己的记录。
+	first11, err := store.handleContentRetrieval(raw10A, f.arbiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second11, err := store.handleContentRetrieval(raw10B, f.arbiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first11, second11) {
+		t.Fatal("two pools returned one identical custody record")
+	}
+	if !bytes.Contains(first11, claimIDA) {
+		t.Fatal("pool A retrieval does not bind pool A's Claim ID")
+	}
+
+	// 交叉：pool A 的 Kind 10 用 pool B 的 opening/authorization 构造必须失败。
+	crossAuth, err := f.buyer.BuildArbitrationContentRequest(f.ctx, poolB.buyerAcc.Opening, requestA, bytes.Repeat([]byte{0x63}, 32))
+	if err == nil {
+		// 若构造成功（不同池的 Claim 不同），验证时也必须拒绝。
+		if _, err := store.handleContentRetrieval(mustMarshalKind10(t, crossAuth), f.arbiter); !errors.Is(err, errRetrievalNotFound) && !errors.Is(err, errRetrievalUnauthorized) {
+			t.Fatalf("cross-pool constructed request error = %v", err)
+		}
+	}
+
+	// 验收侧交叉：pool B 的 opening/previous 配 pool A 的托管证据整批拒绝。
+	response11A, err := arbitration.UnmarshalContentRetrievalResponse(first11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.buyer.AcceptArbitratedContent(f.ctx, f.quote, poolB.buyerAcc.Opening, poolB.sellerAcc.InitialPayment, requestA, request10A, response11A, buyer.ArbitratedContentInput{}); err == nil {
+		t.Fatal("pool A custody record accepted against pool B context")
+	}
 }

@@ -84,7 +84,7 @@ CBOR 的打包与解包属于 SDK，不属于 HTTP、WebSocket、队列或应用
 // Kind 是传输层已知的报文类别，用于统一分派；它绝不标识费用池实例。Kind 与签名
 // 本体中的报文类型编号是两个概念：001–006 的 CBOR 本体不含 kind 元素，而 Kind 8/9
 // 的本体在数组第二项显式携带自己的报文类型并进入签名域——Seller 签署的正是
-// [4, 8, arbitration_claim_cbor]，Arbiter 签署的正是 [4, 9, arbitration_result_cbor]。
+// [4, 8, arbitration_claim_cbor]，Arbiter 签署的正是 [4, 9, arbitration_receipt_cbor]。
 // 定义 RefundTemplateTxID 的报文会在 CBOR 文档中携带它；0201 预签请求从 RefundTx
 // 推导该值，不包含单独的 hash 字段。
 type Kind uint16

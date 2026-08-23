@@ -199,15 +199,16 @@ func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.
 // sign a payment transaction.
 func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
 
-// CompleteArbitratedPayment rebuilds the candidate from Kind 8 Claim evidence,
-// verifies both Kind 9 signatures, then creates and merges the Seller
-// transaction signature. Broadcasting is the application's job.
+// CompleteArbitratedPayment rebuilds the paid candidate from Kind 8 Claim
+// evidence plus the Receipt's arbiter amount, verifies the Receipt message
+// signature and the Arbiter transaction signature, then creates and merges the
+// Seller transaction signature. Broadcasting is the application's job.
 func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
 ```
 
 ## Arbiter API
 
-The arbiter receives complete evidence instead of querying buyer or seller state. It does not decide whether content was delivered or recalculate quote amounts.
+The arbiter receives complete evidence instead of querying buyer or seller state. It does not decide whether content was delivered or recalculate quote amounts. The arbitration fee is an application decision: price it from exactly `len(request.ContentPayloadsCBOR)` with your own integer policy, and hand the explicit amount to the SDK.
 
 ```go
 // package arbitration
@@ -217,15 +218,61 @@ type WorkflowConfig struct {
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// PreparePayment validates Claim, Buyer authorization, Seller Claim signature,
-// payload custody, and the independently rebuilt candidate. It creates no
-// transaction signature; the application persists exact evidence next.
-func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32) (*arbitration.PreparedPayment, error)
+// ArbitrationReceipt is the inner three-element Kind 9 document: Claim ID,
+// positive arbiter amount, and the ForkID|All transaction signature over the
+// independently rebuilt candidate.
+type ArbitrationReceipt struct {
+    ClaimID                     []byte
+    ArbiterAmountSat            uint64
+    ArbiterTransactionSignature []byte
+}
 
-// SignPreparedPayment rechecks the opaque prepared evidence, independently
-// rebuilds the candidate, and returns a response containing both the Result
-// message signature and the Arbiter transaction signature.
+// ArbitrationResponse is the exact four-element Kind 9 message.
+type ArbitrationResponse struct {
+    Version                 uint64
+    ReceiptCBOR             []byte
+    ArbiterReceiptSignature []byte
+}
+
+// ArbitrationClaimID returns SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor])).
+func ArbitrationClaimID(claimCBOR []byte) ([]byte, error)
+func ValidateReceipt(receipt *ArbitrationReceipt) error
+func MarshalReceipt(receipt *ArbitrationReceipt) ([]byte, error)
+func UnmarshalReceipt(raw []byte) (*ArbitrationReceipt, error)
+func ArbiterReceiptSigningCBOR(receiptCBOR []byte) ([]byte, error)
+
+// PreparePayment validates Claim, Buyer authorization, Seller Claim signature,
+// payload custody, and the independently rebuilt candidate for the caller's
+// explicit positive fee (zero is rejected as invalid evidence; a fee that no
+// longer fits returns pool.ErrInsufficientBalance). It creates no signature;
+// the application persists exact evidence next.
+func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32, arbiterAmountSat uint64) (*arbitration.PreparedPayment, error)
+
+// SignPreparedPayment rechecks the opaque prepared evidence against the frozen
+// exact request and frozen fee, independently rebuilds the candidate, signs the
+// transaction signature first, encodes the Receipt, and returns the response
+// carrying both the receipt message signature over [4, 9, exact_receipt_cbor]
+// and the transaction signature inside it.
 func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
+
+// PreparedPayment deep-copy getters: Request(), ContentPayloadsCBOR(),
+// ContentPayloads(), ClaimID(), ArbiterAmountSat(), PaymentAuthorizationHash(),
+// UnsignedPayment(), DeadlineUnix(), PreparedAt().
+```
+
+The pool package also exposes one deliberately public pure function for the
+007 evidence path:
+
+```go
+// package pool
+// ValidateArbitrationClaimStructure performs the pure Claim-structure checks of
+// the 007 candidate (source context, role scripts, canonical refund template
+// with zero Seller/Arbiter initial amounts, sequence ordering, Seller balance)
+// without depending on any arbitration fee. Evidence validation uses it so no
+// placeholder amount is ever needed; the success builder additionally requires
+// a positive fee. It is intentionally exported for cross-package reuse and has
+// no signing or side effects.
+func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error
 ```
 
 ## Complete business flow
@@ -318,7 +365,10 @@ authorization := journal.LoadSentContentRequest(refundTemplateTxID) // retained 
 delivery := journal.LoadExactContentDelivery(authorization)         // retained 004 payload bundle
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
     opening, authorization, delivery, blockHeight)
-prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight)
+// The application prices the fee from the exact payload CBOR length, then
+// hands the explicit amount to the SDK.
+arbiterAmountSat := arbiterFeePolicy(len(arbitrationRequest.ContentPayloadsCBOR))
+prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight, arbiterAmountSat)
 if err := journal.PersistArbitrationCustody(prepared); err != nil { /* ... */ }
 response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,

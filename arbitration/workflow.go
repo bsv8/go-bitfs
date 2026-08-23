@@ -1,13 +1,18 @@
 // Package arbitration implements the v4 Kind 8/9 custody and independent
-// transaction-reconstruction workflow.
+// transaction-reconstruction workflow. Kind 9 is a hard-switched four-element
+// receipt response: the arbiter is paid a positive, explicitly decided fee and
+// the receipt binds the Claim ID, that fee, and the arbitration transaction
+// signature together under one ordinary message signature.
 package arbitration
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
@@ -31,8 +36,29 @@ const (
 	MaxArbitrationRefundTemplateBytes = 16 * 1024
 	MaxArbitrationTermsBytes          = 16 * 1024
 	MaxArbitrationClaimBytes          = 64 * 1024
-	MaxArbitrationResultBytes         = 256
-	MaxArbitrationResponseBytes       = 16 * 1024
+
+	// maxDeterministicUint64Bytes is the largest canonical CBOR encoding of a
+	// uint64 (8-byte value plus its length head).
+	maxDeterministicUint64Bytes = 9
+	// maxClaimIDBstrBytes is the exact wire width of a 32-byte Claim ID bstr:
+	// the two-byte major-type+length head (0x58 0x20) plus the fixed value.
+	maxClaimIDBstrBytes = 2 + sha256.Size
+	// maxSignatureBstrOverhead is the uint16 length head (0x59 + two bytes)
+	// required for any bstr above 255 bytes, i.e. a full-size signature child.
+	maxSignatureBstrOverhead = 3
+
+	// MaxArbitrationReceiptBytes is derived from the Receipt child limits:
+	// [claim_id(34), amount(9), transaction_signature(3+256)] plus the array
+	// head = 1 + 34 + 9 + 259 = 303. It is intentionally NOT an independent
+	// quota; raising it silently or shrinking it below the child limits breaks
+	// interoperability.
+	MaxArbitrationReceiptBytes = 1 + maxClaimIDBstrBytes + maxDeterministicUint64Bytes + maxSignatureBstrOverhead + MaxArbitrationSignatureBytes
+
+	// MaxArbitrationResponseBytes is derived from the four-element response
+	// shape [4, 9, receipt_cbor, receipt_signature]: array head, version,
+	// kind, the receipt wrapped in a uint16-headed bstr, and the receipt
+	// signature = 1 + 1 + 1 + (3 + 303) + (3 + 256) = 568.
+	MaxArbitrationResponseBytes = 1 + 1 + 1 + maxSignatureBstrOverhead + MaxArbitrationReceiptBytes + maxSignatureBstrOverhead + MaxArbitrationSignatureBytes
 
 	// maxArbitrationRequestEnvelopeBytes is the exact deterministic-CBOR
 	// overhead of the outer five-element request [4, 8, claim, sig, payloads]:
@@ -93,19 +119,23 @@ type ArbitrationRequest struct {
 	ContentPayloadsCBOR  []byte
 }
 
-// ArbitrationResult is the versionless, kindless inner Kind 9 result.
-type ArbitrationResult struct {
-	RequestCommitment   []byte
-	ContentPayloadsHash []byte
-	UnsignedStateTxHash []byte
+// ArbitrationReceipt is the versionless, kindless inner Kind 9 document. It
+// binds the exact Claim ID, the absolute arbiter fee paid by output[2], and
+// the ForkID|All transaction signature over the independently rebuilt
+// candidate. A successful receipt always carries a positive fee.
+type ArbitrationReceipt struct {
+	ClaimID                     []byte
+	ArbiterAmountSat            uint64
+	ArbiterTransactionSignature []byte
 }
 
-// ArbitrationResponse is the exact five-element Kind 9 message.
+// ArbitrationResponse is the exact four-element Kind 9 message. ReceiptCBOR is
+// the exact deterministic ArbitrationReceipt child document; it is not decoded
+// and re-encoded on the wire.
 type ArbitrationResponse struct {
-	Version                     uint64
-	ResultCBOR                  []byte
-	ArbiterResultSignature      []byte
-	ArbiterTransactionSignature []byte
+	Version                 uint64
+	ReceiptCBOR             []byte
+	ArbiterReceiptSignature []byte
 }
 
 type WorkflowConfig struct {
@@ -123,17 +153,17 @@ type Workflow struct {
 // is through deep-copy getters so applications can persist evidence without
 // obtaining mutable references to the signing state.
 type PreparedPayment struct {
-	request           *ArbitrationRequest
-	claim             *ArbitrationClaim
-	unsigned          *pool.UnsignedPayment
-	payloads          [][]byte
-	requestCommitment []byte
-	authorizationHash []byte
-	payloadsHash      []byte
-	unsignedTxHash    []byte
-	arbiterPubKey     []byte
-	deadlineUnix      int64
-	preparedAt        time.Time
+	request            *ArbitrationRequest
+	claim              *ArbitrationClaim
+	unsigned           *pool.UnsignedPayment
+	payloads           [][]byte
+	claimID            []byte
+	authorizationHash  []byte
+	arbiterAmountSat   uint64
+	arbiterPubKey      []byte
+	evidenceCommitment []byte
+	deadlineUnix       int64
+	preparedAt         time.Time
 }
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error) {
@@ -167,11 +197,13 @@ func (prepared *PreparedPayment) RefundTemplateTxID() []byte {
 	return append([]byte(nil), prepared.unsigned.RefundTemplateTxID[:]...)
 }
 
-func (prepared *PreparedPayment) RequestCommitment() []byte {
+// ClaimID returns a deep copy of the SHA-256 commitment over
+// deterministic-CBOR([4, 8, exact_claim_cbor]).
+func (prepared *PreparedPayment) ClaimID() []byte {
 	if prepared == nil {
 		return nil
 	}
-	return append([]byte(nil), prepared.requestCommitment...)
+	return append([]byte(nil), prepared.claimID...)
 }
 
 func (prepared *PreparedPayment) PaymentAuthorizationHash() []byte {
@@ -181,18 +213,13 @@ func (prepared *PreparedPayment) PaymentAuthorizationHash() []byte {
 	return append([]byte(nil), prepared.authorizationHash...)
 }
 
-func (prepared *PreparedPayment) ContentPayloadsHash() []byte {
+// ArbiterAmountSat returns the frozen absolute arbitration fee this prepared
+// payment will assign to output[2]. It is always positive.
+func (prepared *PreparedPayment) ArbiterAmountSat() uint64 {
 	if prepared == nil {
-		return nil
+		return 0
 	}
-	return append([]byte(nil), prepared.payloadsHash...)
-}
-
-func (prepared *PreparedPayment) UnsignedStateTxHash() []byte {
-	if prepared == nil {
-		return nil
-	}
-	return append([]byte(nil), prepared.unsignedTxHash...)
+	return prepared.arbiterAmountSat
 }
 
 func (prepared *PreparedPayment) ContentPayloadsCBOR() []byte {
@@ -231,10 +258,11 @@ func (prepared *PreparedPayment) PreparedAt() time.Time {
 }
 
 // PreparePayment verifies Claim, Buyer authorization, Seller claim signature,
-// exact payload custody evidence, and the independently rebuilt candidate. It
-// never creates a transaction signature. The application must persist the
-// exact request and payload bundle before calling SignPreparedPayment.
-func (workflow *Workflow) PreparePayment(ctx context.Context, request *ArbitrationRequest, blockHeight uint32) (*PreparedPayment, error) {
+// exact payload custody evidence, and the independently rebuilt candidate for
+// the caller-decided positive arbitration fee. It never creates a transaction
+// signature. The application must persist the exact request, the Claim ID,
+// the fee, and the payload bundle before calling SignPreparedPayment.
+func (workflow *Workflow) PreparePayment(ctx context.Context, request *ArbitrationRequest, blockHeight uint32, arbiterAmountSat uint64) (*PreparedPayment, error) {
 	if workflow == nil {
 		return nil, errors.New("arbitration workflow is required")
 	}
@@ -244,38 +272,49 @@ func (workflow *Workflow) PreparePayment(ctx context.Context, request *Arbitrati
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if arbiterAmountSat == 0 {
+		return nil, fmt.Errorf("%w: successful arbitration requires a positive arbiter amount", pool.ErrInvalidEvidence)
+	}
 	request = cloneRequest(request)
-	claim, terms, payloads, unsigned, commitment, authHash, payloadHash, txHash, keys, err := validateRequestEvidence(request)
+	at := time.Now().UTC()
+	claim, terms, payloads, unsigned, claimID, authHash, keys, err := validateRequestEvidence(request, arbiterAmountSat)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(keys.ArbiterPubKey, workflow.publicKey) {
 		return nil, fmt.Errorf("%w: Claim arbiter key does not match workflow key", pool.ErrInvalidEvidence)
 	}
-	at := time.Now().UTC()
 	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
 		return nil, fmt.Errorf("%w: delivery deadline has passed", pool.ErrInvalidEvidence)
 	}
 	if err := pool.CheckArbitrationRefundNotExpired(claim.RefundTemplateRaw, blockHeight); err != nil {
 		return nil, fmt.Errorf("%w: refund template is no longer available for arbitration: %v", pool.ErrInvalidEvidence, err)
 	}
+	exactRequest, err := MarshalRequest(request)
+	if err != nil {
+		return nil, err
+	}
 	return &PreparedPayment{
 		request: request, claim: claim, unsigned: cloneUnsigned(unsigned), payloads: cloneByteSlices(payloads),
-		requestCommitment: commitment, authorizationHash: authHash, payloadsHash: payloadHash,
-		unsignedTxHash: txHash, arbiterPubKey: append([]byte(nil), keys.ArbiterPubKey...),
-		deadlineUnix: terms.DeliveryDeadlineUnix, preparedAt: at,
+		claimID: claimID, authorizationHash: authHash, arbiterAmountSat: arbiterAmountSat,
+		arbiterPubKey:      append([]byte(nil), keys.ArbiterPubKey...),
+		evidenceCommitment: preparedEvidenceCommitment(exactRequest, claimID, arbiterAmountSat, unsigned),
+		deadlineUnix:       terms.DeliveryDeadlineUnix, preparedAt: at,
 	}, nil
 }
 
-// SignPreparedPayment performs the post-persistence signing step. It rebuilds
-// the candidate and all three hashes from the opaque evidence, then produces
-// and self-verifies both the Result message signature and the transaction
-// signature before returning Kind 9.
+// SignPreparedPayment performs the post-persistence signing step. It re-runs
+// full evidence validation and candidate reconstruction from the frozen exact
+// request and frozen fee, compares Claim ID, amount, roles, deadline, and the
+// candidate against the persisted prepared state, then signs in the fixed
+// order: transaction signature first, then Receipt encoding, then the Receipt
+// message signature. Both signatures are self-verified before Kind 9 is
+// returned.
 func (workflow *Workflow) SignPreparedPayment(ctx context.Context, prepared *PreparedPayment) (*ArbitrationResponse, error) {
 	if workflow == nil {
 		return nil, errors.New("arbitration workflow is required")
 	}
-	if prepared == nil || prepared.request == nil || prepared.claim == nil || prepared.unsigned == nil {
+	if prepared == nil || prepared.request == nil || prepared.claim == nil || prepared.unsigned == nil || len(prepared.claimID) != sha256.Size || prepared.arbiterAmountSat == 0 {
 		return nil, fmt.Errorf("%w: prepared payment is required", pool.ErrInvalidEvidence)
 	}
 	if ctx != nil {
@@ -292,23 +331,32 @@ func (workflow *Workflow) SignPreparedPayment(ctx context.Context, prepared *Pre
 	// Everything below derives from the revalidated request bytes alone; the
 	// cached Claim is never trusted for signing so tampering with any cached
 	// structure cannot steer transaction construction.
-	freshClaim, _, _, rebuilt, commitment, authHash, payloadHash, txHash, keys, err := validateRequestEvidence(cloneRequest(prepared.request))
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(commitment, prepared.requestCommitment) || !bytes.Equal(authHash, prepared.authorizationHash) || !bytes.Equal(payloadHash, prepared.payloadsHash) || !bytes.Equal(txHash, prepared.unsignedTxHash) {
-		return nil, fmt.Errorf("%w: prepared payment evidence changed", pool.ErrInvalidEvidence)
-	}
-	if !equalUnsigned(rebuilt, prepared.unsigned) {
-		return nil, fmt.Errorf("%w: prepared candidate changed", pool.ErrInvalidEvidence)
-	}
-	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(freshClaim.PoolOutputLockingScript)
+	frozenFee := prepared.arbiterAmountSat
+	freshClaim, _, _, rebuilt, freshClaimID, freshAuthHash, keys, err := validateRequestEvidence(cloneRequest(prepared.request), frozenFee)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(keys.ArbiterPubKey, workflow.publicKey) {
 		return nil, fmt.Errorf("%w: Claim arbiter key does not match workflow key", pool.ErrInvalidEvidence)
 	}
+	if !bytes.Equal(freshClaimID, prepared.claimID) || !bytes.Equal(freshAuthHash, prepared.authorizationHash) {
+		return nil, fmt.Errorf("%w: prepared payment evidence changed", pool.ErrInvalidEvidence)
+	}
+	if rebuilt.ArbiterAmountSat != prepared.arbiterAmountSat || !equalUnsigned(rebuilt, prepared.unsigned) {
+		return nil, fmt.Errorf("%w: prepared candidate changed", pool.ErrInvalidEvidence)
+	}
+	exactRequest, err := MarshalRequest(prepared.request)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(preparedEvidenceCommitment(exactRequest, prepared.claimID, prepared.arbiterAmountSat, rebuilt), prepared.evidenceCommitment) {
+		return nil, fmt.Errorf("%w: prepared evidence commitment changed", pool.ErrInvalidEvidence)
+	}
+	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(freshClaim.PoolOutputLockingScript)
+	if err != nil {
+		return nil, err
+	}
+	// 先生成并自验仲裁交易签名，再编码回执，最后生成并自验回执普通消息签名。
 	arbiterTxSig, err := engine.SignArbitrationArbiterPayment(ctx, rebuilt, workflow.privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign arbitration transaction: %w", err)
@@ -316,91 +364,95 @@ func (workflow *Workflow) SignPreparedPayment(ctx context.Context, prepared *Pre
 	if err := engine.VerifyArbitrationArbiterPayment(rebuilt, arbiterTxSig); err != nil {
 		return nil, fmt.Errorf("verify arbitration transaction signature: %w", err)
 	}
-	result := &ArbitrationResult{RequestCommitment: commitment, ContentPayloadsHash: payloadHash, UnsignedStateTxHash: txHash}
-	resultCBOR, err := MarshalResult(result)
+	receipt := &ArbitrationReceipt{ClaimID: append([]byte(nil), prepared.claimID...), ArbiterAmountSat: frozenFee, ArbiterTransactionSignature: append([]byte(nil), arbiterTxSig...)}
+	receiptCBOR, err := MarshalReceipt(receipt)
 	if err != nil {
 		return nil, err
 	}
-	resultSigning, err := ArbiterResultSigningCBOR(resultCBOR)
+	receiptSigning, err := ArbiterReceiptSigningCBOR(receiptCBOR)
 	if err != nil {
 		return nil, err
 	}
-	resultSig, err := bitfs.SignMessage(workflow.privateKey, resultSigning)
+	receiptSig, err := bitfs.SignMessage(workflow.privateKey, receiptSigning)
 	if err != nil {
-		return nil, fmt.Errorf("sign arbitration result: %w", err)
+		return nil, fmt.Errorf("sign arbitration receipt: %w", err)
 	}
-	if err := bitfs.VerifySignature(workflow.publicKey, resultSigning, resultSig); err != nil {
-		return nil, fmt.Errorf("verify arbitration result signature: %w", err)
+	if err := bitfs.VerifySignature(workflow.publicKey, receiptSigning, receiptSig); err != nil {
+		return nil, fmt.Errorf("verify arbitration receipt signature: %w", err)
 	}
-	response := &ArbitrationResponse{Version: MajorVersion, ResultCBOR: resultCBOR, ArbiterResultSignature: resultSig, ArbiterTransactionSignature: arbiterTxSig}
+	response := &ArbitrationResponse{Version: MajorVersion, ReceiptCBOR: receiptCBOR, ArbiterReceiptSignature: receiptSig}
 	if _, err := MarshalResponse(response); err != nil {
 		return nil, err
 	}
 	return cloneResponse(response), nil
 }
 
-func validateRequestEvidence(request *ArbitrationRequest) (*ArbitrationClaim, *bitfs.ContentRequestTerms, [][]byte, *pool.UnsignedPayment, []byte, []byte, []byte, []byte, pool.MultisigPoolPublicKeys, error) {
+// validateRequestEvidence performs the complete pre-signature evidence chain:
+// strict Kind 8 decoding, Claim and terms validation, role recovery, Buyer and
+// Seller signature checks, per-payload hash verification, and independent
+// candidate reconstruction with the explicit arbitration fee. The zero-fee
+// rejection lives in the success builder, so no caller ever passes a
+// placeholder amount.
+func validateRequestEvidence(request *ArbitrationRequest, arbiterAmountSat uint64) (*ArbitrationClaim, *bitfs.ContentRequestTerms, [][]byte, *pool.UnsignedPayment, []byte, []byte, pool.MultisigPoolPublicKeys, error) {
 	if err := ValidateRequest(request); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	claim, err := UnmarshalClaim(request.ClaimCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	terms, err := bitfs.DecodeContentRequestTerms(claim.TermsCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	keys, err := pool.ParseArbitratedPoolLockingScript(claim.PoolOutputLockingScript)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	if err := bitfs.VerifySignature(keys.BuyerPubKey, claim.TermsCBOR, claim.BuyerSignature); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: buyer authorization signature invalid: %v", pool.ErrInvalidEvidence, err)
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: buyer authorization signature invalid: %v", pool.ErrInvalidEvidence, err)
 	}
 	sellerSigning, err := SellerClaimSigningCBOR(request.ClaimCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	if err := bitfs.VerifySignature(keys.SellerPubKey, sellerSigning, request.SellerClaimSignature); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: seller Claim signature invalid: %v", pool.ErrInvalidEvidence, err)
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: seller Claim signature invalid: %v", pool.ErrInvalidEvidence, err)
 	}
 	payloads, err := bitfs.DecodeContentPayloads(request.ContentPayloadsCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	hashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	if len(payloads) != len(hashes) {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: payload count does not match authorized hash count", pool.ErrInvalidEvidence)
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: payload count does not match authorized hash count", pool.ErrInvalidEvidence)
 	}
 	for index := range payloads {
 		digest := sha256.Sum256(payloads[index])
 		if !bytes.Equal(digest[:], hashes[index]) {
-			return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: payload #%d does not match authorized hash", pool.ErrInvalidEvidence, index+1)
+			return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: payload #%d does not match authorized hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat)
+	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat, arbiterAmountSat)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
 	refundID := unsigned.RefundTemplateTxID
 	if !bytes.Equal(refundID[:], terms.RefundTemplateTxID) {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: refund template transaction ID does not match Buyer terms", pool.ErrInvalidEvidence)
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, fmt.Errorf("%w: refund template transaction ID does not match Buyer terms", pool.ErrInvalidEvidence)
 	}
 	authHash, err := bitfs.PaymentAuthorizationHash(claim.TermsCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
-	commitment, err := RequestCommitment(request)
+	claimID, err := ArbitrationClaimID(request.ClaimCBOR)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
+		return nil, nil, nil, nil, nil, nil, pool.MultisigPoolPublicKeys{}, err
 	}
-	payloadHash := sha256.Sum256(request.ContentPayloadsCBOR)
-	txHash := sha256.Sum256(unsigned.RawTx)
-	return claim, terms, payloads, unsigned, commitment, append([]byte(nil), authHash[:]...), append([]byte(nil), payloadHash[:]...), append([]byte(nil), txHash[:]...), keys, nil
+	return claim, terms, payloads, unsigned, claimID, append([]byte(nil), authHash[:]...), keys, nil
 }
 
 func ValidateClaim(claim *ArbitrationClaim) error {
@@ -427,7 +479,8 @@ func ValidateClaim(claim *ArbitrationClaim) error {
 	if err != nil {
 		return err
 	}
-	if _, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat); err != nil {
+	// 纯结构验证：不依赖任何成功仲裁费，因此不需要占位金额。
+	if err := pool.ValidateArbitrationClaimStructure(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat); err != nil {
 		return err
 	}
 	if err := bitfs.VerifySignature(keys.BuyerPubKey, claim.TermsCBOR, claim.BuyerSignature); err != nil {
@@ -561,69 +614,93 @@ func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	return cloneRequest(request), nil
 }
 
-func ValidateResult(result *ArbitrationResult) error {
-	if result == nil || len(result.RequestCommitment) != sha256.Size || len(result.ContentPayloadsHash) != sha256.Size || len(result.UnsignedStateTxHash) != sha256.Size {
-		return fmt.Errorf("%w: arbitration result hashes must be 32 bytes", pool.ErrInvalidEvidence)
+// ArbitrationClaimID returns SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor])).
+// It hashes the exact Seller Claim signing domain, never a decoded Go struct
+// and never the complete Kind 8 envelope.
+func ArbitrationClaimID(claimCBOR []byte) ([]byte, error) {
+	domain, err := SellerClaimSigningCBOR(claimCBOR)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(domain)
+	return append([]byte(nil), hash[:]...), nil
+}
+
+// ValidateReceipt validates a decoded arbitration receipt: a fixed 32-byte
+// Claim ID, a positive arbiter amount, and a bounded transaction signature.
+func ValidateReceipt(receipt *ArbitrationReceipt) error {
+	if receipt == nil || len(receipt.ClaimID) != sha256.Size {
+		return fmt.Errorf("%w: arbitration receipt Claim ID must be 32 bytes", pool.ErrInvalidEvidence)
+	}
+	if receipt.ArbiterAmountSat == 0 {
+		return fmt.Errorf("%w: arbitration receipt arbiter amount must be positive", pool.ErrInvalidEvidence)
+	}
+	if len(receipt.ArbiterTransactionSignature) == 0 || len(receipt.ArbiterTransactionSignature) > MaxArbitrationSignatureBytes {
+		return fmt.Errorf("%w: arbitration receipt transaction signature exceeds %d bytes", pool.ErrInvalidEvidence, MaxArbitrationSignatureBytes)
 	}
 	return nil
 }
 
-func MarshalResult(result *ArbitrationResult) ([]byte, error) {
-	if err := ValidateResult(result); err != nil {
+// MarshalReceipt encodes the receipt as the canonical three-element
+// deterministic CBOR child document.
+func MarshalReceipt(receipt *ArbitrationReceipt) ([]byte, error) {
+	if err := ValidateReceipt(receipt); err != nil {
 		return nil, err
 	}
-	raw, err := arbitrationEnc.Marshal([]any{bstr(result.RequestCommitment), bstr(result.ContentPayloadsHash), bstr(result.UnsignedStateTxHash)})
+	raw, err := arbitrationEnc.Marshal([]any{bstr(receipt.ClaimID), receipt.ArbiterAmountSat, bstr(receipt.ArbiterTransactionSignature)})
 	if err != nil {
 		return nil, err
 	}
-	if err := requireWireSize(raw, MaxArbitrationResultBytes, "arbitration Result"); err != nil {
+	if err := requireWireSize(raw, MaxArbitrationReceiptBytes, "arbitration receipt"); err != nil {
 		return nil, err
 	}
 	return raw, nil
 }
 
-func UnmarshalResult(data []byte) (*ArbitrationResult, error) {
-	if err := requireWireSize(data, MaxArbitrationResultBytes, "arbitration Result"); err != nil {
+// UnmarshalReceipt strictly decodes receipt bytes: size limit first, strict
+// decode, validation, then deterministic re-encode byte equality.
+func UnmarshalReceipt(data []byte) (*ArbitrationReceipt, error) {
+	if err := requireWireSize(data, MaxArbitrationReceiptBytes, "arbitration receipt"); err != nil {
 		return nil, err
 	}
 	values, err := decodeArray(data, 3)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode arbitration result: %v", pool.ErrInvalidEvidence, err)
+		return nil, fmt.Errorf("%w: decode arbitration receipt: %v", pool.ErrInvalidEvidence, err)
 	}
-	result := new(ArbitrationResult)
-	if err := arbitrationDec.Unmarshal(values[0], &result.RequestCommitment); err != nil {
+	receipt := new(ArbitrationReceipt)
+	if err := arbitrationDec.Unmarshal(values[0], &receipt.ClaimID); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[1], &result.ContentPayloadsHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[1], &receipt.ArbiterAmountSat); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[2], &result.UnsignedStateTxHash); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &receipt.ArbiterTransactionSignature); err != nil {
 		return nil, err
 	}
-	if err := ValidateResult(result); err != nil {
+	if err := ValidateReceipt(receipt); err != nil {
 		return nil, err
 	}
-	canonical, err := MarshalResult(result)
+	canonical, err := MarshalReceipt(receipt)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: arbitration result is not deterministically encoded", pool.ErrInvalidEvidence)
+		return nil, fmt.Errorf("%w: arbitration receipt is not deterministically encoded", pool.ErrInvalidEvidence)
 	}
-	return cloneResult(result), nil
+	return cloneReceipt(receipt), nil
 }
 
 func ValidateResponse(response *ArbitrationResponse) error {
-	if response == nil || response.Version != MajorVersion || len(response.ResultCBOR) == 0 || len(response.ArbiterResultSignature) == 0 || len(response.ArbiterTransactionSignature) == 0 {
+	if response == nil || response.Version != MajorVersion || len(response.ReceiptCBOR) == 0 || len(response.ArbiterReceiptSignature) == 0 {
 		return fmt.Errorf("%w: arbitration response is incomplete", pool.ErrInvalidEvidence)
 	}
-	if len(response.ResultCBOR) > MaxArbitrationResultBytes {
-		return fmt.Errorf("%w: arbitration response Result exceeds %d bytes", pool.ErrInvalidEvidence, MaxArbitrationResultBytes)
+	if len(response.ReceiptCBOR) > MaxArbitrationReceiptBytes {
+		return fmt.Errorf("%w: arbitration response receipt exceeds %d bytes", pool.ErrInvalidEvidence, MaxArbitrationReceiptBytes)
 	}
-	if len(response.ArbiterResultSignature) > MaxArbitrationSignatureBytes || len(response.ArbiterTransactionSignature) > MaxArbitrationSignatureBytes {
+	if len(response.ArbiterReceiptSignature) > MaxArbitrationSignatureBytes {
 		return fmt.Errorf("%w: arbitration response signature exceeds %d bytes", pool.ErrInvalidEvidence, MaxArbitrationSignatureBytes)
 	}
-	if _, err := UnmarshalResult(response.ResultCBOR); err != nil {
+	if _, err := UnmarshalReceipt(response.ReceiptCBOR); err != nil {
 		return err
 	}
 	return nil
@@ -633,7 +710,7 @@ func MarshalResponse(response *ArbitrationResponse) ([]byte, error) {
 	if err := ValidateResponse(response); err != nil {
 		return nil, err
 	}
-	raw, err := arbitrationEnc.Marshal([]any{MajorVersion, kindArbitrationResponse, bstr(response.ResultCBOR), bstr(response.ArbiterResultSignature), bstr(response.ArbiterTransactionSignature)})
+	raw, err := arbitrationEnc.Marshal([]any{MajorVersion, kindArbitrationResponse, bstr(response.ReceiptCBOR), bstr(response.ArbiterReceiptSignature)})
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +724,7 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	if err := requireWireSize(data, MaxArbitrationResponseBytes, "arbitration response"); err != nil {
 		return nil, err
 	}
-	values, err := decodeArray(data, 5)
+	values, err := decodeArray(data, 4)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode arbitration response: %v", pool.ErrInvalidEvidence, err)
 	}
@@ -659,13 +736,10 @@ func UnmarshalResponse(data []byte) (*ArbitrationResponse, error) {
 	if err := arbitrationDec.Unmarshal(values[1], &kind); err != nil || kind != kindArbitrationResponse {
 		return nil, fmt.Errorf("%w: arbitration response kind must be 9", pool.ErrInvalidEvidence)
 	}
-	if err := arbitrationDec.Unmarshal(values[2], &response.ResultCBOR); err != nil {
+	if err := arbitrationDec.Unmarshal(values[2], &response.ReceiptCBOR); err != nil {
 		return nil, err
 	}
-	if err := arbitrationDec.Unmarshal(values[3], &response.ArbiterResultSignature); err != nil {
-		return nil, err
-	}
-	if err := arbitrationDec.Unmarshal(values[4], &response.ArbiterTransactionSignature); err != nil {
+	if err := arbitrationDec.Unmarshal(values[3], &response.ArbiterReceiptSignature); err != nil {
 		return nil, err
 	}
 	if err := ValidateResponse(response); err != nil {
@@ -689,24 +763,36 @@ func SellerClaimSigningCBOR(claimCBOR []byte) ([]byte, error) {
 	return arbitrationEnc.Marshal([]any{MajorVersion, kindArbitrationRequest, bstr(claimCBOR)})
 }
 
-// ArbiterResultSigningCBOR returns the exact [4,9,result_cbor] message domain.
-func ArbiterResultSigningCBOR(resultCBOR []byte) ([]byte, error) {
-	if _, err := UnmarshalResult(resultCBOR); err != nil {
+// ArbiterReceiptSigningCBOR returns the exact [4,9,receipt_cbor] message domain.
+func ArbiterReceiptSigningCBOR(receiptCBOR []byte) ([]byte, error) {
+	if _, err := UnmarshalReceipt(receiptCBOR); err != nil {
 		return nil, err
 	}
-	return arbitrationEnc.Marshal([]any{MajorVersion, kindArbitrationResponse, bstr(resultCBOR)})
+	return arbitrationEnc.Marshal([]any{MajorVersion, kindArbitrationResponse, bstr(receiptCBOR)})
 }
 
-func RequestCommitment(request *ArbitrationRequest) ([]byte, error) {
-	if err := ValidateRequest(request); err != nil {
-		return nil, err
-	}
-	domain, err := SellerClaimSigningCBOR(request.ClaimCBOR)
-	if err != nil {
-		return nil, err
-	}
-	hash := sha256.Sum256(domain)
-	return append([]byte(nil), hash[:]...), nil
+// preparedEvidenceCommitment is a private anti-tamper binding only. It ties
+// the exact canonical Kind 8 bytes, the Claim ID, the frozen arbitration fee,
+// and the rebuilt candidate raw together so any mutation of persisted custody
+// state between PreparePayment and SignPreparedPayment is detected. It is not
+// a second wire truth and is never serialized into any message.
+func preparedEvidenceCommitment(exactRequestRaw, claimID []byte, arbiterAmountSat uint64, unsigned *pool.UnsignedPayment) []byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("bitfs.v4.arbitration.prepared-payment\x00"))
+	writeCommitmentPart(hash, exactRequestRaw)
+	writeCommitmentPart(hash, claimID)
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], arbiterAmountSat)
+	_, _ = hash.Write(number[:])
+	writeCommitmentPart(hash, unsigned.RawTx)
+	return hash.Sum(nil)
+}
+
+func writeCommitmentPart(hash hash.Hash, value []byte) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	_, _ = hash.Write(length[:])
+	_, _ = hash.Write(value)
 }
 
 func cloneRequest(request *ArbitrationRequest) *ArbitrationRequest {
@@ -723,18 +809,18 @@ func cloneClaim(claim *ArbitrationClaim) *ArbitrationClaim {
 	return &ArbitrationClaim{PoolOutputSatoshis: claim.PoolOutputSatoshis, PoolOutputLockingScript: append([]byte(nil), claim.PoolOutputLockingScript...), RefundTemplateRaw: append([]byte(nil), claim.RefundTemplateRaw...), TermsCBOR: append([]byte(nil), claim.TermsCBOR...), BuyerSignature: append([]byte(nil), claim.BuyerSignature...)}
 }
 
-func cloneResult(result *ArbitrationResult) *ArbitrationResult {
-	if result == nil {
+func cloneReceipt(receipt *ArbitrationReceipt) *ArbitrationReceipt {
+	if receipt == nil {
 		return nil
 	}
-	return &ArbitrationResult{RequestCommitment: append([]byte(nil), result.RequestCommitment...), ContentPayloadsHash: append([]byte(nil), result.ContentPayloadsHash...), UnsignedStateTxHash: append([]byte(nil), result.UnsignedStateTxHash...)}
+	return &ArbitrationReceipt{ClaimID: append([]byte(nil), receipt.ClaimID...), ArbiterAmountSat: receipt.ArbiterAmountSat, ArbiterTransactionSignature: append([]byte(nil), receipt.ArbiterTransactionSignature...)}
 }
 
 func cloneResponse(response *ArbitrationResponse) *ArbitrationResponse {
 	if response == nil {
 		return nil
 	}
-	return &ArbitrationResponse{Version: response.Version, ResultCBOR: append([]byte(nil), response.ResultCBOR...), ArbiterResultSignature: append([]byte(nil), response.ArbiterResultSignature...), ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...)}
+	return &ArbitrationResponse{Version: response.Version, ReceiptCBOR: append([]byte(nil), response.ReceiptCBOR...), ArbiterReceiptSignature: append([]byte(nil), response.ArbiterReceiptSignature...)}
 }
 
 func cloneUnsigned(unsigned *pool.UnsignedPayment) *pool.UnsignedPayment {

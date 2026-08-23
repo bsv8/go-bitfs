@@ -54,7 +54,10 @@ const (
 	// ArbitrationRequest carries evidence for arbitration.
 	// Direction: seller -> arbiter.
 	ArbitrationRequest Kind = 8
-	// ArbitrationResponse carries the arbiter's signature result.
+	// ArbitrationResponse carries the arbitration receipt and the detached
+	// signature over [4, 9, exact_receipt_cbor]; the receipt binds the Claim
+	// ID, the positive arbiter amount, and the arbitration transaction
+	// signature over the independently rebuilt candidate.
 	// Direction: arbiter -> seller.
 	ArbitrationResponse Kind = 9
 )
@@ -291,7 +294,8 @@ func UnmarshalArbitrationRequest(rawCBOR []byte) (*arbitration.ArbitrationReques
 	return message.(*arbitration.ArbitrationRequest), nil
 }
 
-// MarshalArbitrationResponse encodes the arbiter hashes and detached signature.
+// MarshalArbitrationResponse encodes the four-element receipt response with
+// its detached receipt signature.
 func MarshalArbitrationResponse(message *arbitration.ArbitrationResponse) ([]byte, error) {
 	packet, err := Marshal(ArbitrationResponse, message)
 	return packet.CBOR, err

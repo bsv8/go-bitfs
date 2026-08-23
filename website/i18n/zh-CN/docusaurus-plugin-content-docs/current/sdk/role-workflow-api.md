@@ -178,14 +178,14 @@ func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.
 // 只签署紧凑 Claim 证据；它不构造或签署仲裁交易。
 func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
 
-// CompleteArbitratedPayment 完全依据 Claim/Result 验证 Kind 8/9，独立重建候选，
+// CompleteArbitratedPayment 完全依据 Claim 与回执金额验证 Kind 8/9，独立重建付费候选，
 // 然后签署并合并 Seller 交易签名；此 API 不接收 OpeningProof 或 previous state。
 func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
 ```
 
 ## Arbiter API
 
-仲裁方接收完整证据，而不是查询买方或卖方的状态；它不判断内容是否已交付，也不重新计算报价金额。
+仲裁方接收完整证据，而不是查询买方或卖方的状态；它不判断内容是否已交付，也不重新计算报价金额。仲裁费是应用决策：按精确 `len(request.ContentPayloadsCBOR)` 用自己的整数策略计价，再把明确金额交给 SDK。
 
 ```go
 // package arbitration
@@ -195,9 +195,53 @@ type WorkflowConfig struct {
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32) (*arbitration.PreparedPayment, error)
+// ArbitrationReceipt 是内层三元 Kind 9 文档：Claim ID、正仲裁费和对独立重建
+// candidate 的 ForkID|All 交易签名。
+type ArbitrationReceipt struct {
+    ClaimID                     []byte
+    ArbiterAmountSat            uint64
+    ArbiterTransactionSignature []byte
+}
 
+// ArbitrationResponse 是精确四元 Kind 9 报文。
+type ArbitrationResponse struct {
+    Version                 uint64
+    ReceiptCBOR             []byte
+    ArbiterReceiptSignature []byte
+}
+
+// ArbitrationClaimID 返回 SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))。
+func ArbitrationClaimID(claimCBOR []byte) ([]byte, error)
+func ValidateReceipt(receipt *ArbitrationReceipt) error
+func MarshalReceipt(receipt *ArbitrationReceipt) ([]byte, error)
+func UnmarshalReceipt(raw []byte) (*ArbitrationReceipt, error)
+func ArbiterReceiptSigningCBOR(receiptCBOR []byte) ([]byte, error)
+
+// PreparePayment 验证 Claim、Buyer 授权、Seller Claim 签名、payload 托管与
+// 按调用方明确正费用重建的 candidate（零费用按 invalid evidence 拒绝；费用
+// 放不进剩余余额返回 pool.ErrInsufficientBalance）。它不产生任何签名；
+// 应用随后原子持久化精确证据。
+func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32, arbiterAmountSat uint64) (*arbitration.PreparedPayment, error)
+
+// SignPreparedPayment 从冻结的 exact request 和冻结费用重新校验 opaque 证据，
+// 独立重建 candidate：先产生并自验交易签名，再编码回执，最后生成并自验对
+// [4, 9, exact_receipt_cbor] 的回执普通消息签名。
 func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
+
+// PreparedPayment 深复制 getter：Request()、ContentPayloadsCBOR()、
+// ContentPayloads()、ClaimID()、ArbiterAmountSat()、PaymentAuthorizationHash()、
+// UnsignedPayment()、DeadlineUnix()、PreparedAt()。
+```
+
+pool 包还刻意公开一个供 007 证据路径使用的纯函数：
+
+```go
+// package pool
+// ValidateArbitrationClaimStructure 执行 007 候选交易的纯结构检查（source
+// context、角色脚本、Seller/Arbiter 初始金额为零的规范退款模板、序号顺序、
+// Seller 余额），不依赖任何仲裁费。证据验证用它避免任何占位金额；成功构造器
+// 额外要求正费用。它是为跨包复用而刻意导出的公开 API，无签名也无副作用。
+func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error
 ```
 
 ## 完整业务流程
@@ -288,10 +332,12 @@ authorization := journal.LoadSentContentRequest(refundTemplateTxID) // 留痕的
 delivery := journal.LoadExactContentDelivery(authorization) // retained 004 payload bundle
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
     opening, authorization, delivery, blockHeight)
-prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight)
+// 应用按精确 payload CBOR 长度计价，再把明确金额交给 SDK。
+arbiterAmountSat := arbiterFeePolicy(len(arbitrationRequest.ContentPayloadsCBOR))
+prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight, arbiterAmountSat)
 journal.SaveArbitrationCustody(
     prepared.Request(), prepared.ContentPayloadsCBOR(),
-    prepared.RequestCommitment(), prepared.UnsignedStateTxHash())
+    prepared.ClaimID(), prepared.ArbiterAmountSat())
 response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
     arbitrationRequest, response, blockHeight)

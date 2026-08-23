@@ -5,10 +5,13 @@ title: 007 · v4 Seller arbitration submission specification
 
 # 007 · v4 Seller arbitration submission specification
 
-007 is a destructive v4 hard switch. The old six-element request and old
-five-element response are invalid. The Arbiter receives Seller-signed source
+007 is a destructive v4 hard switch. The old five-element Kind 9 result
+response is invalid. Kind 9 is now a four-element receipt response that pays
+the Arbiter a positive, explicitly decided fee, and the receipt binds the
+Claim ID, that fee, and the arbitration transaction signature together under
+one ordinary message signature. The Arbiter receives Seller-signed source
 context, Buyer-signed terms, and the exact payload bundle; it independently
-rebuilds the payment transaction and signs only after the application has
+rebuilds the paid payment transaction and signs only after the application has
 persisted the custody evidence.
 
 ## Wire documents
@@ -25,18 +28,18 @@ ArbitrationClaim = [
 ]
 
 ArbitrationResponse = [
-  4, 9, arbitration_result_cbor, arbiter_result_signature,
-  arbiter_transaction_signature
+  4, 9, arbitration_receipt_cbor, arbiter_receipt_signature
 ]
 
-ArbitrationResult = [request_commitment, content_payloads_hash,
-                     unsigned_state_tx_hash]
+ArbitrationReceipt = [arbitration_claim_id, arbiter_amount_sat,
+                      arbiter_transaction_signature]
 ```
 
-`Claim` and `Result` contain no version or kind. The transport Kind and the
+`Claim` and `Receipt` contain no version or kind. The transport Kind and the
 body's second element must agree. All child documents are deterministic CBOR
 embedded as `bstr`; decoders reject non-canonical bytes, wrong array lengths,
-tags, indefinite lengths, and trailing bytes.
+tags, indefinite lengths, and trailing bytes. Legacy five-element Kind 9 bytes
+fail deterministically; there is no dual-shape decoder.
 
 The Seller message signature is:
 
@@ -45,18 +48,20 @@ seller_claim_signing_cbor = [4, 8, exact_claim_cbor]
 seller_claim_signature = SignMessage(SellerKey, seller_claim_signing_cbor)
 ```
 
-The Result message signature is:
+The Receipt message signature is:
 
 ```text
-arbiter_result_signing_cbor = [4, 9, exact_result_cbor]
-arbiter_result_signature = SignMessage(ArbiterKey, arbiter_result_signing_cbor)
+arbiter_receipt_signing_cbor = [4, 9, exact_receipt_cbor]
+arbiter_receipt_signature = SignMessage(ArbiterKey, arbiter_receipt_signing_cbor)
 ```
 
-`request_commitment` is `SHA-256(seller_claim_signing_cbor)`;
-`content_payloads_hash` is `SHA-256(exact content_payloads_cbor)`; and
-`unsigned_state_tx_hash` is `SHA-256(exact unsigned candidate transaction)`. A
+The Claim ID is `arbitration_claim_id = SHA-256(seller_claim_signing_cbor)`,
+fixed at 32 bytes. It indirectly binds the exact Claim CBOR, the exact Buyer
+terms, and the ordered content hashes. A successful receipt requires
+`arbiter_amount_sat > 0`; zero never means free, declined, or undecided. The
 transaction signature is the independent `ForkID|All` signature and cannot
-replace the Result message signature.
+replace the Receipt message signature; neither signature can be substituted
+into the other's verification path.
 
 ## Claim and custody validation
 
@@ -77,7 +82,7 @@ The exact payload child document must contain 1–64 non-empty payloads. Each
 payload is canonical, within the MasterSeed block-size limit, in the exact
 003 order, and has the corresponding SHA-256. One bad item rejects the whole
 batch. Payloads are not copied into the Seller message signature; they are
-bound through the Buyer-signed content hashes and committed by the Result.
+bound through the Buyer-signed content hashes and through the Claim ID.
 
 This source context is an offline Seller claim. The SDK does not prove that
 the claimed amount/script belongs to an on-chain FundingTx output, is
@@ -87,34 +92,56 @@ ForkID signature unusable and is the Seller's reconciliation risk.
 ## Independent candidate construction
 
 `pool.BuildArbitrationPaymentFromClaim` accepts only the source amount, source
-locking script, refund template raw bytes, target sequence, and absolute Seller
-amount. It validates the refund shape and role output scripts, derives the
-retained refund fee, and constructs:
+locking script, refund template raw bytes, target sequence, absolute Seller
+amount, and the explicit positive arbitration fee. It validates the refund
+shape and role output scripts (the refund template itself still requires zero
+Seller/Arbiter initial amounts), derives the retained refund fee, and
+constructs exactly three funded outputs:
 
 ```text
 Input:  refund outpoint, target sequence, empty unlocking script
         source amount/script in memory for sighash only
-Outputs: Buyer = pool - refund_fee - SellerAmountAfterSat
-         Seller = SellerAmountAfterSat
-         Arbiter = 0
+Outputs: Buyer   = spendable - SellerAmountAfterSat - ArbiterAmountSat
+         Seller  = SellerAmountAfterSat
+         Arbiter = ArbiterAmountSat (> 0)
+         where spendable = pool - refund_fee
 LockTime: refund template locktime
 ```
+
+Buyer + Seller + Arbiter + refund fee always equals the pool output exactly,
+with overflow-free compare-then-subtract arithmetic. A Seller amount already
+above `spendable`, or a fee above the remaining balance, fails with
+`pool.ErrInsufficientBalance`; a zero fee is rejected as invalid evidence.
+Exhausting the Buyer remainder to exactly zero is a legal boundary as long as
+all three outputs exist.
 
 The Seller and Arbiter call this same core and require byte equality. The
 Arbiter flow is two phase:
 
 ```text
-PreparePayment
-  -> application atomically persists exact Kind 8 and payload bundle
+application computes arbiter_amount_sat from its own fee policy
+PreparePayment(request, blockHeight, arbiterAmountSat)
+  -> application atomically persists exact Kind 8, Claim ID, fee, and payload bundle
   -> SignPreparedPayment
   -> persist/send exact Kind 9
 ```
 
-The SDK has no database, object store, HTTP client, broadcaster, or UTXO
-lookup. Applications must retain exact request/result bytes for idempotency,
-replay, custody retention, and Buyer recovery.
+The SDK has no database, object store, HTTP client, broadcaster, UTXO lookup,
+or fee policy. Applications must retain exact request/response bytes for
+idempotency plus custody retention and Buyer recovery. Replay is gated on
+exact bytes, not the Claim ID alone: only an identical Claim ID with
+identical exact Kind 8 bytes replays the saved response bytes without
+re-pricing or re-signing; a same-ID/different-exact-Claim input is a
+hash-collision alarm; a same-Claim/different-outer-signature-or-payload input
+is first fully re-validated with the frozen fee (invalid variants are rejected
+as evidence errors, fully valid variants are duplicate-evidence conflicts);
+a different Claim ID gets its own record.
 
-After receiving Kind 9, the Seller verifies all three Result hashes, the
-Arbiter Result signature, and the Arbiter transaction signature against its
-own rebuilt candidate. Only then does it create its transaction signature and
-call `MergeArbitratedPoolSellerArbiterSignatures`.
+After receiving Kind 9, the Seller recomputes the Claim ID from its own Claim
+bytes, recovers the Arbiter public key from the role-ordered pool script,
+verifies the Receipt message signature over `[4, 9, exact_receipt_cbor]`,
+rebuilds the candidate with the receipt's arbiter amount, and verifies the
+Arbiter transaction signature against it. Only then does it create its own
+transaction signature and call `MergeArbitratedPoolSellerArbiterSignatures`.
+The completed state carries `ArbiterAmountSat` equal to the receipt amount and
+a Seller amount equal to the Buyer-authorized absolute amount.

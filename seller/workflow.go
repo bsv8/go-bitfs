@@ -640,10 +640,12 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, ClaimCBOR: claimCBOR, SellerClaimSignature: sellerClaimSignature, ContentPayloadsCBOR: delivery.ContentPayloadsCBOR}, nil
 }
 
-// CompleteArbitratedPayment verifies Kind 8/9 entirely from the Claim and
-// Result, independently rebuilds the candidate, and only then signs and
-// merges the Seller transaction signature. OpeningProof and previous state are
-// deliberately absent from this API.
+// CompleteArbitratedPayment verifies Kind 8/9 entirely from the Claim and the
+// four-element Receipt response, independently rebuilds the paid candidate
+// using the Receipt's arbiter amount, verifies the Receipt message signature
+// and the Arbiter transaction signature, and only then signs and merges the
+// Seller transaction signature. OpeningProof and previous state are
+// deliberately absent from this API; the response carries no raw transaction.
 func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
@@ -657,6 +659,10 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 		return nil, err
 	}
 	if _, err := arbitration.MarshalResponse(response); err != nil {
+		return nil, err
+	}
+	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	if err != nil {
 		return nil, err
 	}
 	claim, err := arbitration.UnmarshalClaim(request.ClaimCBOR)
@@ -700,15 +706,22 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 			return nil, fmt.Errorf("%w: payload #%d does not match 003 hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	commitment, err := arbitration.RequestCommitment(request)
+	// Seller 从 Claim primitives 独立重算 Claim ID 并与回执比较，不信任传输层身份。
+	localClaimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+	if !bytes.Equal(receipt.ClaimID, localClaimID) {
+		return nil, fmt.Errorf("%w: receipt Claim ID does not match the independently computed Claim ID", pool.ErrInvalidEvidence)
+	}
+	receiptSigning, err := arbitration.ArbiterReceiptSigningCBOR(response.ReceiptCBOR)
 	if err != nil {
 		return nil, err
 	}
-	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat)
+	if err := bitfs.VerifySignature(keys.ArbiterPubKey, receiptSigning, response.ArbiterReceiptSignature); err != nil {
+		return nil, fmt.Errorf("%w: Arbitration receipt signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat, receipt.ArbiterAmountSat)
 	if err != nil {
 		return nil, err
 	}
@@ -719,35 +732,27 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 	if err != nil {
 		return nil, err
 	}
-	payloadHash := sha256Bytes(request.ContentPayloadsCBOR)
-	txHash := sha256Bytes(unsigned.RawTx)
-	if !bytes.Equal(result.RequestCommitment, commitment) || !bytes.Equal(result.ContentPayloadsHash, payloadHash) || !bytes.Equal(result.UnsignedStateTxHash, txHash) {
-		return nil, fmt.Errorf("%w: Arbiter Result does not bind request, payloads, and candidate", pool.ErrInvalidEvidence)
-	}
-	resultSigning, err := arbitration.ArbiterResultSigningCBOR(response.ResultCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := bitfs.VerifySignature(keys.ArbiterPubKey, resultSigning, response.ArbiterResultSignature); err != nil {
-		return nil, fmt.Errorf("%w: Arbiter Result signature is invalid: %v", pool.ErrInvalidEvidence, err)
-	}
 	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(claim.PoolOutputLockingScript)
 	if err != nil {
 		return nil, err
 	}
-	if err := engine.VerifyArbitrationArbiterPayment(unsigned, response.ArbiterTransactionSignature); err != nil {
+	// 先验证回执绑定的仲裁交易签名覆盖本地重建的付费 candidate，再产生 Seller 签名。
+	if err := engine.VerifyArbitrationArbiterPayment(unsigned, receipt.ArbiterTransactionSignature); err != nil {
 		return nil, fmt.Errorf("%w: Arbiter transaction signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
 	sellerSig, err := engine.SignArbitrationSellerPayment(ctx, unsigned, workflow.privateKey)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := engine.MergeArbitratedPoolSellerArbiterSignatures(unsigned, sellerSig, response.ArbiterTransactionSignature)
+	signed, err := engine.MergeArbitratedPoolSellerArbiterSignatures(unsigned, sellerSig, receipt.ArbiterTransactionSignature)
 	if err != nil {
 		return nil, err
 	}
 	if signed == nil || len(signed.RawTx) == 0 {
 		return nil, fmt.Errorf("%w: merged arbitration transaction is empty", pool.ErrInvalidEvidence)
+	}
+	if signed.State.ArbiterAmountSat != receipt.ArbiterAmountSat || signed.State.SellerAmountSat != terms.SellerAmountAfterSat {
+		return nil, fmt.Errorf("%w: merged arbitration amounts do not match the receipt and Buyer terms", pool.ErrInvalidEvidence)
 	}
 	signed.State.PaymentAuthorizationHash = hash32ToPool(authHash)
 	return signed, nil
@@ -769,7 +774,7 @@ func cloneArbitrationResponse(value *arbitration.ArbitrationResponse) *arbitrati
 	if value == nil {
 		return nil
 	}
-	return &arbitration.ArbitrationResponse{Version: value.Version, ResultCBOR: append([]byte(nil), value.ResultCBOR...), ArbiterResultSignature: append([]byte(nil), value.ArbiterResultSignature...), ArbiterTransactionSignature: append([]byte(nil), value.ArbiterTransactionSignature...)}
+	return &arbitration.ArbitrationResponse{Version: value.Version, ReceiptCBOR: append([]byte(nil), value.ReceiptCBOR...), ArbiterReceiptSignature: append([]byte(nil), value.ArbiterReceiptSignature...)}
 }
 
 func hash32ToPool(value bitfs.Hash32) pool.Hash32 { return pool.Hash32(value) }

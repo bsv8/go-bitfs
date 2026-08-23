@@ -86,7 +86,7 @@ sequenceDiagram
 
     Note over B,S,A: 阶段四：仲裁（007，仅纠纷时）
 	S->>A: Kind 8  ArbitrationRequest（Claim+payload 托管证据+卖方 Claim 签名）
-    A->>S: Kind 9  ArbitrationResponse（哈希回执+仲裁签名）
+    A->>S: Kind 9  ArbitrationResponse（三元回执 ClaimID/费用/交易签名 + 回执签名）
     Note over S: 卖方合并双方签名并广播
 
     Note over B,S: 阶段五：关闭（006，无新报文）
@@ -370,36 +370,37 @@ Go 结构体 `PaymentUpdate`：
  terms_cbor, buyer_signature]
 ```
 
-卖方签名域严格为 deterministic-CBOR(`[4, 8, exact_claim_cbor]`)；签名只证明卖方提交了精确 source context、RefundTx、Buyer 条款和 Buyer 授权。Claim 不携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复 RefundTemplateTxID 或 Seller transaction signature。
+卖方签名域严格为 deterministic-CBOR(`[4, 8, exact_claim_cbor]`)；签名只证明卖方提交了精确 source context、RefundTx、Buyer 条款和 Buyer 授权。Claim 不携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复 RefundTemplateTxID 或 Seller transaction signature。payload 由 `terms_cbor` 内的有序 `content_hashes_cbor` 密码学绑定；仲裁费不在 Kind 8 中——只有仲裁方收到并逐项验证 payload 之后才由应用确定费用。
 
 仲裁方严格恢复 `[Buyer, Seller, Arbiter]` 顺序的规范 P2MS 脚本，验证 Buyer 对精确 `terms_cbor` 的签名，并由 RefundTx 原文推导 `RefundTemplateTxID` 与 003 条款比较。它逐项验证 payload 数量、顺序、大小、canonical CBOR 和 SHA-256；payload 是本次托管事实，不是 Quote 重新定价输入。
 
 source amount/script 是卖方签名承担的离线声明。SDK 不证明它对应链上 FundingTx output，不查询确认数或 UTXO 未花费状态；错误 source context 会使最终交易不可花费，风险由卖方负责对账。
 
-### 3.9 Kind 9 · 仲裁响应（007）— 仲裁方 → 卖方
+### 3.9 Kind 9 · 仲裁回执响应（007）— 仲裁方 → 卖方
 
-编码（`MarshalResponse`，五元数组）：
-
-```
-[4, 9, arbitration_result_cbor, arbiter_result_signature,
- arbiter_transaction_signature]
-```
-
-`arbitration_result_cbor` 是无版本、无 type 的三元子文档：
+编码（`MarshalResponse`，四元数组）：
 
 ```
-[request_commitment, content_payloads_hash, unsigned_state_tx_hash]
+[4, 9, arbitration_receipt_cbor, arbiter_receipt_signature]
+```
+
+`arbitration_receipt_cbor` 是无版本、无 type 的三元子文档：
+
+```
+[arbitration_claim_id, arbiter_amount_sat, arbiter_transaction_signature]
 ```
 
 其中：
 
-- `request_commitment = SHA-256(Seller signing CBOR [4,8,claim_cbor])`；
-- `content_payloads_hash = SHA-256(exact content_payloads_cbor)`；
-- `unsigned_state_tx_hash = SHA-256(exact unsigned state transaction raw)`。
+- `arbitration_claim_id = SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))`，长度固定 32 字节；
+- `arbiter_amount_sat` 是本次状态交易分配给仲裁方的绝对金额，成功响应必须为正数；
+- `arbiter_transaction_signature` 是对 Seller 可独立重建 candidate 的 `ForkID|All` 交易签名，绑定 input、sequence、locktime 和三个输出脚本与金额。
 
-仲裁方签名域严格为 deterministic-CBOR(`[4, 9, exact_result_cbor]`)。它与对 candidate 的 `ForkID|All` 交易签名职责不同，二者不能互相替代。
+候选交易固定三个资金输出：`output[0]` 为 Buyer P2PKH（扣除 Seller、Arbiter 与既定矿工费后的余额），`output[1]` 为 Seller P2PKH（Buyer 已授权的 `SellerAmountAfterSat`），`output[2]` 为 Arbiter P2PKH（本次回执中的 `ArbiterAmountSat`）。金额守恒：`Buyer + Seller + Arbiter + RefundFee = PoolOutputSatoshis`。
 
-应用固定执行 `PreparePayment → 原子持久化 exact request/payload → SignPreparedPayment`，SDK 在持久化前绝不产生仲裁交易签名。卖方收到响应后从 Claim primitives 独立重建 candidate，逐字节比较三个 hash，验证 Result 消息签名和仲裁交易签名，最后才生成 Seller transaction signature，并通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。广播、Buyer 取件鉴权、retention、幂等和重试由应用负责。
+仲裁方签名域严格为 deterministic-CBOR(`[4, 9, exact_receipt_cbor]`) 的普通消息签名。它把精确 Claim ID、精确仲裁金额和精确交易签名字节绑定在一起；交易签名继续负责授权真实池交易。两种签名职责不同，不能互相替代，也不能用回执签名直接填入 2-of-3 解锁脚本。
+
+应用固定执行 `PreparePayment(request, blockHeight, arbiterAmountSat) → 原子持久化 exact request/payload/Claim ID/费用 → SignPreparedPayment → 原子持久化 exact canonical Kind 9 bytes → 发送`。费用由应用先按策略计算（例如按 exact `len(ContentPayloadsCBOR)` 整数阶梯计价），SDK 只验证正数与余额，不注入任何费率策略。SDK 在持久化前绝不产生任何签名。重放以 exact 字节为门槛：只有 Claim ID 与 exact Kind 8 字节完全相同才重发已保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层 Seller signature 或 payload 不同时，先用已冻结费用完整执行 PreparePayment——验证失败按 invalid evidence 拒绝且不计冲突，完全有效的变体才是重复证据冲突；不同 Claim ID 建立独立记录。卖方收到响应后从 Claim primitives 独立重算 Claim ID 并比较，从 pool script 恢复 Arbiter 公钥验证回执消息签名，用回执金额调用唯一 candidate builder 重建交易并验证仲裁交易签名，最后才生成 Seller transaction signature，并通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。旧五元 Kind 9 被严格拒绝；Kind 9 只表达成功响应，拒绝路径走应用错误通道。广播、Buyer 取件鉴权、retention、幂等和重试由应用负责。
 
 ---
 
@@ -439,7 +440,7 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 004 授权哈希 | 卖方 | 精确 32 字节 PaymentAuthorizationHash（裸消息签名，不含 payload） |
 | 005 状态交易 | 买方（线上）→ 卖方合并 | 本地重建交易的 sighash（wire 只传哈希+签名） |
 | 007 Claim | 卖方 | 精确 Claim signing domain `[4,8,claim_cbor]` |
-| 007 Result | 仲裁方 | 精确 Result signing domain `[4,9,result_cbor]` |
+| 007 回执 | 仲裁方 | 精确回执 signing domain `[4,9,receipt_cbor]` |
 | 007 候选交易 | Seller + Arbiter（各自独立重建） | 同一 canonical candidate 的 `ForkID|All` sighash |
 
 ---
@@ -471,7 +472,7 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 6 | 004 内容交付 | ✅ 合理 | 裸授权哈希签名 + payload 间接绑定；批次原子验收（注意必须逐项校验 hash） |
 | 7 | 005 付款更新 | ✅ 合理 | 最小凭证：授权哈希 + 买方对本地重建交易的分离签名；哈希仅作查找键不可解码 |
 | 8 | 007 仲裁请求 | ✅ 合理 | Seller Claim + 精确 payload；仲裁方验证并托管后独立构造 |
-| 9 | 007 仲裁响应 | ✅ 合理 | Result custody hash 与交易 hash、双签名职责分离 |
+| 9 | 007 回执响应 | ✅ 合理 | Claim ID + 正仲裁费 + 交易签名三元回执；回执签名与交易签名职责分离 |
 
 整体评价：报文集合没有冗余类型，每个字段要么被签名覆盖、要么可从签名材料推导、
 要么明确标注为非经济事实（如 RecommendedFilename）。"单一真值 + 分离签名 +
@@ -488,8 +489,8 @@ source amount/script 是卖方签名承担的离线声明。SDK 不证明它对�
 | 内容请求/交付结构与编码 | `bitfs/content.go:88`、`bitfs/content.go:252` |
 | 池报文结构体 | `pool/types.go:85`–`pool/types.go:146` |
 | 池报文 CBOR 编解码 | `pool/cbor.go` |
-| 007 Claim/Result 与签名工作流 | `arbitration/workflow.go` |
-| 仲裁请求/响应与验证工作流 | `arbitration/workflow.go:50`–`arbitration/workflow.go:151` |
+| 007 Claim/回执与两段式签名工作流 | `arbitration/workflow.go` |
+| 仲裁请求/回执响应与验证工作流 | `arbitration/workflow.go:50`–`arbitration/workflow.go:151` |
 | 买方工作流（001–006） | `buyer/workflow.go` |
 | 卖方工作流（001–007） | `seller/workflow.go` |
 | CDDL 规范 | `spec/v4/{bitfs,content,pool,payment,arbitration}.cddl` |

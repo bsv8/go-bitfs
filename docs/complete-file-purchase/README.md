@@ -440,9 +440,15 @@ if err != nil { /* ... */ }
 
 decodedArbitrationRequest, err := arbitration.UnmarshalRequest(rawRequest)
 if err != nil { /* ... */ }
-prepared, err := arbiterWorkflow.PreparePayment(arbiterCtx, decodedArbitrationRequest, blockHeight)
+// 生产服务必须在计价之前完成链上 UTXO 前置检查（outpoint 存在、金额与
+// Claim 一致、script 与池锁一致、已确认且未花费）；查询失败、超时或状态
+// 不确定时拒绝签名，不得降级继续。SDK 不查节点。
+// 应用先按自己的收费策略对 exact payload CBOR 长度计价（整数公式，无浮点），
+// 再把明确金额交给 SDK；SDK 只验证正数与余额，不注入任何费率策略。
+arbiterAmountSat := arbiterFeePolicy(len(decodedArbitrationRequest.ContentPayloadsCBOR))
+prepared, err := arbiterWorkflow.PreparePayment(arbiterCtx, decodedArbitrationRequest, blockHeight, arbiterAmountSat)
 if err != nil { /* ... */ }
-// 应用在这里原子持久化 exact request、payload bundle 和 commitment。
+// 应用在这里原子持久化 exact request、payload bundle、Claim ID 与冻结费用。
 if err := journal.PersistArbitrationCustody(prepared); err != nil { /* ... */ }
 response, err := arbiterWorkflow.SignPreparedPayment(arbiterCtx, prepared)
 if err != nil { /* ... */ }
@@ -460,9 +466,12 @@ _, err = broadcaster.Broadcast(signed.RawTx)
 | 场景 | 正确做法 |
 |---|---|
 | Prepare 后托管保存失败 | 回滚/标记不完整，绝不调用 `SignPreparedPayment`；SDK 没有数据库副作用。 |
-| Kind 9 保存成功但发送失败 | 重发**同一份**已保存 canonical response bytes，不重签、不改 Result hash。 |
+| Kind 9 保存成功但发送失败 | 重发**同一份**已保存 canonical response bytes，不重签、不改回执金额。 |
 | 广播超时 / 结果不确定 | 应用先持久化 raw 与 canonical txid，再按 txid/outpoint 查询节点对账；outbox 保证可安全重播。SDK 不保存 uncertain 标记。 |
-| 重复 / 乱序 / 并发报文 | 应用按 `request_commitment` 幂等索引 exact request/result；同 commitment 不同 payload hash 是冲突，不覆盖。 |
+| 重复 / 乱序 / 并发报文 | 应用按 Claim ID 幂等索引 exact request 与已签响应；同 Claim ID 不同 exact Claim bytes 是冲突或 hash collision，停止自动流程并报警，不覆盖原记录。 |
+| 仲裁费超出 Buyer 剩余余额 | 返回 `pool.ErrInsufficientBalance` 并**拒绝本次仲裁**：不生成、不保存、不发送 Kind 9；不得自动截断、下调或改写费用，也不得产生免费或部分收费响应。若业务允许重新报价，必须作为新的应用层决策重新进入 `PreparePayment`，且不得覆盖已经托管或签署的记录。 |
+| UTXO 查询超时 / 结果不确定 | 不把“不确定”当作可花费，不产生新签名；保存状态后重试查询，必要时进入人工/重试对账。 |
+| delivery deadline 在持久化间隙内到期 | `SignPreparedPayment` 重新检查并拒绝；已持久化证据保留为失败审计记录。 |
 | stale sequence / 金额倒退 / wrong source context | SDK 从 Buyer 绝对授权独立重建；应用按 `(RefundTemplateTxID, PaymentSequence)` high-water 和广播对账策略拒绝或人工处理。 |
 | 多租户 | 先做账户授权再加载证据；`RefundTemplateTxID` 是路由 ID 不是授权令牌；SDK 会继续校验 signer 公钥与协议角色的绑定。 |
 

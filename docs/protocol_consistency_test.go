@@ -18,8 +18,8 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 		forbidden []string
 	}{
 		"docs/protocol/wire-messages.zh.md": {
-			required:  []string{"[4, 8, arbitration_claim_cbor", "[4, 9, arbitration_result_cbor", "原子持久化 exact request/payload"},
-			forbidden: []string{"开池证据+授权+候选交易", "开池证据编码（内嵌 007）", "Kind 不进入签名字节"},
+			required:  []string{"[4, 8, arbitration_claim_cbor", "[4, 9, arbitration_receipt_cbor", "arbitration_claim_id, arbiter_amount_sat, arbiter_transaction_signature", "原子持久化 exact request/payload/Claim ID/费用"},
+			forbidden: []string{"开池证据+授权+候选交易", "开池证据编码（内嵌 007）", "Kind 不进入签名字节", "[4, 9, arbitration_result_cbor", "request_commitment", "content_payloads_hash", "unsigned_state_tx_hash"},
 		},
 		"website/docs/protocol/003-content-request-requirements.md": {
 			required:  []string{"A 007 Claim does not carry that OpeningProof", "independently rebuild the candidate"},
@@ -33,20 +33,53 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 			required:  []string{"不接收完整 OpeningProof 或 Seller candidate raw"},
 			forbidden: []string{"完整开池证明与精确付款交易"},
 		},
+		"website/docs/protocol/006-pool-close-requirements.md": {
+			required:  []string{"explicit, positive `output[2]` allocation", "signs `[4, 9, exact_receipt_cbor]`"},
+			forbidden: []string{"out-of-pool", "additional inputs for the submission transaction", "must be specified separately", "signing the Result and transaction separately"},
+		},
+		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/protocol/006-pool-close-requirements.md": {
+			required:  []string{"正数 `output[2]` 分配", "签署 `[4, 9, exact_receipt_cbor]`"},
+			forbidden: []string{"池外支付", "额外提供输入承担", "必须另行规范", "分别签署 Result 与交易"},
+		},
 		"website/docs/protocol/007-seller-arbitration-submission-requirements.md": {
-			required:  []string{"The outer request separately carries the Seller message signature"},
-			forbidden: []string{"Its Claim contains only:\n\n- the claimed pool output satoshis", "the Seller message signature over `[4, 8, exact_claim_cbor]`."},
+			required: []string{
+				"The outer request separately carries the Seller message signature",
+				"PreparePayment(request, blockHeight, arbiterAmountSat)",
+				"persist/send exact Kind 9",
+				// 幂等重放的精确条件：exact Kind 8 相同才重放；不同外层证据先
+				// 完整验证；无效变体不得计为 hash collision。
+				"Identical Claim ID and identical exact Kind 8 bytes replay the persisted\n   response verbatim",
+				"fully re-validated with the frozen fee via\n   PreparePayment",
+				"never raises a collision alarm",
+			},
+			forbidden: []string{"Its Claim contains only:\n\n- the claimed pool output satoshis", "the Seller message signature over `[4, 8, exact_claim_cbor]`.", "Result", "three Result hashes"},
+		},
+		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/protocol/007-seller-arbitration-submission-requirements.md": {
+			required: []string{
+				"PreparePayment(request, blockHeight, arbiterAmountSat)",
+				"原子持久化精确入站请求",
+				// 幂等重放的精确条件：exact Kind 8 相同才重放；不同外层证据先
+				// 完整验证；无效变体不得计为 hash collision。
+				"Claim ID 与 exact Kind 8 字节完全相同才原样重放已保存响应",
+				"使用已冻结费用完整执行 PreparePayment",
+				"不得触发 hash collision 报警",
+			},
+			forbidden: []string{"三个 Result hash", "五元 Kind 9 响应有效", "ArbiterAmountSat = 0"},
 		},
 		"spec/v4/bitfs.cddl": {
-			required:  []string{"hard-switched four times"},
-			forbidden: []string{"hard-switched three times"},
+			required:  []string{"hard-switched five times"},
+			forbidden: []string{"hard-switched three times", "hard-switched four times before launch"},
 		},
 		"spec/v4/arbitration.cddl": {
-			required: []string{"arbitration-request", "arbitration-response"},
+			required: []string{"arbitration-request", "arbitration-response", "arbitration-receipt = [arbitration-claim-id, arbiter-amount-sat, arbiter-transaction-signature]", "arbiter-amount-sat = uint .gt 0"},
 		},
 		"website/docs/sdk/core-boundary-refactor-work-order.md": {
-			required:  []string{"Current wire fixtures for 001–007", "five-element Claim/Result"},
-			forbidden: []string{"before and after the switch", "Changing the normative 001–007 wire behavior"},
+			required:  []string{"Current wire fixtures for 001–007", "five-element Kind 8 Claim request plus four-element Kind 9 Receipt response"},
+			forbidden: []string{"before and after the switch", "Changing the normative 001–007 wire behavior", "five-element Claim/Result"},
+		},
+		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/sdk/core-boundary-refactor-work-order.md": {
+			required:  []string{"五元 Kind 8 Claim 请求加四元 Kind 9 回执响应"},
+			forbidden: []string{"五元 Claim/Result"},
 		},
 		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/sdk/role-workflow-api.md": {
 			required: []string{"prepared.Request()", "prepared.ContentPayloadsCBOR()"},
@@ -57,7 +90,7 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 		"website/docs/sdk/protocol-foundations-and-cbor.md": {
 			required: []string{
 				"[4, 8, arbitration_claim_cbor]",
-				"[4, 9, arbitration_result_cbor]",
+				"[4, 9, arbitration_receipt_cbor]",
 				"the Kind 8/9 bodies embed\n// their own body type as the second array element and sign it",
 			},
 			forbidden: []string{
@@ -70,7 +103,7 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 		"website/i18n/zh-CN/docusaurus-plugin-content-docs/current/sdk/protocol-foundations-and-cbor.md": {
 			required: []string{
 				"[4, 8, arbitration_claim_cbor]",
-				"[4, 9, arbitration_result_cbor]",
+				"[4, 9, arbitration_receipt_cbor]",
 				"而 Kind 8/9\n// 的本体在数组第二项显式携带自己的报文类型并进入签名域",
 			},
 			forbidden: []string{
@@ -91,8 +124,13 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 			forbidden: []string{"TypeScript", "TS 侧", "@bsv/sdk", "跨语言测试向量", "跨语言向量"},
 		},
 		"docs/complete-file-purchase/README.md": {
-			required:  []string{"(*ec.PrivateKey).Sign"},
-			forbidden: []string{"TypeScript", "TS 侧", "@bsv/sdk", "跨语言"},
+			required: []string{
+				"(*ec.PrivateKey).Sign",
+				// 007 余额不足语义：拒绝本次仲裁且不产生 Kind 9，不得自动降费。
+				"拒绝本次仲裁",
+				"不生成、不保存、不发送 Kind 9",
+			},
+			forbidden: []string{"TypeScript", "TS 侧", "@bsv/sdk", "跨语言", "再下调费用或转人工"},
 		},
 	}
 	for relative, check := range checks {

@@ -623,7 +623,7 @@ func (engine *MultisigPoolEngine) parseUnsignedOrSignedState(rawTx []byte, proof
 	setPoolSource(state, details.PoolOutputSatoshis, details.PoolLockingScript)
 	unlocking := state.Inputs[0].UnlockingScript
 	state.Inputs[0].UnlockingScript = script.NewFromBytes(nil)
-	if err := engine.verifyCanonicalState(state, proof, details, state.Outputs[1].Satoshis, state.Inputs[0].SequenceNumber, state.LockTime); err != nil {
+	if err := engine.verifyCanonicalState(state, proof, details, state.Outputs[1].Satoshis, state.Outputs[2].Satoshis, state.Inputs[0].SequenceNumber, state.LockTime); err != nil {
 		return nil, err
 	}
 	state.Inputs[0].UnlockingScript = unlocking
@@ -645,9 +645,9 @@ func (engine *MultisigPoolEngine) verifyOpeningState(state *tx.Transaction, fund
 	return compareUnsignedState(state, expected)
 }
 
-func (engine *MultisigPoolEngine) verifyCanonicalState(state *tx.Transaction, proof *OpeningProof, details *OpeningDetails, sellerAmount uint64, sequence, lockTime uint32) error {
-	if state.Outputs[2] == nil || state.Outputs[2].Satoshis != 0 {
-		return invalid("arbiter amount must be zero")
+func (engine *MultisigPoolEngine) verifyCanonicalState(state *tx.Transaction, proof *OpeningProof, details *OpeningDetails, sellerAmount, arbiterAmount uint64, sequence, lockTime uint32) error {
+	if state.Outputs[2] == nil || state.Outputs[2].Satoshis != arbiterAmount {
+		return invalid("payment state arbiter output does not match its recorded amount")
 	}
 	if sequence == 0 {
 		return invalid("payment sequence is invalid")
@@ -660,7 +660,7 @@ func (engine *MultisigPoolEngine) verifyCanonicalState(state *tx.Transaction, pr
 	previous.Inputs[0].SequenceNumber = sequence - 1
 	previousSource := &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}
 	lock := lockTime
-	expected, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: previousSource, Sequence: sequence, LockTime: &lock, SellerAmount: sellerAmount, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB), PaymentProof: nil})
+	expected, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: previousSource, Sequence: sequence, LockTime: &lock, SellerAmount: sellerAmount, ArbiterAmount: arbiterAmount, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB), PaymentProof: nil})
 	if err != nil {
 		return err
 	}
@@ -998,7 +998,13 @@ func (engine *MultisigPoolEngine) validateUnsignedPayment(unsigned *UnsignedPaym
 	if err := requireUnsigned(state); err != nil {
 		return nil, err
 	}
-	if err := engine.verifyCanonicalState(state, proof, details, state.Outputs[1].Satoshis, state.Inputs[0].SequenceNumber, state.LockTime); err != nil {
+	// This is the normal 001–006 payment path: the arbiter output must remain
+	// zero. Paid arbiter candidates belong exclusively to the 007 builder and
+	// its own validator in arbitration.go.
+	if parsed.ArbiterAmountSat != 0 {
+		return nil, invalid("normal pool payment cannot pay the arbiter")
+	}
+	if err := engine.verifyCanonicalState(state, proof, details, state.Outputs[1].Satoshis, 0, state.Inputs[0].SequenceNumber, state.LockTime); err != nil {
 		return nil, err
 	}
 	return state, nil
@@ -1214,8 +1220,15 @@ func (engine *MultisigPoolEngine) verifyComplete(state *PaymentState, proof *Ope
 	if err != nil {
 		return err
 	}
-	if state.RefundTemplateTxID != details.RefundTemplateTxID || state.PaymentSequence != parsed.Inputs[0].SequenceNumber || state.BuyerAmountSat != parsed.Outputs[0].Satoshis || state.SellerAmountSat != parsed.Outputs[1].Satoshis || state.ArbiterAmountSat != parsed.Outputs[2].Satoshis || state.ArbiterAmountSat != 0 {
+	if state.RefundTemplateTxID != details.RefundTemplateTxID || state.PaymentSequence != parsed.Inputs[0].SequenceNumber || state.BuyerAmountSat != parsed.Outputs[0].Satoshis || state.SellerAmountSat != parsed.Outputs[1].Satoshis || state.ArbiterAmountSat != parsed.Outputs[2].Satoshis {
 		return invalid("payment state metadata does not match transaction outputs")
+	}
+	// 普通 005 状态的仲裁输出必须为零；007 仲裁状态必须向仲裁方支付正数金额。
+	if arbitration && state.ArbiterAmountSat == 0 {
+		return invalid("arbitrated payment must carry a positive arbiter amount")
+	}
+	if !arbitration && state.ArbiterAmountSat != 0 {
+		return invalid("non-arbitrated payment cannot pay the arbiter")
 	}
 	if len(parsed.Inputs[0].UnlockingScript.Bytes()) == 0 {
 		return invalid("complete payment must contain two signatures")

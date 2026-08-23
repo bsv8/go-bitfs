@@ -10,7 +10,8 @@ switch. It supersedes every earlier description in which role workflows could
 accept stores, content sources/sinks, or BSV submission backends. Protocol
 specifications 001–007 remain authoritative for wire bytes and protocol
 behavior; existing 001–006 wire shapes remain fixed, while 007 uses its current
-five-element Claim/Result shapes and signing domains. The `RefundTemplateTxID`
+five-element Kind 8 Claim request plus four-element Kind 9 Receipt response
+shapes and signing domains. The `RefundTemplateTxID`
 algorithm remains unchanged.
 
 ## Product definition

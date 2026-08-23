@@ -118,7 +118,7 @@ func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 	if len(rawRequest) == 0 || rawRequest[0] != 0x85 || rawRequest[1] != 0x04 {
 		t.Fatalf("007 request must be [4,8,...] five-element array: %x", rawRequest)
 	}
-	prepared, err := arbiter.PreparePayment(context.Background(), request, 900000)
+	prepared, err := arbiter.PreparePayment(context.Background(), request, 900000, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,20 +130,48 @@ func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(rawResponse) == 0 || rawResponse[0] != 0x84 || rawResponse[1] != 0x04 || rawResponse[2] != 0x09 {
+		t.Fatalf("007 response must be a four-element [4,9,...] array starting with 0x84: %x", rawResponse)
+	}
 	decodedResponse, err := UnmarshalArbitrationResponse(rawResponse)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decodedResponse.ResultCBOR, response.ResultCBOR) {
-		t.Fatal("007 response result changed during wire round trip")
+	if !bytes.Equal(decodedResponse.ReceiptCBOR, response.ReceiptCBOR) || !bytes.Equal(decodedResponse.ArbiterReceiptSignature, response.ArbiterReceiptSignature) {
+		t.Fatal("007 response receipt changed during wire round trip")
 	}
-	if len(rawResponse) == 0 || rawResponse[0] != 0x85 || rawResponse[1] != 0x04 {
-		t.Fatalf("007 response must be [4,9,...] five-element array: %x", rawResponse)
+	receipt, err := arbitration.UnmarshalReceipt(decodedResponse.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ArbiterAmountSat != 500 || len(receipt.ClaimID) != sha256.Size || len(receipt.ArbiterTransactionSignature) == 0 {
+		t.Fatalf("decoded receipt is incomplete or mispriced: %+v", receipt)
+	}
+	// 旧五元 Kind 9 必须被 strict decoder 拒绝，不存在兼容解码。
+	legacyReceiptCBOR, err := arbitration.MarshalReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyFiveElement, err := canonicalGoldenMarshal([]any{
+		uint64(4), uint64(9), goldenBstr(legacyReceiptCBOR),
+		goldenBstr(bytes.Repeat([]byte{7}, 70)), goldenBstr(bytes.Repeat([]byte{8}, 70)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalArbitrationResponse(legacyFiveElement); err == nil {
+		t.Fatal("legacy five-element Kind 9 was accepted")
 	}
 	// Kind never carries instance identity: decoding a payload under a
 	// different kind must fail rather than silently reinterpreting it.
 	if _, err := Unmarshal(CumulativePayment, rawRequest); err == nil {
 		t.Fatal("payload was decoded under an unrelated kind")
+	}
+	if _, err := Unmarshal(ArbitrationResponse, rawRequest); err == nil {
+		t.Fatal("Kind 8 body decoded as Kind 9")
+	}
+	if _, err := Unmarshal(ArbitrationRequest, rawResponse); err == nil {
+		t.Fatal("Kind 9 body decoded as Kind 8")
 	}
 }
 

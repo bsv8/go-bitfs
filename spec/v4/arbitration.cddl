@@ -1,4 +1,6 @@
-; v4 Kind 8/9: Seller-signed custody evidence and independent payment rebuild.
+; v4 Kind 8/9: Seller-signed custody evidence, paid arbitration receipt, and
+; independent payment rebuild. Kind 8 is unchanged by the 007 fee hard switch;
+; Kind 9 is a four-element receipt response carrying a positive arbiter amount.
 arbitration-request = [4, 8, arbitration-claim-cbor, seller-claim-signature, content-payloads-cbor]
 arbitration-claim-cbor = bstr .cbor arbitration-claim
 arbitration-claim = [pool-output-satoshis, pool-output-locking-script, refund-template-raw, terms-cbor, buyer-signature]
@@ -12,15 +14,23 @@ seller-claim-signature = bstr .size (1..256)
 ; array head = 16777801 bytes, matching bitfs.MaxContentPayloadsCBORBytes.
 content-payloads-cbor = bstr .size (1..16777801) .cbor content-payloads
 
-arbitration-response = [4, 9, arbitration-result-cbor, arbiter-result-signature, arbiter-transaction-signature]
-arbitration-result-cbor = bstr .cbor arbitration-result
-arbitration-result = [request-commitment, content-payloads-hash, unsigned-state-tx-hash]
-request-commitment = bstr .size 32
-content-payloads-hash = bstr .size 32
-unsigned-state-tx-hash = bstr .size 32
-arbiter-result-signature = bstr .size (1..256)
+arbitration-response = [4, 9, arbitration-receipt-cbor, arbiter-receipt-signature]
+arbitration-receipt-cbor = bstr .cbor arbitration-receipt
+arbitration-receipt = [arbitration-claim-id, arbiter-amount-sat, arbiter-transaction-signature]
+arbitration-claim-id = bstr .size 32
+arbiter-amount-sat = uint .gt 0
 arbiter-transaction-signature = bstr .size (1..256)
+arbiter-receipt-signature = bstr .size (1..256)
 
-; Claim and Result contain no version or kind. Seller signs [4, 8, claim-cbor]
-; and Arbiter signs [4, 9, result-cbor]. The candidate transaction is rebuilt
-; from the Claim source context, refund template, and Buyer-signed terms.
+; Claim and Receipt contain no version or kind. Seller signs [4, 8, claim-cbor];
+; the Claim ID is SHA-256 of that exact signing domain. The Arbiter first
+; rebuilds the candidate from the Claim source context, refund template, Buyer
+; terms, and its own explicitly decided positive fee, signs that candidate with
+; SIGHASH_FORKID|SIGHASH_ALL (binding input, sequence, locktime, all three
+; output scripts, and all three output amounts), then signs
+; [4, 9, receipt-cbor] as an ordinary message signature binding the exact
+; Claim ID, fee, and transaction signature bytes together. The Seller recovers
+; the Arbiter key from the role-ordered pool script and rebuilds the identical
+; candidate locally; no raw transaction, payload hash, or unsigned tx hash
+; travels on the wire. Legacy five-element Kind 9 responses are rejected
+; outright; there is no dual-shape decoding in this protocol version.

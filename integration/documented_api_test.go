@@ -209,7 +209,10 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	var arbiterWorkflow *arbitration.Workflow = f.arbiter
-	prepared, err := arbiterWorkflow.PreparePayment(ctx, decodedArbitrationRequest, blockHeight)
+	// README §6.4: the application prices the arbitration fee first, then
+	// hands the explicit amount to PreparePayment; the SDK never quotes.
+	arbiterAmountSat := uint64(500)
+	prepared, err := arbiterWorkflow.PreparePayment(ctx, decodedArbitrationRequest, blockHeight, arbiterAmountSat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +220,15 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, blockHeight); err != nil {
+	signedArbitrated, err := f.seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, blockHeight)
+	if err != nil {
 		t.Fatal(err)
+	}
+	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ArbiterAmountSat != arbiterAmountSat || signedArbitrated.State.ArbiterAmountSat != arbiterAmountSat {
+		t.Fatal("documented arbitration flow lost the explicit positive fee")
 	}
 }

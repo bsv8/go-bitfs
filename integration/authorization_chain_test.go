@@ -54,7 +54,7 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts())
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts(), arbitrationFeeSat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,16 +83,29 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	if signedPayment.State.PaymentAuthorizationHash != pool.Hash32(authHash) {
 		t.Fatal("accepted payment state carries a foreign authorization hash")
 	}
-	result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+	// Claim ID 是 Kind 9 的身份绑定：它必须等于 SHA-256([4,8,exact_claim_cbor])
+	// 且绝不冒充 003 授权哈希 SHA-256(TermsCBOR)。
+	localClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(prepared.PaymentAuthorizationHash(), authHash[:]) {
-		t.Fatal("007 prepared payment carries an authorization hash other than SHA-256(TermsCBOR)")
+	preparedClaimID := prepared.ClaimID()
+	if !bytes.Equal(preparedClaimID, localClaimID) {
+		t.Fatal("prepared payment Claim ID does not match the independently computed Claim ID")
+	}
+	if bytes.Equal(preparedClaimID, authHash[:]) {
+		t.Fatal("Claim ID must never impersonate the payment authorization hash")
+	}
+	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(receipt.ClaimID, localClaimID) || receipt.ArbiterAmountSat != arbitrationFeeSat {
+		t.Fatal("007 receipt does not bind the exact Claim ID and the frozen positive fee")
 	}
 	shellHash := sha256.Sum256(mustEncodeChainRequest(t, request))
-	if bytes.Equal(result.RequestCommitment, shellHash[:]) {
-		t.Fatal("007 result used the full SignedContentRequest shell hash as commitment")
+	if bytes.Equal(localClaimID, shellHash[:]) {
+		t.Fatal("007 used the full SignedContentRequest shell hash as the Claim ID")
 	}
 }
 

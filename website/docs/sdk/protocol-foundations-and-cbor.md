@@ -86,7 +86,7 @@ CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or 
 // 001–006 CBOR bodies carry no kind element, while the Kind 8/9 bodies embed
 // their own body type as the second array element and sign it — Seller signs
 // exactly [4, 8, arbitration_claim_cbor] and the Arbiter signs exactly
-// [4, 9, arbitration_result_cbor]. Messages that define RefundTemplateTxID
+// [4, 9, arbitration_receipt_cbor]. Messages that define RefundTemplateTxID
 // carry it in the CBOR document. The 0201 presign request derives it from
 // RefundTx and has no separate correlation ID field.
 type Kind uint16

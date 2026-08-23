@@ -223,7 +223,7 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbitrationUnsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, 2000)
+	arbitrationUnsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, 2000, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +245,10 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if err := engine.VerifyArbitratedPayment(&arbitrated.State, proof); err != nil {
 		t.Fatal(err)
 	}
+	// 普通 005 验证器必须继续拒绝带非零仲裁金额的状态：只有 007 路径接受付费输出。
+	if err := engine.VerifyAcceptedPayment(&arbitrated.State, proof); err == nil {
+		t.Fatal("normal 005 verifier accepted an arbitrated state with a non-zero arbiter amount")
+	}
 	parsedArbitrated, err := engine.ParsePaymentState(ctx, arbitrated.RawTx, proof)
 	if err != nil {
 		t.Fatal(err)
@@ -257,12 +261,15 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("normal candidate amount %d: %v", amount, err)
 		}
-		fromClaim, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, amount)
-		if err != nil {
-			t.Fatalf("claim candidate amount %d: %v", amount, err)
+		if normal.ArbiterAmountSat != 0 {
+			t.Fatalf("normal 005 candidate at amount %d carried a non-zero arbiter amount", amount)
 		}
-		if !bytes.Equal(normal.RawTx, fromClaim.RawTx) {
-			t.Fatalf("claim candidate differs from canonical builder at amount %d", amount)
+		parsedNormal, err := tx.NewTransactionFromBytes(normal.RawTx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsedNormal.Outputs[2].Satoshis != 0 {
+			t.Fatalf("normal 005 raw output[2] = %d at amount %d, want zero", parsedNormal.Outputs[2].Satoshis, amount)
 		}
 	}
 	tamperedOutpoint := *arbitrationUnsigned
@@ -314,7 +321,7 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 		t.Fatal(err)
 	}
 	zeroSourceTx.Inputs[0].SourceTXID = zeroSource
-	if _, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, zeroSourceTx.Bytes(), 3, 2000); err == nil {
+	if _, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, zeroSourceTx.Bytes(), 3, 2000, 500); err == nil {
 		t.Fatal("arbitration builder accepted an all-zero funding txid")
 	}
 	malformed, err := tx.NewTransactionFromBytes(unsigned.RawTx)
@@ -862,4 +869,167 @@ func mustPoolTermsTxID(t *testing.T, proof *OpeningProof) []byte {
 		t.Fatal(err)
 	}
 	return append([]byte(nil), details.RefundTemplateTxID[:]...)
+}
+
+// mustPaidArbitrationFixture builds the canonical paid 007 fixture: a large
+// pool opening plus its derived Claim context, so positive-fee boundaries have
+// room to maneuver. The returned spendable value is the pool balance after the
+// refund-template miner fee.
+func mustPaidArbitrationFixture(t *testing.T) (*MultisigPoolEngine, *OpeningProof, *OpeningDetails, uint64) {
+	t.Helper()
+	ctx := context.Background()
+	buyer := mustPoolTestKey(t, "11")
+	seller := mustPoolTestKey(t, "22")
+	arbiter := mustPoolTestKey(t, "33")
+	roles := mp.ArbitratedPoolRoles{Buyer: buyer.PubKey(), Seller: seller.PubKey(), Arbiter: arbiter.PubKey()}
+	lock, err := mp.BuildArbitratedPoolLock(roles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding := tx.NewTransaction()
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: 10_000_000, LockingScript: lock})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewBuyerPoolAdapter(engine, buyer).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellerRefund, err := NewSellerPoolAdapter(engine, seller).SignSellerRefund(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := engine.BuildOpeningProof(ctx, request, sellerRefund, funding.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	details, err := DeriveOpeningDetails(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refund, err := parseCanonicalTransaction(proof.RefundTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refundOutputs := refund.Outputs[0].Satoshis + refund.Outputs[1].Satoshis + refund.Outputs[2].Satoshis
+	// spendable = pool - refund_fee = pool - (pool - refundOutputs) = refundOutputs.
+	return engine, proof, details, refundOutputs
+}
+
+func TestBuildArbitrationPaymentFromClaimPositiveFeeBoundaries(t *testing.T) {
+	_, proof, details, spendable := mustPaidArbitrationFixture(t)
+	sellerAmount := uint64(2000)
+
+	zeroFee := func() error {
+		_, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, 0)
+		return err
+	}
+	if zeroFee() == nil {
+		t.Fatal("zero arbiter fee was accepted by the success builder")
+	}
+
+	oneSat, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, 1)
+	if err != nil {
+		t.Fatalf("one-sat fee candidate rejected: %v", err)
+	}
+	rawOne, err := tx.NewTransactionFromBytes(oneSat.RawTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawOne.Outputs[2].Satoshis != 1 || oneSat.ArbiterAmountSat != 1 {
+		t.Fatalf("one-sat fee metadata mismatch: metadata %d raw %d", oneSat.ArbiterAmountSat, rawOne.Outputs[2].Satoshis)
+	}
+	if rawOne.Outputs[1].Satoshis != sellerAmount || oneSat.SellerAmountSat != sellerAmount {
+		t.Fatalf("seller output drifted from Buyer-authorized amount: %d", rawOne.Outputs[1].Satoshis)
+	}
+	if oneSat.BuyerAmountSat != spendable-sellerAmount-1 || rawOne.Outputs[0].Satoshis != spendable-sellerAmount-1 {
+		t.Fatalf("buyer remainder = %d, want %d", oneSat.BuyerAmountSat, spendable-sellerAmount-1)
+	}
+	if oneSat.BuyerAmountSat+oneSat.SellerAmountSat+oneSat.ArbiterAmountSat+(details.PoolOutputSatoshis-spendable) != details.PoolOutputSatoshis {
+		t.Fatal("buyer + seller + arbiter + refund fee did not conserve the pool output")
+	}
+
+	// 恰好耗尽 Buyer 余额是合法边界：Buyer 输出为零但三个输出仍然存在。
+	maxFee := spendable - sellerAmount
+	exhausted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, maxFee)
+	if err != nil {
+		t.Fatalf("exactly-exhausting fee rejected: %v", err)
+	}
+	rawExhausted, err := tx.NewTransactionFromBytes(exhausted.RawTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exhausted.BuyerAmountSat != 0 || rawExhausted.Outputs[0].Satoshis != 0 || len(rawExhausted.Outputs) != 3 {
+		t.Fatalf("exhausted buyer output = %d over %d outputs", exhausted.BuyerAmountSat, len(rawExhausted.Outputs))
+	}
+
+	overByOne, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, maxFee+1)
+	if !errors.Is(err, ErrInsufficientBalance) || overByOne != nil {
+		t.Fatalf("fee exceeding balance by one sat = %v, want ErrInsufficientBalance", err)
+	}
+	_, hugeFeeErr := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, ^uint64(0))
+	if !errors.Is(hugeFeeErr, ErrInsufficientBalance) {
+		t.Fatalf("oversized fee error = %v, want ErrInsufficientBalance", hugeFeeErr)
+	}
+	// Seller 金额本身超过可花费余额时，无论费用多少都拒绝，不得削减修复。
+	_, overSeller := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, spendable+1, 1)
+	if !errors.Is(overSeller, ErrInsufficientBalance) {
+		t.Fatalf("seller amount beyond spendable error = %v, want ErrInsufficientBalance", overSeller)
+	}
+}
+
+func TestArbitrationSignaturesBindThirdOutputAmount(t *testing.T) {
+	ctx := context.Background()
+	engine, proof, details, _ := mustPaidArbitrationFixture(t)
+	sellerAmount := uint64(2000)
+	fee := uint64(500)
+
+	unsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, fee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellerSig, err := engine.SignArbitrationSellerPayment(ctx, unsigned, mustPoolTestKey(t, "22"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbiterSig, err := engine.SignArbitrationArbiterPayment(ctx, unsigned, mustPoolTestKey(t, "33"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, driftedFee := range []uint64{fee + 1, fee - 1} {
+		shifted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, driftedFee)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(shifted.RawTx, unsigned.RawTx) {
+			t.Fatalf("fee drift to %d produced identical candidate bytes", driftedFee)
+		}
+		if err := engine.VerifyArbitrationSellerPayment(shifted, sellerSig); err == nil {
+			t.Fatalf("Seller signature survived a third-output change to %d sats", driftedFee)
+		}
+		if err := engine.VerifyArbitrationArbiterPayment(shifted, arbiterSig); err == nil {
+			t.Fatalf("Arbiter signature survived a third-output change to %d sats", driftedFee)
+		}
+	}
+
+	// 直接篡改 raw 第三输出金额同样必须被拒绝。
+	tamperedRaw := *unsigned
+	tamperedValue, err := tx.NewTransactionFromBytes(unsigned.RawTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedValue.Outputs[2].Satoshis += 1
+	tamperedRaw.RawTx = tamperedValue.Bytes()
+	if _, err := engine.SignArbitrationArbiterPayment(ctx, &tamperedRaw, mustPoolTestKey(t, "33")); err == nil {
+		t.Fatal("signer accepted a raw transaction whose third output was tampered")
+	}
+
+	// 元数据与 raw 不一致（错误第三输出金额）必须被拒绝。
+	badMetadata := *unsigned
+	badMetadata.ArbiterAmountSat++
+	if _, err := engine.SignArbitrationSellerPayment(ctx, &badMetadata, mustPoolTestKey(t, "22")); err == nil {
+		t.Fatal("signer accepted changed third-output metadata")
+	}
 }

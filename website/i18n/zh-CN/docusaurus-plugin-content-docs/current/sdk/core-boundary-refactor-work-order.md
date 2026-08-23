@@ -5,7 +5,7 @@ title: 核心边界重构施工单
 
 # 核心边界重构施工单
 
-本页记录已完成的核心边界硬切换的验收契约，并废止此前所有"workflow 可注入 stores/content/backend"的旧真值。协议规范 001–007 仍是 wire 字节与协议行为的权威；001–006 的既有 wire 形态保持固定，007 使用当前五元 Claim/Result 形态与签名域；`RefundTemplateTxID` 算法保持不变。
+本页记录已完成的核心边界硬切换的验收契约，并废止此前所有"workflow 可注入 stores/content/backend"的旧真值。协议规范 001–007 仍是 wire 字节与协议行为的权威；001–006 的既有 wire 形态保持固定，007 使用当前五元 Kind 8 Claim 请求加四元 Kind 9 回执响应形态与签名域；`RefundTemplateTxID` 算法保持不变。
 
 ## 产品定义
 

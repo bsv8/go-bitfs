@@ -170,7 +170,9 @@ type PaymentState struct {
 	BuyerAmountSat uint64
 	// SellerAmountSat 是交易向卖方分配的累计金额，单位为 satoshi。
 	SellerAmountSat uint64
-	// ArbiterAmountSat 是交易向仲裁方分配的金额，单位为 satoshi。
+	// ArbiterAmountSat 是交易向仲裁方分配的绝对金额，单位为 satoshi。
+	// 普通 005 付款恒为零；007 仲裁状态交易必须为正数，且等于回执中的
+	// 仲裁费。两种场景下它都是本次交易的绝对分配额，不是增量。
 	ArbiterAmountSat uint64
 	// PaymentAuthorizationHash 是绑定该付款的内容授权哈希，长度固定为 32 字节。
 	PaymentAuthorizationHash Hash32
@@ -210,7 +212,9 @@ type UnsignedPayment struct {
 	BuyerAmountSat uint64
 	// SellerAmountSat 是交易向卖方分配的累计金额，单位为 satoshi。
 	SellerAmountSat uint64
-	// ArbiterAmountSat 是交易向仲裁方分配的金额，单位为 satoshi。
+	// ArbiterAmountSat 是交易向仲裁方分配的绝对金额，单位为 satoshi。
+	// 普通 005 付款恒为零；007 仲裁状态交易必须为正数，且等于调用方传入
+	// builder 的明确仲裁费。两种场景下它都是本次交易的绝对分配额，不是增量。
 	ArbiterAmountSat uint64
 	// PoolOutputSatoshis 是该付款所引用的资金池输出金额，单位为 satoshi。
 	PoolOutputSatoshis uint64

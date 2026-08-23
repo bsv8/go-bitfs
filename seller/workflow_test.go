@@ -343,6 +343,11 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	}
 }
 
+// sellerTestArbitrationFeeSat is the explicit positive arbitration fee used by
+// every successful fixture: the calling application decides the amount before
+// PreparePayment, and the SDK never prices anything itself.
+const sellerTestArbitrationFeeSat uint64 = 500
+
 func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	f := newSellerFixture(t)
 	opened := f.openPool(t)
@@ -362,7 +367,7 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000)
+	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000, sellerTestArbitrationFeeSat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,9 +386,21 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	if err := engine.VerifyArbitratedPayment(&signed.State, opened.Opening); err != nil {
 		t.Fatalf("arbitrated state invalid: %v", err)
 	}
-	// Wrong previous state must be rejected.
-	// Completion no longer accepts previous off-chain state; the candidate is
-	// rebuilt from the Buyer-signed absolute sequence and amount in the Claim.
+	// 最终 raw 的第三输出、SignedPayment 状态与回执金额必须完全一致。
+	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawTx, err := tx.NewTransactionFromBytes(signed.RawTx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawTx.Outputs[2].Satoshis != receipt.ArbiterAmountSat || signed.State.ArbiterAmountSat != receipt.ArbiterAmountSat {
+		t.Fatalf("arbiter amount mismatch: raw %d state %d receipt %d", rawTx.Outputs[2].Satoshis, signed.State.ArbiterAmountSat, receipt.ArbiterAmountSat)
+	}
+	if receipt.ArbiterAmountSat != sellerTestArbitrationFeeSat {
+		t.Fatalf("receipt fee = %d, want the explicitly decided %d", receipt.ArbiterAmountSat, sellerTestArbitrationFeeSat)
+	}
 }
 
 func requestFromProofForSellerTest(proof *pool.OpeningProof) (*pool.RefundPresignRequest, error) {
@@ -399,9 +416,9 @@ func requestFromProofForSellerTest(proof *pool.OpeningProof) (*pool.RefundPresig
 }
 
 // TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence proves the Seller
-// completion path binds the Arbiter Result to its own independent rebuild:
-// every committed hash, both signatures, and the candidate itself must match
-// exactly before the Seller transaction signature is produced.
+// completion path binds the Arbiter receipt to its own independent rebuild:
+// the Claim ID, the frozen fee, both signatures, and the candidate itself must
+// match exactly before any Seller transaction signature is produced.
 func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	f := newSellerFixture(t)
 	opened := f.openPool(t)
@@ -421,7 +438,7 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000)
+	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000, sellerTestArbitrationFeeSat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,22 +447,21 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tamperResult := func(mutate func(result *arbitration.ArbitrationResult)) *arbitration.ArbitrationResponse {
+	tamperReceipt := func(mutate func(receipt *arbitration.ArbitrationReceipt)) *arbitration.ArbitrationResponse {
 		t.Helper()
-		result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+		receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
 		if err != nil {
 			t.Fatal(err)
 		}
-		mutate(result)
-		tamperedCBOR, err := arbitration.MarshalResult(result)
+		mutate(receipt)
+		tamperedCBOR, err := arbitration.MarshalReceipt(receipt)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return &arbitration.ArbitrationResponse{
-			Version:                     response.Version,
-			ResultCBOR:                  tamperedCBOR,
-			ArbiterResultSignature:      append([]byte(nil), response.ArbiterResultSignature...),
-			ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...),
+			Version:                 response.Version,
+			ReceiptCBOR:             tamperedCBOR,
+			ArbiterReceiptSignature: append([]byte(nil), response.ArbiterReceiptSignature...),
 		}
 	}
 	flipLastByte := func(value []byte) []byte {
@@ -458,16 +474,98 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 		name     string
 		response *arbitration.ArbitrationResponse
 	}{
-		{"request commitment", tamperResult(func(r *arbitration.ArbitrationResult) { r.RequestCommitment[0] ^= 1 })},
-		{"content payloads hash", tamperResult(func(r *arbitration.ArbitrationResult) { r.ContentPayloadsHash[0] ^= 1 })},
-		{"unsigned state tx hash", tamperResult(func(r *arbitration.ArbitrationResult) { r.UnsignedStateTxHash[0] ^= 1 })},
-		{"arbiter result signature", &arbitration.ArbitrationResponse{Version: response.Version, ResultCBOR: append([]byte(nil), response.ResultCBOR...), ArbiterResultSignature: flipLastByte(response.ArbiterResultSignature), ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...)}},
-		{"arbiter transaction signature", &arbitration.ArbitrationResponse{Version: response.Version, ResultCBOR: append([]byte(nil), response.ResultCBOR...), ArbiterResultSignature: append([]byte(nil), response.ArbiterResultSignature...), ArbiterTransactionSignature: flipLastByte(response.ArbiterTransactionSignature)}},
+		{"claim id", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ClaimID[0] ^= 1 })},
+		{"receipt fee", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ArbiterAmountSat += 1 })},
+		{"inner transaction signature", tamperReceipt(func(r *arbitration.ArbitrationReceipt) {
+			r.ArbiterTransactionSignature = flipLastByte(r.ArbiterTransactionSignature)
+		})},
+		{"outer receipt signature", &arbitration.ArbitrationResponse{Version: response.Version, ReceiptCBOR: append([]byte(nil), response.ReceiptCBOR...), ArbiterReceiptSignature: flipLastByte(response.ArbiterReceiptSignature)}},
 	}
 	for _, testCase := range cases {
-		if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, testCase.response, 900000); err == nil {
+		signed, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, testCase.response, 900000)
+		if err == nil {
 			t.Fatalf("tampered %s was accepted by CompleteArbitratedPayment", testCase.name)
 		}
+		if signed != nil || len(sellerProducedSignatures(signed)) != 0 {
+			t.Fatalf("tampered %s still produced a merged transaction", testCase.name)
+		}
+	}
+
+	// 构造“外层签名有效但内容不一致”的对抗回执：fixture 持有仲裁方私钥，
+	// 可以对任意回执字节生成合法消息签名，用于证明 Seller 的独立重建会拒绝
+	// 内部不一致的组合。
+	forgeSignedReceipt := func(t *testing.T, receipt *arbitration.ArbitrationReceipt) *arbitration.ArbitrationResponse {
+		t.Helper()
+		receiptCBOR, err := arbitration.MarshalReceipt(receipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signing, err := arbitration.ArbiterReceiptSigningCBOR(receiptCBOR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signature, err := bitfs.SignMessage(f.arbiterKey, signing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &arbitration.ArbitrationResponse{Version: arbitration.MajorVersion, ReceiptCBOR: receiptCBOR, ArbiterReceiptSignature: signature}
+	}
+
+	// 交易签名属于另一费用：金额字段写原费用，但交易签名覆盖的是按更高费用
+	// 重建的 candidate。
+	receiptForOriginalFee, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherFeePrepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000, sellerTestArbitrationFeeSat+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherFeeResponse, err := f.Arbiter.SignPreparedPayment(ctx, otherFeePrepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherFeeReceipt, err := arbitration.UnmarshalReceipt(otherFeeResponse.ReceiptCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ClaimID: append([]byte(nil), receiptForOriginalFee.ClaimID...), ArbiterAmountSat: receiptForOriginalFee.ArbiterAmountSat, ArbiterTransactionSignature: append([]byte(nil), otherFeeReceipt.ArbiterTransactionSignature...)})
+	if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, mixedFeeReceipt, 900000); err == nil {
+		t.Fatal("a transaction signature priced for another fee completed the claim")
+	}
+	// fee 与 candidate 不一致：金额字段抬高，但保留原费用的交易签名。
+	inflatedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ClaimID: append([]byte(nil), receiptForOriginalFee.ClaimID...), ArbiterAmountSat: receiptForOriginalFee.ArbiterAmountSat + 1, ArbiterTransactionSignature: append([]byte(nil), receiptForOriginalFee.ArbiterTransactionSignature...)})
+	if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, inflatedFeeReceipt, 900000); err == nil {
+		t.Fatal("an inflated receipt fee inconsistent with its transaction signature was accepted")
+	}
+
+	// Receipt 签名属于另一 Claim：对第二个 Claim（不同 content hashes）签发
+	// 的完整响应不能完成第一个 Claim。
+	// 第二个 Claim 使用相同资金池、序号和 Seller 金额，仅交付截止时间不同，
+	// 因此 TermsCBOR 与 Claim ID 不同。
+	otherInput := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(20 * time.Minute).Unix())}
+	otherContentRequest, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, otherInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDelivery, _, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, otherContentRequest, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherClaim, err := f.Seller.BuildArbitrationRequest(ctx, opened.Opening, otherContentRequest, otherDelivery, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrepared, err := f.Arbiter.PreparePayment(ctx, otherClaim, 900000, sellerTestArbitrationFeeSat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherClaimResponse, err := f.Arbiter.SignPreparedPayment(ctx, otherPrepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, otherClaimResponse, 900000); err == nil {
+		t.Fatal("a receipt signed for another Claim completed this claim")
 	}
 
 	// The untouched response still completes, proving the rejections come from
@@ -483,4 +581,11 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	if err := engine.VerifyArbitratedPayment(&signed.State, opened.Opening); err != nil {
 		t.Fatalf("arbitrated state invalid after untampered completion: %v", err)
 	}
+}
+
+func sellerProducedSignatures(signed *pool.SignedPayment) [][]byte {
+	if signed == nil {
+		return nil
+	}
+	return [][]byte{signed.State.SellerTransactionSignature}
 }

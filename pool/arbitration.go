@@ -88,76 +88,116 @@ func NewMultisigPoolEngineFromPoolLockingScript(raw []byte) (*MultisigPoolEngine
 	})
 }
 
-// BuildArbitrationPaymentFromClaim is the sole v4 007 candidate builder.  It
-// accepts only source amount, source locking script, refund template bytes,
-// target sequence, and the absolute seller amount.  Source metadata is added
-// to the in-memory transaction solely for ForkID sighash calculation and is
-// never serialized into RawTx.
-func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) (*UnsignedPayment, error) {
+// ValidateArbitrationClaimStructure exposes the pure Claim-structure checks of
+// the 007 candidate for callers that hold evidence but not yet a decided
+// arbitration fee. It performs exactly the same source, role-script, refund
+// template, sequence, and Seller-balance validation as the success builder,
+// minus the positive-arbiter-amount requirement, so evidence validation never
+// needs a placeholder fee.
+func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error {
+	return validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSat)
+}
+
+// validateArbitrationClaimContext performs the pure Claim-structure checks of
+// the 007 candidate: source context, role scripts, canonical refund template
+// with zero Seller/Arbiter initial amounts, sequence ordering, and the Seller
+// balance boundary. It deliberately does not depend on any arbitration fee so
+// evidence validation never needs a placeholder amount; the public success
+// builder additionally requires a positive fee.
+func validateArbitrationClaimContext(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error {
 	if poolOutputSatoshis == 0 || len(poolOutputLockingScript) == 0 || len(refundTemplateRaw) == 0 {
-		return nil, invalid("arbitration source context and refund template are required")
+		return invalid("arbitration source context and refund template are required")
 	}
 	if len(refundTemplateRaw) > maxArbitrationRefundTemplateBytes {
-		return nil, invalid("arbitration refund template exceeds the protocol size limit")
+		return invalid("arbitration refund template exceeds the protocol size limit")
 	}
 	keys, err := ParseArbitratedPoolLockingScript(poolOutputLockingScript)
 	if err != nil {
+		return err
+	}
+	refund, err := parseCanonicalTransaction(refundTemplateRaw)
+	if err != nil {
+		return err
+	}
+	if len(refund.Inputs) != 1 || refund.Inputs[0] == nil || refund.Inputs[0].SourceTXID == nil || len(refund.Outputs) != 3 {
+		return invalid("refund template must have one input and exactly three outputs")
+	}
+	sourceTxID := refund.Inputs[0].SourceTXID.CloneBytes()
+	if len(sourceTxID) != sha256.Size || isZeroBytes(sourceTxID) {
+		return invalid("refund template funding txid must be non-zero")
+	}
+	if refund.Inputs[0].SourceTxOutIndex != PoolOutputIndex {
+		return invalid("refund template must spend funding output index 0")
+	}
+	if refund.Inputs[0].SequenceNumber == finalPoolSequence {
+		return invalid("refund template cannot use the final sequence")
+	}
+	if refund.Inputs[0].UnlockingScript != nil && len(refund.Inputs[0].UnlockingScript.Bytes()) != 0 {
+		return invalid("refund template input unlocking script must be empty")
+	}
+	if paymentSequence == 0 || paymentSequence == finalPoolSequence || paymentSequence <= refund.Inputs[0].SequenceNumber {
+		return invalid("arbitration payment sequence must extend the refund sequence")
+	}
+
+	roleScripts, err := arbitrationRoleScripts(keys)
+	if err != nil {
+		return err
+	}
+	for index, expected := range roleScripts {
+		if refund.Outputs[index] == nil || refund.Outputs[index].LockingScript == nil || !bytes.Equal(refund.Outputs[index].LockingScript.Bytes(), expected) {
+			return invalid(fmt.Sprintf("refund template output %d does not match its role script", index))
+		}
+	}
+	if refund.Outputs[1].Satoshis != 0 || refund.Outputs[2].Satoshis != 0 {
+		return invalid("refund template seller and arbiter outputs must be zero")
+	}
+	refundOutputs := refund.Outputs[0].Satoshis
+	if refund.Outputs[1].Satoshis > ^uint64(0)-refundOutputs {
+		return invalid("refund template output amount overflows")
+	}
+	refundOutputs += refund.Outputs[1].Satoshis
+	if refund.Outputs[2].Satoshis > ^uint64(0)-refundOutputs {
+		return invalid("refund template output amount overflows")
+	}
+	refundOutputs += refund.Outputs[2].Satoshis
+	if refundOutputs > poolOutputSatoshis {
+		return invalid("refund template outputs exceed the claimed pool output")
+	}
+	refundFeeSat := poolOutputSatoshis - refundOutputs
+	spendableSat := poolOutputSatoshis - refundFeeSat
+	if sellerAmountAfterSat > spendableSat {
+		return ErrInsufficientBalance
+	}
+	return nil
+}
+
+// BuildArbitrationPaymentFromClaim is the sole v4 007 candidate builder.  It
+// accepts only source amount, source locking script, refund template bytes,
+// target sequence, the absolute seller amount, and the explicit absolute
+// arbiter fee.  A successful 007 requires a positive arbiter amount; zero is
+// never accepted here.  Source metadata is added to the in-memory transaction
+// solely for ForkID sighash calculation and is never serialized into RawTx.
+func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64, arbiterAmountSat uint64) (*UnsignedPayment, error) {
+	if err := validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSat); err != nil {
 		return nil, err
 	}
 	refund, err := parseCanonicalTransaction(refundTemplateRaw)
 	if err != nil {
 		return nil, err
 	}
-	if len(refund.Inputs) != 1 || refund.Inputs[0] == nil || refund.Inputs[0].SourceTXID == nil || len(refund.Outputs) != 3 {
-		return nil, invalid("refund template must have one input and exactly three outputs")
-	}
-	sourceTxID := refund.Inputs[0].SourceTXID.CloneBytes()
-	if len(sourceTxID) != sha256.Size || isZeroBytes(sourceTxID) {
-		return nil, invalid("refund template funding txid must be non-zero")
-	}
-	if refund.Inputs[0].SourceTxOutIndex != PoolOutputIndex {
-		return nil, invalid("refund template must spend funding output index 0")
-	}
-	if refund.Inputs[0].SequenceNumber == finalPoolSequence {
-		return nil, invalid("refund template cannot use the final sequence")
-	}
-	if refund.Inputs[0].UnlockingScript != nil && len(refund.Inputs[0].UnlockingScript.Bytes()) != 0 {
-		return nil, invalid("refund template input unlocking script must be empty")
-	}
-	if paymentSequence == 0 || paymentSequence == finalPoolSequence || paymentSequence <= refund.Inputs[0].SequenceNumber {
-		return nil, invalid("arbitration payment sequence must extend the refund sequence")
-	}
-
-	roleScripts, err := arbitrationRoleScripts(keys)
-	if err != nil {
-		return nil, err
-	}
-	for index, expected := range roleScripts {
-		if refund.Outputs[index] == nil || refund.Outputs[index].LockingScript == nil || !bytes.Equal(refund.Outputs[index].LockingScript.Bytes(), expected) {
-			return nil, invalid(fmt.Sprintf("refund template output %d does not match its role script", index))
-		}
-	}
-	if refund.Outputs[1].Satoshis != 0 || refund.Outputs[2].Satoshis != 0 {
-		return nil, invalid("refund template seller and arbiter outputs must be zero")
-	}
-	refundOutputs := refund.Outputs[0].Satoshis
-	if refund.Outputs[1].Satoshis > ^uint64(0)-refundOutputs {
-		return nil, invalid("refund template output amount overflows")
-	}
-	refundOutputs += refund.Outputs[1].Satoshis
-	if refund.Outputs[2].Satoshis > ^uint64(0)-refundOutputs {
-		return nil, invalid("refund template output amount overflows")
-	}
-	refundOutputs += refund.Outputs[2].Satoshis
-	if refundOutputs > poolOutputSatoshis {
-		return nil, invalid("refund template outputs exceed the claimed pool output")
-	}
+	refundOutputs := refund.Outputs[0].Satoshis + refund.Outputs[1].Satoshis + refund.Outputs[2].Satoshis
 	refundFeeSat := poolOutputSatoshis - refundOutputs
-	if sellerAmountAfterSat > poolOutputSatoshis-refundFeeSat {
+	spendableSat := poolOutputSatoshis - refundFeeSat
+	remainingAfterSeller := spendableSat - sellerAmountAfterSat
+	if arbiterAmountSat == 0 {
+		return nil, invalid("arbitration payment requires a positive arbiter amount")
+	}
+	if arbiterAmountSat > remainingAfterSeller {
 		return nil, ErrInsufficientBalance
 	}
-	buyerAmountSat := poolOutputSatoshis - refundFeeSat - sellerAmountAfterSat
+	buyerAmountSat := remainingAfterSeller - arbiterAmountSat
 
+	sourceTxID := refund.Inputs[0].SourceTXID.CloneBytes()
 	candidate, err := parseCanonicalTransaction(refundTemplateRaw)
 	if err != nil {
 		return nil, err
@@ -165,7 +205,7 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 	candidate.Inputs[0].SequenceNumber = paymentSequence
 	candidate.Outputs[0].Satoshis = buyerAmountSat
 	candidate.Outputs[1].Satoshis = sellerAmountAfterSat
-	candidate.Outputs[2].Satoshis = 0
+	candidate.Outputs[2].Satoshis = arbiterAmountSat
 	setPoolSource(candidate, poolOutputSatoshis, poolOutputLockingScript)
 	unsignedRaw := candidate.Bytes()
 	refundID := RefundTemplateTxID(refund.TxID().CloneBytes())
@@ -175,7 +215,7 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 		PaymentSequence:       paymentSequence,
 		BuyerAmountSat:        buyerAmountSat,
 		SellerAmountSat:       sellerAmountAfterSat,
-		ArbiterAmountSat:      0,
+		ArbiterAmountSat:      arbiterAmountSat,
 		PoolOutputSatoshis:    poolOutputSatoshis,
 		PoolLockingScript:     append([]byte(nil), poolOutputLockingScript...),
 		arbitrationSourceTxID: append([]byte(nil), sourceTxID...),
@@ -234,7 +274,7 @@ func (engine *MultisigPoolEngine) validateArbitrationUnsignedPayment(unsigned *U
 	if state.Inputs[0].SequenceNumber != unsigned.PaymentSequence || state.Outputs[0].Satoshis != unsigned.BuyerAmountSat || state.Outputs[1].Satoshis != unsigned.SellerAmountSat || state.Outputs[2].Satoshis != unsigned.ArbiterAmountSat {
 		return nil, invalid("arbitration payment metadata does not match raw transaction")
 	}
-	if unsigned.ArbiterAmountSat != 0 || unsigned.RefundTemplateTxID == (RefundTemplateTxID{}) {
+	if unsigned.ArbiterAmountSat == 0 || unsigned.RefundTemplateTxID == (RefundTemplateTxID{}) {
 		return nil, invalid("arbitration payment amounts or template ID are invalid")
 	}
 	if !bytes.Equal(unsigned.PoolLockingScript, engine.lockBytes()) {

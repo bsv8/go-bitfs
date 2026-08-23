@@ -5,38 +5,65 @@ title: 007 · Seller arbitration submission requirements
 
 # 007 · Seller arbitration submission requirements
 
-## Problem statement
+007 is the v4 custody-and-settlement exception for a Buyer-signed 003 whose
+normal 004/005 path cannot complete. The Seller submits the exact content
+payloads and signs a Claim. The Arbiter verifies and holds those bytes, builds
+the payment independently, and signs only after the application confirms
+persistence.
 
-When a seller holds buyer-signed final payment authorization from 003 but the buyer has not signed the corresponding 005, or the normal path cannot complete, an arbiter can supply the second signature for a `Seller+Arbiter` 2-of-3 spend. The arbiter is not a replica of either party's database and cannot receive only a hash or `RefundTemplateTxID` and then query a participant for the missing material.
+## Required evidence
 
-The seller MUST submit complete raw credentials and raw signatures.
+The Seller MUST send exactly the new five-element Kind 8 request. Its Claim
+contains only:
 
-## What the arbiter does
+- the claimed pool output satoshis and exact role-ordered P2MS locking script;
+- the canonical unsigned RefundTx raw bytes;
+- the exact Buyer-signed 003 `TermsCBOR` and Buyer signature.
 
-The arbiter does not decide again whether a file block was delivered or recalculate the quote or amount due. By signing the final authorization in 003, the buyer has already committed to the target payment sequence and absolute cumulative seller amount; the pool roles and fee rate are recovered exclusively from the submitted OpeningProof, which also supplies the key used to verify the buyer's signature over the exact 003 terms bytes (the authorization itself carries no public keys or fee rate).
+The outer request separately carries the Seller message signature over
+`[4, 8, exact_claim_cbor]` and the canonical 1–64 item
+`content_payloads_cbor`.
+It MUST NOT contain OpeningProof, FundingTx, fee rate, previous state,
+candidate raw bytes, `RefundTemplateTxID` as a duplicate field, or a Seller
+transaction signature.
 
-The arbiter checks that this state is executable and then signs that exact transaction.
+The Claim locking script fixes the role order `[Buyer, Seller, Arbiter]`.
+The SDK validates the Buyer signature, RefundTx ID against the terms, output
+shape, source arithmetic, payload count/order/size/hash, and all canonical
+CBOR. It does not claim to validate on-chain UTXO existence, confirmation, or
+unspent status; a wrong Seller source context is recorded by the application
+as an unspendable-source reconciliation failure.
+
+## Arbiter boundary
+
+The application MUST persist the exact inbound request and payload bundle
+before requesting a transaction signature:
 
 ```text
-Not: the arbiter decides that the seller should receive X
-But: the buyer authorized X, and the arbiter checks the seller's candidate and adds an Arbiter detached signature
+raw Kind 8 received
+  -> PreparePayment
+  -> atomic custody persistence
+  -> SignPreparedPayment
+  -> persist/send exact Kind 9
 ```
 
-## Why the complete business history is unnecessary
+`PreparePayment` has no transaction-signing side effect. It returns opaque
+prepared evidence with deep-copy getters for the request commitment, payload
+hash, terms hash, payloads, deadline, and unsigned candidate. On restart, the
+application re-runs `PreparePayment` from the saved exact Kind 8 bytes; it
+must not fabricate the opaque prepared value.
 
-An arbitration submission cannot contain only hash references and cannot require the buyer to sign 005 first. The minimum evidence is:
+The Arbiter Result commits to the Seller Claim signing-domain hash, exact
+payload child-document hash, and exact unsigned candidate hash. The Arbiter
+Result signature and the `ForkID|All` transaction signature are separate
+credentials; neither can substitute for the other.
 
-```text
-Complete pool opening proof
-+ final 003 payment authorization
-+ seller-constructed candidate transaction with an empty unlocking script
-+ Seller detached signature
-```
+## Seller completion
 
-The arbiter verifies only the 003 authorization, candidate transaction, and seller signature. It does not read 001, 004, the payload, or historical payment states, and it neither constructs nor modifies the transaction. The response contains only the authorization hash, candidate transaction hash, and Arbiter detached signature.
-
-## One-way boundary
-
-Only a seller can initiate this step. A buyer cannot request arbitration close because a seller failed to submit a transaction, countersign an amount, or respond; the buyer waits for expiry and receives its refund or change. The seller pays the arbitration service cost, and BitFS v4 does not silently deduct it from the pool.
-
-See the [Seller arbitration submission specification](007-seller-arbitration-submission-spec.md) for the evidence package and validation rules.
+The Seller MUST rebuild the same candidate from the Claim primitives after
+receiving Kind 9. It verifies the Claim, Buyer terms signature, all Result
+hashes, Result message signature, and Arbiter transaction signature before
+creating its own transaction signature. It then merges only through
+`MergeArbitratedPoolSellerArbiterSignatures`. Broadcasting, reconciliation,
+Buyer retrieval authorization, retention, and idempotency are application
+responsibilities.

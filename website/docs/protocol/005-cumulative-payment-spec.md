@@ -48,4 +48,10 @@ The application owns a unique index `payment_authorization_hash -> {exact_signed
 
 When submission fails, times out, or the txid/sequence number is inconsistent, the calling application must first persist the complete raw/txid/sequence/auth-hash candidate and reconcile it by txid or outpoint under its chosen node policy before advancing its accepted-payment record. The protocol SDK defines no uncertain state, persistence hook, node interface, or reconciliation workflow; broadcasting and recording outcomes are application responsibilities.
 
-The 007 arbitration path does not depend on this minimal 005 and continues to carry its own self-sufficient evidence package (complete OpeningProof, original 003, unsigned candidate raw, Seller signature), because the Arbiter does not share the Seller's local lookup context. The arbitration path uses the same three-output rule, with signatures merged by Seller and Arbiter via `MergeArbitratedPoolSellerArbiterSignatures`.
+The 007 arbitration path does not depend on this minimal 005. It carries a
+Seller-signed Claim with source amount/script, RefundTx, Buyer-signed 003
+terms, and the exact 004 payload bundle. It deliberately omits OpeningProof,
+FundingTx, previous state, candidate raw, and Seller transaction signature;
+the Arbiter independently calls the same deterministic candidate builder and
+signs only after application custody persistence. The Seller rebuilds the
+candidate and merges through `MergeArbitratedPoolSellerArbiterSignatures`.

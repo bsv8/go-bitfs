@@ -1,11 +1,26 @@
-; 007 is seller + arbiter detached-signature arbitration only.
-arbitration-request = [4, refund-template-txid, opening-proof-cbor, payment-authorization-cbor, unsigned-state-tx, seller-signature]
-arbitration-response = [4, refund-template-txid, payment-authorization-hash, unsigned-state-tx-hash, arbiter-signature]
-refund-template-txid = bstr .size 32
-opening-proof-cbor = bstr
-payment-authorization-cbor = bstr
-unsigned-state-tx = bstr
+; v4 Kind 8/9: Seller-signed custody evidence and independent payment rebuild.
+arbitration-request = [4, 8, arbitration-claim-cbor, seller-claim-signature, content-payloads-cbor]
+arbitration-claim-cbor = bstr .cbor arbitration-claim
+arbitration-claim = [pool-output-satoshis, pool-output-locking-script, refund-template-raw, terms-cbor, buyer-signature]
+pool-output-satoshis = uint
+pool-output-locking-script = bstr .size 105
+refund-template-raw = bstr .size (1..16384)
+terms-cbor = bstr .size (1..16384)
+buyer-signature = bstr .size (1..256)
+seller-claim-signature = bstr .size (1..256)
+; 64 payloads * (262144-byte MasterSeed block + 9-byte item head) + 9-byte
+; array head = 16777801 bytes, matching bitfs.MaxContentPayloadsCBORBytes.
+content-payloads-cbor = bstr .size (1..16777801) .cbor content-payloads
+
+arbitration-response = [4, 9, arbitration-result-cbor, arbiter-result-signature, arbiter-transaction-signature]
+arbitration-result-cbor = bstr .cbor arbitration-result
+arbitration-result = [request-commitment, content-payloads-hash, unsigned-state-tx-hash]
+request-commitment = bstr .size 32
+content-payloads-hash = bstr .size 32
 unsigned-state-tx-hash = bstr .size 32
-payment-authorization-hash = bstr .size 32
-seller-signature = bstr
-arbiter-signature = bstr
+arbiter-result-signature = bstr .size (1..256)
+arbiter-transaction-signature = bstr .size (1..256)
+
+; Claim and Result contain no version or kind. Seller signs [4, 8, claim-cbor]
+; and Arbiter signs [4, 9, result-cbor]. The candidate transaction is rebuilt
+; from the Claim source context, refund template, and Buyer-signed terms.

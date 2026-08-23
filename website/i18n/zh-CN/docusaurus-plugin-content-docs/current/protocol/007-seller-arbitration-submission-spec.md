@@ -5,35 +5,59 @@ title: 007 · v4 卖方仲裁提交规范
 
 # 007 · v4 卖方仲裁提交规范
 
-007 定义 Seller 依据买方最终付款授权请求 Arbiter detached signature 的约束。当前协议 major 为 4，`ArbiterAmount = 0`。
+007 是破坏式 v4 硬切换。旧六元请求和旧五元响应均无效。仲裁方接收卖方签名的 source context、买方签名条款和精确 payload bundle，独立重建付款交易，并且只有应用持久化托管证据后才签名。
 
-## 证据包
+## Wire 文档
 
 ```text
-ArbitrationRequest = [
-  4,
-  refund_template_txid,
-  pool_opening_proof_cbor,
-  payment_authorization_cbor,
-  unsigned_state_tx_raw,
-  seller_transaction_signature
-]
-
-ArbitrationResponse = [
-  4,
-  refund_template_txid,
-  payment_authorization_hash,
-  unsigned_state_tx_hash,
-  arbiter_transaction_signature
-]
+ArbitrationRequest = [4, 8, arbitration_claim_cbor, seller_claim_signature, content_payloads_cbor]
+ArbitrationClaim = [pool_output_satoshis, pool_output_locking_script, refund_template_raw, terms_cbor, buyer_signature]
+ArbitrationResponse = [4, 9, arbitration_result_cbor, arbiter_result_signature, arbiter_transaction_signature]
+ArbitrationResult = [request_commitment, content_payloads_hash, unsigned_state_tx_hash]
 ```
 
-`pool_opening_proof_cbor` 是 002 定义的九字段 v4 OpeningProof。它携带 RefundTx/FundingTx 原文、参与方公钥、费率和双方退款签名；不携带可推导的交易 ID、固定输出索引、资金池金额、锁定脚本或重复的 MultisigPool 判别字段。
+`Claim` 和 `Result` 内层不含 version/type。transport Kind 必须与本体第二项一致。所有子文档均为嵌入 `bstr` 的 deterministic CBOR；非规范字节、错误数组长度、tag、indefinite length 和尾随字节必须拒绝。
 
-`refund_template_txid` 是从无签名 RefundTx 派生的费用池关联 ID。仲裁方必须将其与从 `pool_opening_proof_cbor` 重新派生的哈希比对；卖方在合并之前还必须把响应的 `refund_template_txid` 与原始请求逐字节绑定。
+卖方消息签名域严格为：
 
-响应中的 `payment_authorization_hash` 仅定义为 `SHA-256(003 TermsCBOR)`——与同一张 003 在 004 和 005 中携带的授权哈希完全一致；完整 `SignedContentRequest` 外壳的哈希不是授权哈希。卖方用同一算法对保留的条款字节复算后再比对，绑定外壳哈希或外来摘要的响应一律拒绝。因此同一授权在 004、005、007 中的该身份必须逐字节相同。
+```text
+seller_claim_signing_cbor = [4, 8, exact_claim_cbor]
+seller_claim_signature = SignMessage(SellerKey, seller_claim_signing_cbor)
+```
 
-候选交易必须是 `[Buyer, Seller, Arbiter]` 三输出状态，输入解锁脚本为空，Arbiter 输出存在且金额为 0。Seller 签名和 Arbiter 签名都必须针对同一无签名交易；仲裁者不构造替代交易、不修改候选交易，也不读取外部数据库补证据。
+Result 消息签名域严格为：
 
-Seller 收到响应后复核两个哈希和 Arbiter 签名，只通过 `MergeArbitratedPoolSellerArbiterSignatures` 生成最终交易。007 不要求买方为本次争议签署 005，且不允许 Buyer+Arbiter 作为 go-bitfs 业务路径。
+```text
+arbiter_result_signing_cbor = [4, 9, exact_result_cbor]
+arbiter_result_signature = SignMessage(ArbiterKey, arbiter_result_signing_cbor)
+```
+
+`request_commitment = SHA-256(seller_claim_signing_cbor)`；`content_payloads_hash = SHA-256(exact content_payloads_cbor)`；`unsigned_state_tx_hash = SHA-256(exact unsigned candidate transaction)`。交易签名是独立的 `ForkID|All` 签名，不能代替 Result 消息签名。
+
+## Claim、托管与交易构造
+
+pool locking script 必须是固定 `[Buyer, Seller, Arbiter]` 顺序的规范压缩公钥脚本：
+
+```text
+OP_2 PUSHDATA(33-byte Buyer) PUSHDATA(33-byte Seller)
+PUSHDATA(33-byte Arbiter) OP_3 OP_CHECKMULTISIG
+```
+
+仲裁方验证 Buyer 对精确 `terms_cbor` 的签名，从 `refund_template_raw` 推导 `RefundTemplateTxID` 并与 Buyer 条款比较。请求不携带 OpeningProof、FundingTx、费率、previous state、candidate raw 或 Seller transaction signature。
+
+payload 必须是 1–64 项非空 canonical bundle，数量、顺序、大小和每项 SHA-256 必须与 003 完全一致；任一项失败整批拒绝。payload 不复制进卖方 Claim 签名，而是通过 Buyer 签入的 content hashes 间接绑定并由 Result 提交 custody hash。
+
+source context 只是卖方签名承担的离线声明。SDK 不证明金额/脚本属于链上 FundingTx output，不查询确认数，也不证明 UTXO 未花费。错误 source context 会使最终 ForkID 签名不可用，风险由卖方承担。
+
+唯一 builder 只接受 pool amount、locking script、RefundTx raw、目标 sequence 和绝对 Seller amount。它从 RefundTx 输出推导保留 fee，构造 Buyer/Seller/Arbiter 三输出 candidate；source output 仅注入内存 sighash context，不序列化进 RawTx。卖方和仲裁方必须调用同一核心并得到逐字节相同的 candidate。
+
+应用流程固定为：
+
+```text
+PreparePayment
+  -> 应用原子持久化精确 Kind 8 与 payload bundle
+  -> SignPreparedPayment
+  -> 持久化/发送精确 Kind 9
+```
+
+SDK 不提供数据库、对象存储、HTTP、广播或 UTXO 查询。卖方收到 Kind 9 后重建 candidate，验三个 Result hash、Result 消息签名和仲裁交易签名，最后才生成自身交易签名并调用 `MergeArbitratedPoolSellerArbiterSignatures`。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
@@ -108,14 +109,19 @@ func TestCrossPoolContentAndArbitrationEvidenceAreRefused(t *testing.T) {
 	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolB.sellerAcc.Opening, poolB.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err == nil {
 		t.Fatal("content request crossed pools")
 	}
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err != nil {
+	delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, poolA.sellerAcc.Opening, poolA.sellerAcc.InitialPayment, requestA, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
 		t.Fatalf("in-pool delivery failed: %v", err)
 	}
-	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, poolA.sellerAcc.Opening, requestA, poolA.sellerAcc.InitialPayment, f.facts())
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, poolA.sellerAcc.Opening, requestA, delivery, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if arbitrationRequest.RefundTemplateTxID == poolB.buyerAcc.Reference.RefundTemplateTxID {
+	claim, err := arbitration.UnmarshalClaim(arbitrationRequest.ClaimCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(claim.RefundTemplateRaw, poolB.sellerAcc.Opening.RefundTx) {
 		t.Fatal("arbitration request bound to the wrong pool")
 	}
 }

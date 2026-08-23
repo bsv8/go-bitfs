@@ -48,4 +48,4 @@ OpeningProof
 
 提交失败、超时或 txid/序号不一致时，调用方应用必须先持久化完整候选（raw/txid/sequence/auth hash），并在自己的节点策略确认前按 txid 或 outpoint 对账，然后才能推进 accepted-payment 记录。协议 SDK 不定义 uncertain 状态、持久化 hook、节点接口或对账流程；广播与记录结果都是调用方应用的职责。
 
-007 仲裁不依赖这份最小 005，继续携带自足的证据包（完整 OpeningProof、原始 003、候选交易原文、Seller 签名），因为 Arbiter 不共享 Seller 的本地查找上下文。仲裁路径使用同一三输出规则，由 Seller 与 Arbiter 通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。
+007 仲裁不依赖这份最小 005，而是由 Seller 从本地保存的 003 与已验证 004 payload bundle 形成自足 Claim。Claim 携带 source amount/script、RefundTx、Buyer 条款签名和 Seller Claim 签名；它不携带 OpeningProof、FundingTx、候选交易原文或 Seller transaction signature。Arbiter 使用同一三输出规则独立重建，再由 Seller 与 Arbiter 合并双方交易签名。

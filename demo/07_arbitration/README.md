@@ -14,24 +14,24 @@ go run ./demo/07_arbitration/01_arbitrate_payment
 
 ```text
 arbitrationRequest = seller.BuildArbitrationRequest(
-    opening, signedRequest, latestPayment, facts)
-arbitrationResponse = arbiter.SignPayment(arbitrationRequest)
+    opening, signedRequest, delivery, blockHeight)
+prepared = arbiter.PreparePayment(arbitrationRequest, blockHeight)
+persist(prepared.RequestCommitment(), prepared.UnsignedStateTxHash())
+arbitrationResponse = arbiter.SignPreparedPayment(prepared)
 signed = seller.CompleteArbitratedPayment(
-    opening, latestPayment, arbitrationRequest, arbitrationResponse, facts)
+    arbitrationRequest, arbitrationResponse, blockHeight)
 ```
 
 仲裁请求可以理解为：
 
 ```text
 ArbitrationRequest{
-    PoolOpeningProofCBOR:       开池证据规范 CBOR,
-    PaymentAuthorizationCBOR:   买方 003 授权条款与签名,
-    UnsignedStateTxRaw:         卖方构造的候选付款交易,
-    SellerTransactionSignature: 卖方候选签名,
-    RefundTemplateTxID:               poolRefundTemplateTxID,
+    ClaimCBOR:              [pool amount, pool script, RefundTx, 003 terms, Buyer sig],
+    SellerClaimSignature:   SignMessage([4, 8, ClaimCBOR]),
+    ContentPayloadsCBOR:    exact validated 004 payload bundle,
 }
 ```
 
-007 请求和响应都显式携带同一 `RefundTemplateTxID` 关联 ID。仲裁人的职责是从 OpeningProof 恢复角色与费率，核对 request hash、开池证据派生的 RefundTemplateTxID、003 池绑定与买方签名以及 unsigned state 解析出的目标序号/金额全部一致后，在授权金额范围内签署付款；`arbitration.SignPayment` 验证证据后只添加仲裁方签名。它不重新定价、不读取文件内容，也不凭空构造一笔替代买家授权的付款。卖家收到响应时还必须把响应 hash 与原 007 request 再绑定，再通过 `CompleteArbitratedPayment` 合并出完整的已签付款交易；保存与广播这笔交易同样是调用方的职责，SDK 不提交任何内容。
+007 请求不携带 OpeningProof、FundingTx、费率、previous state、candidate raw 或 Seller transaction signature。仲裁人验证 Buyer 对精确 terms 的签名、严格角色脚本、RefundTx ID 绑定、payload 数量/顺序/hash 与 canonical CBOR，再从 Claim 独立构造 unsigned payment。应用必须在 `PreparePayment` 与 `SignPreparedPayment` 之间持久化托管记录；仲裁人分别签署 Result 和交易，卖方收到响应后重新构造并合并。保存与广播同样是调用方职责，SDK 不提交任何内容。
 
 调试输出会显示授权 hash、交付证明与候选交易的字节数、仲裁请求和响应 hex、仲裁人公钥以及双方签名。

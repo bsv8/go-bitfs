@@ -62,7 +62,7 @@ sequenceDiagram
 | 报价、内容凭证、定价和签名校验 | go-bitfs | `seller.Workflow`、`buyer.Workflow`、`bitfs` |
 | 支付池交易构造、解析、签名合并 | go-bitfs | `pool.MultisigPoolEngine`（纯函数） |
 | 规范 CBOR 编解码 | go-bitfs | `wire.Marshal*`、`wire.Unmarshal*` |
-| 私钥保管 | 应用 | 官方 BSV SDK 私钥（Go：`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `*ec.PrivateKey`；TS：`@bsv/sdk` 的 `PrivateKey`），经 `WorkflowConfig{PrivateKey}` 构造传入 |
+| 私钥保管 | 应用 | 官方 BSV SDK 私钥（Go：`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `*ec.PrivateKey`），经 `WorkflowConfig{PrivateKey}` 构造传入 |
 | FundingTx 构建和签名 | 应用钱包 | `Wallet.BuildSignedFundingTransaction`（本文伪接口） |
 | 全部本地角色状态持久化 | 应用数据库 | `PurchaseJournal`（本文伪接口），以 `RefundTemplateTxID` 为键 |
 | Seed、文件块读取与下载结果存储 | 应用 | `ContentRepository`（本文伪接口） |
@@ -102,8 +102,8 @@ buyerWorkflow, _ := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: buyerKey}
 ```
 
 所有签名走 SDK 固定路径：被签字节（001/003 的 canonical 条款 CBOR，或 004 的精确 32 字节授权哈希）用 SHA-256 哈希一次，
-`(*ec.PrivateKey).Sign` 对这份已算好的摘要签名（Go 侧接收预计算 digest；TS 侧
-`PrivateKey.sign(message)` 会自行哈希，跨语言向量必须避免双哈希），返回 low-S DER
+`(*ec.PrivateKey).Sign` 对这份已算好的摘要签名（Go 侧接收预计算 digest，调用方
+不得在签名前再做一次哈希），返回 low-S DER
 并由固定验证器按派生角色公钥复验。资金池交易签名使用固定的 MultisigPool sighash
 （`ForkID|All`），绝不二次哈希。
 
@@ -431,19 +431,25 @@ _, err = broadcaster.Broadcast(raw)
 
 ```go
 authorization := journal.LoadSentContentRequest(refundTemplateTxID) // 003 时留痕的原始 CBOR
+delivery := journal.LoadExactContentDelivery(authorization)         // 004 的精确 payload bundle
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
-    sellerOpening, authorization, sellerBase, blockHeight)
+    sellerOpening, authorization, delivery, blockHeight)
 if err != nil { /* ... */ }
 rawRequest, err := arbitration.MarshalRequest(arbitrationRequest)
 if err != nil { /* ... */ }
 
 decodedArbitrationRequest, err := arbitration.UnmarshalRequest(rawRequest)
 if err != nil { /* ... */ }
-response, err := arbiterWorkflow.SignPayment(arbiterCtx, decodedArbitrationRequest)
+prepared, err := arbiterWorkflow.PreparePayment(arbiterCtx, decodedArbitrationRequest, blockHeight)
 if err != nil { /* ... */ }
+// 应用在这里原子持久化 exact request、payload bundle 和 commitment。
+if err := journal.PersistArbitrationCustody(prepared); err != nil { /* ... */ }
+response, err := arbiterWorkflow.SignPreparedPayment(arbiterCtx, prepared)
+if err != nil { /* ... */ }
+journal.SaveExactArbitrationResponse(response)
 
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
-    sellerOpening, sellerPrevious, arbitrationRequest, response, blockHeight)
+    arbitrationRequest, response, blockHeight)
 if err != nil { /* ... */ }
 journal.SaveLatestPayment("seller", &signed.State)
 _, err = broadcaster.Broadcast(signed.RawTx)
@@ -453,11 +459,11 @@ _, err = broadcaster.Broadcast(signed.RawTx)
 
 | 场景 | 正确做法 |
 |---|---|
-| 签名成功但应用保存失败 | 重试时优先重放已保存结果；没有保存成功则由密钥审计策略决定是否重签。无论签名字节如何变化，`RefundTemplateTxID` 仍从规范未嵌入签名 RefundTx 派生。 |
-| 保存成功但发送失败 | 重发**同一份**已保存 wire bytes，不重新构造业务字段；对端按 RefundTemplateTxID 与完整证据验证，不依赖连接。 |
+| Prepare 后托管保存失败 | 回滚/标记不完整，绝不调用 `SignPreparedPayment`；SDK 没有数据库副作用。 |
+| Kind 9 保存成功但发送失败 | 重发**同一份**已保存 canonical response bytes，不重签、不改 Result hash。 |
 | 广播超时 / 结果不确定 | 应用先持久化 raw 与 canonical txid，再按 txid/outpoint 查询节点对账；outbox 保证可安全重播。SDK 不保存 uncertain 标记。 |
-| 重复 / 乱序 / 并发报文 | 应用按 RefundTemplateTxID 路由与串行化；本地状态缺失时可延迟、重试、死信或拒绝；找到状态后与报文一起传入 SDK，SDK 会重新派生哈希并拒绝错配。 |
-| stale sequence / 金额倒退 / wrong opening | SDK 返回协议错误（`ErrStalePaymentSequence` 等）；应用重新加载最新状态后决定重算、拒绝或转仲裁。SDK 不自动 reload。 |
+| 重复 / 乱序 / 并发报文 | 应用按 `request_commitment` 幂等索引 exact request/result；同 commitment 不同 payload hash 是冲突，不覆盖。 |
+| stale sequence / 金额倒退 / wrong source context | SDK 从 Buyer 绝对授权独立重建；应用按 `(RefundTemplateTxID, PaymentSequence)` high-water 和广播对账策略拒绝或人工处理。 |
 | 多租户 | 先做账户授权再加载证据；`RefundTemplateTxID` 是路由 ID 不是授权令牌；SDK 会继续校验 signer 公钥与协议角色的绑定。 |
 
 ## 8. 分布式部署必须增加的状态同步

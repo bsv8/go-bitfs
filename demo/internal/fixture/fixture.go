@@ -311,7 +311,7 @@ func buildFundingTx(buyer, seller, arbiter []byte) ([]byte, error) {
 		return nil, err
 	}
 	transaction := tx.NewTransaction()
-	zero, err := chainhash.NewHash(make([]byte, 32))
+	zero, err := chainhash.NewHash(bytes.Repeat([]byte{1}, 32))
 	if err != nil {
 		return nil, err
 	}

@@ -216,6 +216,15 @@ type UnsignedPayment struct {
 	PoolOutputSatoshis uint64
 	// PoolLockingScript 是该付款所引用的资金池输出锁定脚本原始字节。
 	PoolLockingScript []byte
+	// arbitrationSourceTxID is the funding outpoint recovered from the Claim's
+	// refund template. It remains in memory only so arbitration signers can
+	// reject a raw candidate whose input was changed after construction.
+	arbitrationSourceTxID []byte
+	// arbitrationCandidateCommitment binds every public candidate field and the
+	// exact unsigned transaction bytes to the builder output. It is deliberately
+	// private: callers may inspect or copy an UnsignedPayment, but cannot update
+	// the commitment after mutating a candidate.
+	arbitrationCandidateCommitment []byte
 }
 
 // PaymentUpdateInput 提供构造下一笔累计付款状态所需的开池证据、上一状态和目标金额。

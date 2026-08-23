@@ -8,6 +8,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,25 @@ import (
 )
 
 type integrationSigner struct{ key *ec.PrivateKey }
+
+type memoryArbitrationCustodyStore struct {
+	fail              bool
+	request           *arbitration.ArbitrationRequest
+	payloadsCBOR      []byte
+	requestCommitment []byte
+	unsignedTxHash    []byte
+}
+
+func (store *memoryArbitrationCustodyStore) Save(prepared *arbitration.PreparedPayment) error {
+	if store.fail {
+		return errors.New("custody store unavailable")
+	}
+	store.request = prepared.Request()
+	store.payloadsCBOR = prepared.ContentPayloadsCBOR()
+	store.requestCommitment = prepared.RequestCommitment()
+	store.unsignedTxHash = prepared.UnsignedStateTxHash()
+	return nil
+}
 
 func (s integrationSigner) PublicKey(context.Context) ([]byte, error) {
 	return s.key.PubKey().Compressed(), nil
@@ -134,7 +154,7 @@ func (f *protocolFixture) buildFunding(t *testing.T, satoshis uint64) []byte {
 		t.Fatal(err)
 	}
 	funding := tx.NewTransaction()
-	zero, err := chainhash.NewHash(make([]byte, 32))
+	zero, err := chainhash.NewHash(bytes.Repeat([]byte{1}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,18 +274,23 @@ func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}}); err != nil {
-		t.Fatal(err)
-	}
-	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, f.completed.Opening, request, f.completed.InitialPayment, f.facts())
+	delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := f.arbiter.SignPayment(f.ctx, arbitrationRequest)
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, f.completed.Opening, request, delivery, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := f.seller.CompleteArbitratedPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, arbitrationRequest, response, f.facts())
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.arbiter.SignPreparedPayment(f.ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := f.seller.CompleteArbitratedPayment(f.ctx, arbitrationRequest, response, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,6 +300,49 @@ func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	}
 	if err := engine.VerifyArbitratedPayment(&signed.State, f.completed.Opening); err != nil {
 		t.Fatalf("arbitrated payment invalid: %v", err)
+	}
+}
+
+func TestArbitrationCustodyPersistenceGatesSigning(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	request, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, f.completed.Opening, request, delivery, f.facts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signAfterSave := func(store *memoryArbitrationCustodyStore) (*arbitration.ArbitrationResponse, error) {
+		if err := store.Save(prepared); err != nil {
+			return nil, err
+		}
+		return f.arbiter.SignPreparedPayment(f.ctx, prepared)
+	}
+	failingStore := &memoryArbitrationCustodyStore{fail: true}
+	if response, err := signAfterSave(failingStore); err == nil || response != nil {
+		t.Fatal("signing proceeded after custody persistence failure")
+	}
+	workingStore := new(memoryArbitrationCustodyStore)
+	response, err := signAfterSave(workingStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || workingStore.request == nil || !bytes.Equal(workingStore.request.ClaimCBOR, arbitrationRequest.ClaimCBOR) || !bytes.Equal(workingStore.payloadsCBOR, arbitrationRequest.ContentPayloadsCBOR) {
+		t.Fatal("successful custody persistence did not retain exact request and payload bytes")
+	}
+	if !bytes.Equal(workingStore.requestCommitment, prepared.RequestCommitment()) || !bytes.Equal(workingStore.unsignedTxHash, prepared.UnsignedStateTxHash()) {
+		t.Fatal("custody store retained inconsistent hashes")
 	}
 }
 

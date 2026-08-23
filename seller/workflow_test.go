@@ -354,19 +354,23 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
+	delivery, _, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbitrationRequest, err := f.Seller.BuildArbitrationRequest(ctx, opened.Opening, request, opened.InitialPayment, 900000)
+	arbitrationRequest, err := f.Seller.BuildArbitrationRequest(ctx, opened.Opening, request, delivery, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := f.Arbiter.SignPayment(ctx, arbitrationRequest)
+	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := f.Seller.CompleteArbitratedPayment(ctx, opened.Opening, opened.InitialPayment, arbitrationRequest, response, 900000)
+	response, err := f.Arbiter.SignPreparedPayment(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,9 +382,8 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 		t.Fatalf("arbitrated state invalid: %v", err)
 	}
 	// Wrong previous state must be rejected.
-	if _, err := f.Seller.CompleteArbitratedPayment(ctx, opened.Opening, &pool.PaymentState{RefundTemplateTxID: opened.InitialPayment.RefundTemplateTxID, PaymentSequence: 99}, arbitrationRequest, response, 900000); err == nil {
-		t.Fatal("wrong previous state was accepted for arbitration completion")
-	}
+	// Completion no longer accepts previous off-chain state; the candidate is
+	// rebuilt from the Buyer-signed absolute sequence and amount in the Claim.
 }
 
 func requestFromProofForSellerTest(proof *pool.OpeningProof) (*pool.RefundPresignRequest, error) {
@@ -393,4 +396,91 @@ func requestFromProofForSellerTest(proof *pool.OpeningProof) (*pool.RefundPresig
 		MinerFeeRateSatPerKB: proof.MinerFeeRateSatPerKB,
 		BuyerRefundSignature: append([]byte(nil), proof.BuyerRefundSignature...),
 	}, nil
+}
+
+// TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence proves the Seller
+// completion path binds the Arbiter Result to its own independent rebuild:
+// every committed hash, both signatures, and the candidate itself must match
+// exactly before the Seller transaction signature is produced.
+func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
+	f := newSellerFixture(t)
+	opened := f.openPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(30 * time.Minute).Unix())}
+	request, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, _, err := f.Seller.BuildContentDelivery(ctx, f.Quote, opened.Opening, opened.InitialPayment, request, ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.Seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitrationRequest, err := f.Seller.BuildArbitrationRequest(ctx, opened.Opening, request, delivery, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := f.Arbiter.PreparePayment(ctx, arbitrationRequest, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.Arbiter.SignPreparedPayment(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tamperResult := func(mutate func(result *arbitration.ArbitrationResult)) *arbitration.ArbitrationResponse {
+		t.Helper()
+		result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(result)
+		tamperedCBOR, err := arbitration.MarshalResult(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &arbitration.ArbitrationResponse{
+			Version:                     response.Version,
+			ResultCBOR:                  tamperedCBOR,
+			ArbiterResultSignature:      append([]byte(nil), response.ArbiterResultSignature...),
+			ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...),
+		}
+	}
+	flipLastByte := func(value []byte) []byte {
+		flipped := append([]byte(nil), value...)
+		flipped[len(flipped)-1] ^= 1
+		return flipped
+	}
+
+	cases := []struct {
+		name     string
+		response *arbitration.ArbitrationResponse
+	}{
+		{"request commitment", tamperResult(func(r *arbitration.ArbitrationResult) { r.RequestCommitment[0] ^= 1 })},
+		{"content payloads hash", tamperResult(func(r *arbitration.ArbitrationResult) { r.ContentPayloadsHash[0] ^= 1 })},
+		{"unsigned state tx hash", tamperResult(func(r *arbitration.ArbitrationResult) { r.UnsignedStateTxHash[0] ^= 1 })},
+		{"arbiter result signature", &arbitration.ArbitrationResponse{Version: response.Version, ResultCBOR: append([]byte(nil), response.ResultCBOR...), ArbiterResultSignature: flipLastByte(response.ArbiterResultSignature), ArbiterTransactionSignature: append([]byte(nil), response.ArbiterTransactionSignature...)}},
+		{"arbiter transaction signature", &arbitration.ArbitrationResponse{Version: response.Version, ResultCBOR: append([]byte(nil), response.ResultCBOR...), ArbiterResultSignature: append([]byte(nil), response.ArbiterResultSignature...), ArbiterTransactionSignature: flipLastByte(response.ArbiterTransactionSignature)}},
+	}
+	for _, testCase := range cases {
+		if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, testCase.response, 900000); err == nil {
+			t.Fatalf("tampered %s was accepted by CompleteArbitratedPayment", testCase.name)
+		}
+	}
+
+	// The untouched response still completes, proving the rejections come from
+	// tampering and not from a broken harness.
+	signed, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, 900000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opened.Opening.BuyerPubKey, SellerPubKey: opened.Opening.SellerPubKey, ArbiterPubKey: opened.Opening.ArbiterPubKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.VerifyArbitratedPayment(&signed.State, opened.Opening); err != nil {
+		t.Fatalf("arbitrated state invalid after untampered completion: %v", err)
+	}
 }

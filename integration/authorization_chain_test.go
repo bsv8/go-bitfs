@@ -10,6 +10,7 @@ import (
 	"time"
 
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
@@ -49,11 +50,15 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, opening, request, previous, f.facts())
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, opening, request, delivery, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := f.arbiter.SignPayment(f.ctx, arbitrationRequest)
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.arbiter.SignPreparedPayment(f.ctx, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,12 +83,16 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	if signedPayment.State.PaymentAuthorizationHash != pool.Hash32(authHash) {
 		t.Fatal("accepted payment state carries a foreign authorization hash")
 	}
-	if !bytes.Equal(response.PaymentAuthorizationHash, authHash[:]) {
-		t.Fatal("007 response carries an authorization hash other than SHA-256(TermsCBOR)")
+	result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(prepared.PaymentAuthorizationHash(), authHash[:]) {
+		t.Fatal("007 prepared payment carries an authorization hash other than SHA-256(TermsCBOR)")
 	}
 	shellHash := sha256.Sum256(mustEncodeChainRequest(t, request))
-	if bytes.Equal(response.PaymentAuthorizationHash, shellHash[:]) {
-		t.Fatal("007 response used the full SignedContentRequest shell hash")
+	if bytes.Equal(result.RequestCommitment, shellHash[:]) {
+		t.Fatal("007 result used the full SignedContentRequest shell hash as commitment")
 	}
 }
 

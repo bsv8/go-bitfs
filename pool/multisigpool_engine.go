@@ -697,13 +697,13 @@ func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input 
 // BuildPaymentUpdate constructs the next unsigned pool state transaction from the previous accepted payment
 // and the requested amounts.
 //
-// This is the protocol's single transaction-construction core: buyer and
-// seller must both call it with the same explicit inputs (opening proof,
+// This is the protocol's normal payment transaction-construction core: buyer
+// and seller call it with the same explicit local inputs (opening proof,
 // previous state, target sequence, absolute seller amount) so both sides
-// deterministically rebuild byte-identical unsigned transactions. That
-// determinism is what lets 005 transmit only the authorization hash plus the
-// buyer signature; no role-specific builder, raw patching, or wire-supplied
-// transaction exists.
+// deterministically rebuild byte-identical unsigned transactions. The 007
+// path uses BuildArbitrationPaymentFromClaim in arbitration.go instead: it has
+// no OpeningProof or previous state on the wire and reconstructs from the
+// signed Claim's source context.
 func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input PaymentUpdateInput) (*UnsignedPayment, error) {
 	if engine == nil || input.Opening == nil || input.Previous == nil {
 		return nil, invalid("opening proof and previous payment are required")
@@ -752,14 +752,6 @@ func (adapter *BuyerPoolAdapter) SignBuyerPayment(ctx context.Context, unsigned 
 		return nil, err
 	}
 	return append([]byte(nil), sig...), nil
-}
-
-// SignSellerArbitrationCandidate produces the seller's detached signature over an arbitration candidate transaction.
-func (adapter *SellerPoolAdapter) SignSellerArbitrationCandidate(ctx context.Context, unsigned *UnsignedPayment, proof *OpeningProof) ([]byte, error) {
-	if unsigned == nil || unsigned.PaymentSequence == finalPoolSequence {
-		return nil, invalid("arbitration candidate cannot use final sequence")
-	}
-	return adapter.signSeller(ctx, unsigned, proof)
 }
 
 // SignSellerPayment produces the seller's detached signature over an unsigned pool transaction.

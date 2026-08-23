@@ -194,15 +194,15 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 // request or business-latest amount.
 func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.OpeningProof, unsigned *pool.UnsignedPayment, buyerSig []byte, blockHeight uint32) (*pool.SignedPayment, error)
 
-// BuildArbitrationRequest verifies the retained signed 003 authorization and
-// base state, constructs the authorized candidate, signs it, and packages
-// the 007 evidence request. It never sends anything.
-func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, base *pool.PaymentState, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
+// BuildArbitrationRequest verifies the local opening, 003 authorization and
+// 004 payload bundle, then signs only the Claim evidence. It does not build or
+// sign a payment transaction.
+func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
 
-// CompleteArbitratedPayment verifies the 007 response hashes and arbiter
-// signature against explicit evidence and merges seller+arbiter signatures.
-// Broadcasting is the application's job.
-func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
+// CompleteArbitratedPayment rebuilds the candidate from Kind 8 Claim evidence,
+// verifies both Kind 9 signatures, then creates and merges the Seller
+// transaction signature. Broadcasting is the application's job.
+func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
 ```
 
 ## Arbiter API
@@ -217,19 +217,15 @@ type WorkflowConfig struct {
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// Application-local adapter, not an SDK type. The seller application may
-// implement this transport over HTTP, a queue, or a local call.
-type ArbiterClient interface {
-    SignPayment(ctx context.Context, request *arbitration.ArbitrationRequest) (*arbitration.ArbitrationResponse, error)
-}
+// PreparePayment validates Claim, Buyer authorization, Seller Claim signature,
+// payload custody, and the independently rebuilt candidate. It creates no
+// transaction signature; the application persists exact evidence next.
+func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32) (*arbitration.PreparedPayment, error)
 
-// SignPayment checks the complete opening proof, final authorization, and
-// unsigned candidate. It returns only the arbiter signature for those exact
-// bytes, not an approval state, amount, or database ID.
-func (workflow *arbitration.Workflow) SignPayment(
-    ctx context.Context,
-    request *arbitration.ArbitrationRequest,
-) (*arbitration.ArbitrationResponse, error)
+// SignPreparedPayment rechecks the opaque prepared evidence, independently
+// rebuilds the candidate, and returns a response containing both the Result
+// message signature and the Arbiter transaction signature.
+func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
 ```
 
 ## Complete business flow
@@ -319,11 +315,14 @@ broadcast(signed.RawTx)
 
 ```go
 authorization := journal.LoadSentContentRequest(refundTemplateTxID) // retained 003 bytes
+delivery := journal.LoadExactContentDelivery(authorization)         // retained 004 payload bundle
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
-    opening, authorization, latest, blockHeight)
-response := arbiter.SignPayment(arbitrationRequest)
+    opening, authorization, delivery, blockHeight)
+prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight)
+if err := journal.PersistArbitrationCustody(prepared); err != nil { /* ... */ }
+response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
-    opening, latest, arbitrationRequest, response, blockHeight)
+    arbitrationRequest, response, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
 broadcast(signed.RawTx)
 ```

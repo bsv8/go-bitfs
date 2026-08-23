@@ -1,42 +1,40 @@
 ---
 id: 007-seller-arbitration-submission-requirements
-title: 007 · 卖方仲裁提交需求
+title: 007 · 卖方仲裁提交要求
 ---
 
-# 007 · 卖方仲裁提交需求
+# 007 · 卖方仲裁提交要求
 
-## 要解决什么
+007 是 Buyer 签名的 003 无法正常完成 004/005 时使用的 v4 托管与结算异常分支。Seller 签署 Claim，Arbiter 验证并托管精确内容，独立构造付款交易；应用确认持久化后，Arbiter 才能签交易。
 
-卖方持有买方已签出的 003 最终付款授权，但买方没有签出本次 005，或正常路径无法完成时，需要仲裁者补足 `Seller+Arbiter` 的 2-of-3 签名。仲裁者不是买方或卖方的数据库副本，不能只收到一个哈希或 `RefundTemplateTxID` 后再向任何一方查询材料。
+## 必须提交的证据
 
-卖方提交给仲裁者的材料必须是完整原始凭证和原始签名。
+Seller 必须发送新的五元 Kind 8。Claim 只包含：
 
-## 仲裁者实际做什么
+- 声明的 pool output satoshis 和固定角色顺序的规范 P2MS locking script；
+- canonical unsigned RefundTx 原文；
+- 精确的 Buyer-signed 003 `TermsCBOR` 和 Buyer signature。
 
-仲裁者不重新判断卖方是否交付了某个文件块，也不重新计算报价或应付款金额。买方对 003 中最终授权的签名已经表达：目标支付序号和卖方绝对累计金额；池角色与费率完全由提交的 OpeningProof 恢复——该证据同时提供用于验证买方对精确 003 条款字节签名的公钥（003 本身不再携带公钥或费率）。
+外层 Request 另含对 `[4, 8, exact_claim_cbor]` 的 Seller 消息签名，以及 canonical 的 1–64 项 `content_payloads_cbor`。不得携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复的 `RefundTemplateTxID` 或 Seller transaction signature。
 
-仲裁者只验证这份状态可执行，然后对同一笔确定交易提供仲裁签名。
+SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、RefundTx 形状、金额算术、payload 数量/顺序/大小/hash 和所有 canonical CBOR。它不声称验证链上 UTXO 存在、确认或未花费；错误 source context 应由应用记录为卖方 source 不可花费的对账失败。
 
-```text
-不是：仲裁者裁定卖方应得到 X
-而是：买方已经签出 X 的最终授权，仲裁者验证卖方候选交易后补足 Arbiter detached signature
-```
+## 仲裁方边界
 
-## 为什么不带全部业务历史
-
-仲裁提交不能只带哈希引用，也不能要求买方先签 005；最低证据是：
+应用必须先持久化精确入站请求和 payload bundle：
 
 ```text
-完整开池证明
-+ 003 最终付款授权
-+ 卖方构造的空解锁候选交易
-+ 卖方 Seller detached signature
+收到 raw Kind 8
+  -> PreparePayment
+  -> 原子托管持久化
+  -> SignPreparedPayment
+  -> 持久化/发送精确 Kind 9
 ```
 
-仲裁者只验证 003 授权、候选交易和 Seller detached signature，不读取 001、004、payload 或历史付款链，也不构造或修改交易。响应只包含授权哈希、候选交易哈希和 Arbiter detached signature。
+`PreparePayment` 不产生交易签名副作用，返回带深复制 getter 的 opaque prepared evidence。应用重启后必须从已保存的精确 Kind 8 重新 Prepare，不得伪造 opaque 值。
 
-## 单向边界
+Result 同时提交 Seller Claim signing-domain hash、精确 payload 子文档 hash 和精确 unsigned candidate hash。Result 消息签名与 `ForkID|All` 交易签名是两份独立凭证，不能互相替代。
 
-只有卖方可以发起本步骤。买方不能以卖方未提交交易、未反签金额或未响应为由请求仲裁关闭；买方的路径是等待到期并取得退款或找零。仲裁费用由卖方承担，BitFS v4 不从池内静默扣除。
+## Seller 完成
 
-具体证据包、校验和响应见[卖方仲裁提交规范](007-seller-arbitration-submission-spec.md)。
+Seller 收到 Kind 9 后必须从 Claim primitives 独立重建 candidate，验 Buyer signature、三个 Result hash、Result 消息签名和 Arbiter transaction signature，再生成自身交易签名。合并只能通过 `MergeArbitratedPoolSellerArbiterSignatures`。广播、对账、Buyer 取件鉴权、retention 和幂等索引均由应用负责。

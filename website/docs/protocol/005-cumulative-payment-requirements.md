@@ -46,7 +46,7 @@ This delivery-context record is the seller's delivery-risk control data and is p
 
 This is a one-way risk boundary: if the seller does not submit any payment transaction, the buyer walks away with a full initial refund after expiry; if the seller submits the latest cumulative payment transaction, the transaction settles after expiry according to its cumulative amount with the buyer receiving change. The buyer does not sue the arbitrator because of the seller's inaction, nor does the buyer need the seller to counter-sign an off-chain "amount confirmation."
 
-Only when the seller is unable to normally submit a payment transaction that the buyer has checked out may the seller request the arbitrator to supply the missing signature per 007. The arbitrator verifies the complete pool-opening proof and the exact payment transaction—not database records, individual amount fields, or textual payment sequence numbers.
+Only when the seller is unable to normally submit a payment transaction that the buyer has checked out may the seller request the arbitrator per 007. The Seller Claim supplies the signed source amount/script, RefundTx, Buyer-signed terms, and exact payload bundle; the arbitrator independently rebuilds the exact payment transaction. It does not receive a complete OpeningProof or Seller candidate raw.
 
 ## Why This Works
 

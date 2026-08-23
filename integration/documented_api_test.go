@@ -196,7 +196,7 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 
 	// 007 (README §6.4): arbitration request/response/completion. The README
 	// marshals the request, sends it, and the arbiter decodes the received bytes.
-	arbitrationRequest, err := f.seller.BuildArbitrationRequest(ctx, opening, request, previous, blockHeight)
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(ctx, opening, request, delivery, blockHeight)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,11 +209,15 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	var arbiterWorkflow *arbitration.Workflow = f.arbiter
-	response, err := arbiterWorkflow.SignPayment(ctx, decodedArbitrationRequest)
+	prepared, err := arbiterWorkflow.PreparePayment(ctx, decodedArbitrationRequest, blockHeight)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.seller.CompleteArbitratedPayment(ctx, opening, previous, arbitrationRequest, response, blockHeight); err != nil {
+	response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, blockHeight); err != nil {
 		t.Fatal(err)
 	}
 }

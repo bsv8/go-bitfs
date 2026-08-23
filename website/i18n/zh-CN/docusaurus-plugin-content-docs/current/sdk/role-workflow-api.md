@@ -174,13 +174,13 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 // 它不判断候选是否匹配任何待处理请求或业务最新金额。
 func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.OpeningProof, unsigned *pool.UnsignedPayment, buyerSig []byte, blockHeight uint32) (*pool.SignedPayment, error)
 
-// BuildArbitrationRequest 验证保存的 003 授权与基准状态，构造被授权候选并签名，
-// 打包成 007 证据请求。绝不发送任何东西。
-func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, base *pool.PaymentState, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
+// BuildArbitrationRequest 验证本地 opening、Buyer 授权和已有 004 交付，
+// 只签署紧凑 Claim 证据；它不构造或签署仲裁交易。
+func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error)
 
-// CompleteArbitratedPayment 用显式证据验证 007 响应哈希与仲裁方签名，合并卖方+仲裁方签名。
-// 广播是应用的职责。
-func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
+// CompleteArbitratedPayment 完全依据 Claim/Result 验证 Kind 8/9，独立重建候选，
+// 然后签署并合并 Seller 交易签名；此 API 不接收 OpeningProof 或 previous state。
+func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error)
 ```
 
 ## Arbiter API
@@ -195,17 +195,9 @@ type WorkflowConfig struct {
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// 应用本地的适配器，不是 SDK 类型。卖家应用可以用 HTTP、队列或本地调用实现该传输。
-type ArbiterClient interface {
-    SignPayment(ctx context.Context, request *arbitration.ArbitrationRequest) (*arbitration.ArbitrationResponse, error)
-}
+func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, request *arbitration.ArbitrationRequest, blockHeight uint32) (*arbitration.PreparedPayment, error)
 
-// SignPayment 检查完整开池证明、最终授权与未签名候选。
-// 它只针对这些确切字节返回仲裁方签名，而不是批准状态、金额或数据库 ID。
-func (workflow *arbitration.Workflow) SignPayment(
-    ctx context.Context,
-    request *arbitration.ArbitrationRequest,
-) (*arbitration.ArbitrationResponse, error)
+func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
 ```
 
 ## 完整业务流程
@@ -293,11 +285,16 @@ broadcast(signed.RawTx)
 
 ```go
 authorization := journal.LoadSentContentRequest(refundTemplateTxID) // 留痕的 003 字节
+delivery := journal.LoadExactContentDelivery(authorization) // retained 004 payload bundle
 arbitrationRequest, err := sellerWorkflow.BuildArbitrationRequest(ctx,
-    opening, authorization, latest, blockHeight)
-response := arbiter.SignPayment(arbitrationRequest)
+    opening, authorization, delivery, blockHeight)
+prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight)
+journal.SaveArbitrationCustody(
+    prepared.Request(), prepared.ContentPayloadsCBOR(),
+    prepared.RequestCommitment(), prepared.UnsignedStateTxHash())
+response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
-    opening, latest, arbitrationRequest, response, blockHeight)
+    arbitrationRequest, response, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
 broadcast(signed.RawTx)
 ```

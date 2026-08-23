@@ -9,8 +9,9 @@ This page records the acceptance contract of the completed SDK boundary hard
 switch. It supersedes every earlier description in which role workflows could
 accept stores, content sources/sinks, or BSV submission backends. Protocol
 specifications 001–007 remain authoritative for wire bytes and protocol
-behavior; the v4 wire shape, CDDL, signature domains, and `RefundTemplateTxID`
-algorithm are unchanged.
+behavior; existing 001–006 wire shapes remain fixed, while 007 uses its current
+five-element Claim/Result shapes and signing domains. The `RefundTemplateTxID`
+algorithm remains unchanged.
 
 ## Product definition
 
@@ -78,8 +79,8 @@ remain public pure functions and are never forced through a Workflow.
 - Static searches find no `FileStore`, `MemoryStore`, `FileQuoteStore`,
   `PoolStore`, `PendingRequestStore`, lease types, process locks, or backend
   adapters anywhere outside historical documents.
-- Wire fixtures for 001–007 and MultisigPool transactions are byte-identical
-  before and after the switch; `MajorVersion == 4` with no v5.
+- Current wire fixtures for 001–007 and MultisigPool transactions are frozen
+  byte-for-byte; `MajorVersion == 4` with no v5.
 - Stale sequence, wrong opening/role/hash, amount regressions, and expiry
   violations are still rejected.
 - English and Simplified Chinese documentation agree with the compiled API.
@@ -90,4 +91,5 @@ remain public pure functions and are never forced through a Workflow.
   application stack by design.
 - Transport implementations of any kind.
 - Replacing MasterSeed or MultisigPool through application configuration.
-- Changing the normative 001–007 wire behavior.
+- Changing the current normative wire behavior without a new hard-switch
+  specification and matching fixtures.

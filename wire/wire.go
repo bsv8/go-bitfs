@@ -16,9 +16,11 @@ import (
 // ProtocolFamily is the wire protocol identifier carried by the transport layer.
 const ProtocolFamily = "bitfs.protocol.v4"
 
-// Kind identifies the message type selected by the transport. The tag is not
-// inserted into the signed 001–007 CBOR document. Kind never identifies a
-// pool instance: messages that define a RefundTemplateTxID carry it in the CBOR
+// Kind identifies the message type selected by the transport. For the legacy
+// 001–006 documents the transport tag is not inserted into their signed CBOR;
+// 007 deliberately has body signing domains containing type 8 or 9, while the
+// transport Kind remains a separate selector. Kind never identifies a pool
+// instance: messages that define a RefundTemplateTxID carry it in the CBOR
 // document; the 0201 presign request derives it from RefundTx and has no
 // separate hash field.
 type Kind uint16

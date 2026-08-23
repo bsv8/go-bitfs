@@ -28,8 +28,7 @@ type WorkflowConfig struct {
 ~~~
 
 `buyer.WorkflowConfig`, `seller.WorkflowConfig`, and
-`arbitration.WorkflowConfig` all have exactly this shape. TypeScript callers use
-the native `PrivateKey` from `@bsv/sdk`. The constructor rejects a nil key, and
+`arbitration.WorkflowConfig` all have exactly this shape. The constructor rejects a nil key, and
 the compressed secp256k1 public key derived from it becomes the workflow's
 role-bound identity: every later method re-checks that supplied opening evidence
 belongs to this key's role before computing anything.
@@ -41,11 +40,11 @@ signature follows one fixed path: the signed bytes (canonical 001/003 terms
 CBOR, or for 004 the exact 32-byte payment authorization hash) are hashed once
 with SHA-256, the official private key signs that pre-computed digest, and the
 low-S DER result is re-verified by a fixed internal verifier before it can be
-returned. In Go, `(*ec.PrivateKey).Sign` receives the already-computed digest;
-in TypeScript, `PrivateKey.sign(message)` hashes the message itself, so
-cross-language test vectors must avoid hashing twice. Transaction signatures
-always use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a
-second time.
+returned. In Go, `(*ec.PrivateKey).Sign` receives the already-computed digest,
+so callers must not hash a second time before signing; message helpers such as
+`bitfs.SignMessage` perform exactly that single hashing step internally.
+Transaction signatures always use the fixed MultisigPool sighash (`ForkID|All`)
+and are never hashed a second time.
 
 Public keys in a quote, opening proof, content request, or payment state are
 protocol evidence. Callers cannot replace participant verification or

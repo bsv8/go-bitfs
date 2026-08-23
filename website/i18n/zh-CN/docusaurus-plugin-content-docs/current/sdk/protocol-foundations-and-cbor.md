@@ -81,9 +81,12 @@ CBOR 的打包与解包属于 SDK，不属于 HTTP、WebSocket、队列或应用
 
 ```go
 // package wire
-// Kind 是传输层已知的报文类别，用于统一分派；它不进入 001–007 的已签名 CBOR 本体，
-// 也绝不标识费用池实例：定义 RefundTemplateTxID 的报文会在 CBOR 文档中携带它；0201
-// 预签请求从 RefundTx 推导该值，不包含单独的 hash 字段。
+// Kind 是传输层已知的报文类别，用于统一分派；它绝不标识费用池实例。Kind 与签名
+// 本体中的报文类型编号是两个概念：001–006 的 CBOR 本体不含 kind 元素，而 Kind 8/9
+// 的本体在数组第二项显式携带自己的报文类型并进入签名域——Seller 签署的正是
+// [4, 8, arbitration_claim_cbor]，Arbiter 签署的正是 [4, 9, arbitration_result_cbor]。
+// 定义 RefundTemplateTxID 的报文会在 CBOR 文档中携带它；0201 预签请求从 RefundTx
+// 推导该值，不包含单独的 hash 字段。
 type Kind uint16
 
 const (
@@ -171,9 +174,9 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 ## 纯协议 API
 
-这些函数没有存储或网络副作用，适合钱包、服务端、CLI 和测试直接使用。签名直接使用调用方解析的官方 BSV 私钥（`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `ec.PrivateKey`；TypeScript 使用 `@bsv/sdk` 原生 `PrivateKey`）。不存在 signer 或 verifier 回调。
+这些函数没有存储或网络副作用，适合钱包、服务端、CLI 和测试直接使用。签名直接使用调用方解析的官方 BSV 私钥（`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `ec.PrivateKey`）。不存在 signer 或 verifier 回调。
 
-所有凭证的签名路径固定且一致：被签字节（规范条款 CBOR，或 004 的裸 32 字节授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，而 TS 侧 `PrivateKey.sign(message)` 会自行哈希——跨语言向量必须避免双重哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+所有凭证的签名路径固定且一致：被签字节（规范条款 CBOR，或 004 的裸 32 字节授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，调用方不得在签名前再做一次哈希；`bitfs.SignMessage` 等消息辅助函数内部恰好完成这一次哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 ```go
 // package bitfs
@@ -197,8 +200,9 @@ func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey
 
 // VerifySignedContentRequest 在入口处读取一次系统 UTC 并使用 SDK 固定验证器，
 // 验证报价绑定、资金池参与方、买方对精确条款字节的签名、报价过期和交付期限。
-// VerifySignedContentRequestForOpening 为已携带 OpeningProof 的证据（007）
-// 只验证池绑定与买方签名。VerifySignedContentRequestWithSeed 额外证明每个
+// VerifySignedContentRequestForOpening 接收调用方本地 OpeningProof，供 Seller
+// 形成 007 Claim 前验证池绑定与买方签名；OpeningProof 不进入 Kind 8 wire。
+// VerifySignedContentRequestWithSeed 额外证明每个
 // 请求的块哈希都存在于绑定报价的 seed 中。
 func VerifySignedContentRequest(
     request *SignedContentRequest,

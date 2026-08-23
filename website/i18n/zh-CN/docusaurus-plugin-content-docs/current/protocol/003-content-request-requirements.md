@@ -34,8 +34,8 @@ title: 003 · 内容获取请求需求
 
 ## 为什么只带引用
 
-003 不携带公钥和矿工费率：Buyer/Seller/Arbiter 公钥与费率由 `RefundTemplateTxID` 对应且不可修改的 OpeningProof 唯一确定。因此任何密码学验签都必须同时持有对应 OpeningProof（`VerifySignedContentRequestForOpening`）；007 已携带一份并走该路径。报价仅由 `QuoteTermsHash` 选择——费用池不能替代报价，因为同一池可以购买同一组角色下不同报价的内容。
+003 不携带公钥和矿工费率：Buyer/Seller/Arbiter 公钥与费率由 `RefundTemplateTxID` 对应且不可修改的 OpeningProof 唯一确定。正常 003 验证使用对应 OpeningProof（`VerifySignedContentRequestForOpening`）。007 Claim 不携带 OpeningProof，而是携带精确角色顺序的资金池脚本和卖方声明的 source context，供仲裁者独立重建 candidate。报价仅由 `QuoteTermsHash` 选择——费用池不能替代报价，因为同一池可以购买同一组角色下不同报价的内容。
 
-精确的 `TermsCBOR` 随后产生 `PaymentAuthorizationHash = SHA-256(TermsCBOR)`。004 用它引用授权，005 用它把付款和具体批次取件关联；007 只提交完整 003 授权和费用池执行材料，不要求仲裁者读取 001、004、payload 或历史付款链。
+精确的 `TermsCBOR` 随后产生 `PaymentAuthorizationHash = SHA-256(TermsCBOR)`。004 用它引用授权，005 用它把付款和具体批次取件关联。007 中卖方把本地保存的 003 与已验证的 004 payload bundle 组合成带 Seller 签名的 Claim；仲裁者接收 Claim 和 payload bundle，并独立重建付款，不接收 OpeningProof 或历史付款链。
 
 编码细节见[内容获取请求规范](003-content-request-spec.md)。

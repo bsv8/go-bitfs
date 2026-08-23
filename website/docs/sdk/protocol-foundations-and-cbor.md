@@ -81,10 +81,14 @@ CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or 
 
 ```go
 // package wire
-// Kind is known to the transport and selects a decoder. It is not part of a
-// signed 001–007 CBOR body, and it never identifies a pool instance: messages
-// that define RefundTemplateTxID carry it in the CBOR document. The 0201 presign
-// request derives it from RefundTx and has no separate correlation ID field.
+// Kind is known to the transport and selects a decoder; it never identifies a
+// pool instance. Kind is distinct from signed body type numbers: the legacy
+// 001–006 CBOR bodies carry no kind element, while the Kind 8/9 bodies embed
+// their own body type as the second array element and sign it — Seller signs
+// exactly [4, 8, arbitration_claim_cbor] and the Arbiter signs exactly
+// [4, 9, arbitration_result_cbor]. Messages that define RefundTemplateTxID
+// carry it in the CBOR document. The 0201 presign request derives it from
+// RefundTx and has no separate correlation ID field.
 type Kind uint16
 
 const (
@@ -173,9 +177,9 @@ before they can enter signed 001/003/004 terms or 002 pool evidence.
 
 ## Pure protocol API
 
-These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests. Signing takes the caller-parsed official BSV private key directly (`ec.PrivateKey` from `github.com/bsv-blockchain/go-sdk/primitives/ec`; TypeScript uses the native `@bsv/sdk` `PrivateKey`). There are no signer or verifier callbacks.
+These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests. Signing takes the caller-parsed official BSV private key directly (`ec.PrivateKey` from `github.com/bsv-blockchain/go-sdk/primitives/ec`). There are no signer or verifier callbacks.
 
-The signature path is fixed and identical for every credential: the signed bytes (canonical terms CBOR, or for 004 the bare 32-byte authorization hash) are hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, while TypeScript's `PrivateKey.sign(message)` hashes internally — cross-language vectors must avoid double hashing. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
+The signature path is fixed and identical for every credential: the signed bytes (canonical terms CBOR, or for 004 the bare 32-byte authorization hash) are hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, so callers must not hash a second time before signing; message helpers such as `bitfs.SignMessage` perform exactly this single hashing step internally. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
 
 ```go
 // package bitfs
@@ -203,7 +207,8 @@ func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey
 // buyer signature over the exact terms bytes, quote expiry, and the delivery
 // deadline using system UTC read once at entry and the fixed SDK verifiers.
 // VerifySignedContentRequestForOpening verifies only the pool binding and
-// buyer signature for evidence that already carries its OpeningProof (007).
+// buyer signature for a local OpeningProof. Seller uses it while forming the
+// new 007 Claim; OpeningProof itself is not placed on the Kind 8 wire.
 // VerifySignedContentRequestWithSeed additionally proves that every requested
 // block hash is present in the quote-bound seed.
 func VerifySignedContentRequest(

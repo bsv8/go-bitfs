@@ -20,9 +20,9 @@ type WorkflowConfig struct {
 }
 ~~~
 
-`buyer.WorkflowConfig`、`seller.WorkflowConfig` 和 `arbitration.WorkflowConfig` 都只有这一个字段。TypeScript 调用方使用 `@bsv/sdk` 原生的 `PrivateKey`。构造器拒绝 nil 私钥，并由私钥派生压缩 secp256k1 公钥作为 workflow 的角色绑定身份：后续每个方法都会先复核传入的开池证据属于该密钥对应角色，再进行计算。
+`buyer.WorkflowConfig`、`seller.WorkflowConfig` 和 `arbitration.WorkflowConfig` 都只有这一个字段。构造器拒绝 nil 私钥，并由私钥派生压缩 secp256k1 公钥作为 workflow 的角色绑定身份：后续每个方法都会先复核传入的开池证据属于该密钥对应角色，再进行计算。
 
-不存在需要实现的 `pool.Signer` 接口，也不需要提供钱包、HSM 或远程签名服务适配器。SDK 同样绝不接收种子、密钥导出回调或签名验证回调。所有消息签名都走一条固定路径：被签字节（001/003 的规范条款 CBOR，或 004 的精确 32 字节付款授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定的内部验证器复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest；TS 侧 `PrivateKey.sign(message)` 会自行对消息做 SHA-256——跨语言测试向量必须避免双重哈希。交易签名一律使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+不存在需要实现的 `pool.Signer` 接口，也不需要提供钱包、HSM 或远程签名服务适配器。SDK 同样绝不接收种子、密钥导出回调或签名验证回调。所有消息签名都走一条固定路径：被签字节（001/003 的规范条款 CBOR，或 004 的精确 32 字节付款授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定的内部验证器复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，调用方不得在签名前再做一次哈希；`bitfs.SignMessage` 等消息辅助函数内部恰好完成这一次哈希。交易签名一律使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 报价、开池证据、内容请求或付款状态中的公钥都是协议证据。调用方不能替换参与者验证逻辑，也不能重新配置买方/卖方/仲裁方角色：验签固定且不可替换。
 

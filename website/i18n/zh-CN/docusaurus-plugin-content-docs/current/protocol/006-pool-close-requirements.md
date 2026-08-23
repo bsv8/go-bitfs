@@ -15,7 +15,7 @@ title: 006 · 费用池关闭需求
 
 ## BitFS v4 的范围
 
-BitFS v4 的仲裁提交只执行卖方提供、且可验证的最终付款授权与候选状态：
+BitFS v4 的仲裁提交只执行卖方提供、且可验证的最终付款授权与独立重建状态：
 
 - 不重新裁定某个文件是否已经送达；
 - 不补偿、罚款或重算买卖双方金额；
@@ -26,6 +26,6 @@ BitFS v4 的仲裁提交只执行卖方提供、且可验证的最终付款授�
 
 ## 对仲裁者的证据要求
 
-仲裁者不是原始参与方，不能只收到一个交易 ID 或 session 标识就相信状态。所有仲裁证据必须绑定费用池的 `RefundTemplateTxID` 关联 ID：仲裁者在签名前会比较请求 hash、从 opening proof 派生的 hash 和 003 授权的 hash 字段。卖方发起仲裁提交时，必须提供完整开池证明、买方签出的最终付款授权、卖方依据授权构造的空解锁候选交易和 Seller detached signature；不得要求买方为本次争议签署 005，也不得携带 001、004、payload 或历史付款链作为业务证据。仲裁者只验证候选交易并以 Arbiter detached signature 签名，不为买方缺少的卖方反签创造新的金额真值。完整要求见 007。
+仲裁者不是原始参与方，不能只收到一个交易 ID 或 session 标识就相信状态。所有仲裁证据必须绑定费用池的 `RefundTemplateTxID` 关联 ID，该 ID 从 Claim 的 canonical `refund_template_raw` 推导。卖方发起仲裁提交时，必须提供精确 source amount/script、RefundTx、Buyer 签名的 003 条款、Seller Claim 签名和已验证的 004 payload bundle；不得要求买方为本次争议签署 005，也不得在线上携带 OpeningProof、FundingTx、费率、previous state、candidate raw 或 Seller transaction signature。仲裁者独立验证 payload 托管事实，调用同一确定性费用池构造器重建未签名状态，再分别签署 Result 与交易。完整要求见 007。
 
 具体关闭报文和 BitFS v4 的未定边界见[费用池无条件关闭规范](006-unconditional-pool-close-spec.md)。

@@ -397,11 +397,12 @@ type PoolOpeningEvidence interface {
 }
 
 // VerifySignedContentRequestForOpening verifies the pool binding and buyer
-// signature of a 003 for evidence that already carries its OpeningProof, such
-// as the 007 arbitration submission. It derives the RefundTemplateTxID from
-// the supplied opening, requires an exact match, and verifies the buyer
-// signature against the opening's buyer key over the exact TermsCBOR. Quote,
-// content, and timing facts are intentionally out of scope here.
+// signature of a 003 against caller-supplied local opening evidence. A seller
+// may use it while forming the 007 Claim, but the OpeningProof is not part of
+// the 007 wire request. It derives the RefundTemplateTxID from the supplied
+// opening, requires an exact match, and verifies the buyer signature against
+// the opening's buyer key over the exact TermsCBOR. Quote, content, and timing
+// facts are intentionally out of scope here.
 func VerifySignedContentRequestForOpening(request *SignedContentRequest, opening PoolOpeningEvidence) (*ContentRequestTerms, error) {
 	if request == nil || len(request.BuyerSignature) == 0 {
 		return nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)

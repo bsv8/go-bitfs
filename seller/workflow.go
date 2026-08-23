@@ -551,26 +551,19 @@ func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.
 	return signed, nil
 }
 
-// BuildArbitrationRequest verifies the retained signed 003 authorization and
-// latest state, constructs the authorized candidate transaction, signs it,
-// and packages everything into the 007 evidence request. It never constructs
-// a replacement candidate outside the authorization and never sends anything.
-func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, base *pool.PaymentState, blockHeight uint32) (*arbitration.ArbitrationRequest, error) {
+// BuildArbitrationRequest verifies the local opening, Buyer authorization and
+// existing 004 delivery, then signs only the compact Claim evidence. It does
+// not construct or sign an arbitration transaction.
+func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, blockHeight uint32) (*arbitration.ArbitrationRequest, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
-	if authorization == nil {
+	if authorization == nil || delivery == nil {
 		return nil, fmt.Errorf("%w: arbitration evidence is incomplete", pool.ErrInvalidEvidence)
 	}
 	opening = pool.CloneOpeningProof(opening)
-	base = pool.ClonePaymentState(base)
-	// 007 携带 OpeningProof：角色与费率全部从证据恢复，003 只做池绑定与
-	// 买方签名验证。
-	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, opening)
-	if err != nil {
-		return nil, fmt.Errorf("verify payment authorization: %w", err)
-	}
-	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(terms.RefundTemplateTxID))
+	authorization = bitfs.CloneSignedContentRequest(authorization)
+	delivery = bitfs.CloneSignedContentDelivery(delivery)
 	if err := workflow.verifySellerOwnsOpening(ctx, opening); err != nil {
 		return nil, err
 	}
@@ -581,128 +574,202 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 	if err := engine.VerifyOpening(opening); err != nil {
 		return nil, err
 	}
-	if err := checkSellerPoolNotExpired(opening, time.Now().UTC(), blockHeight); err != nil {
+	at := time.Now().UTC()
+	if err := checkSellerPoolNotExpired(opening, at, blockHeight); err != nil {
 		return nil, err
 	}
-	if base == nil || base.RefundTemplateTxID != refundTemplateTxID || base.PaymentSequence+1 != terms.PaymentSequence {
-		return nil, fmt.Errorf("%w: authorization does not match supplied base state", pool.ErrInvalidEvidence)
+	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, opening)
+	if err != nil {
+		return nil, fmt.Errorf("verify payment authorization: %w", err)
 	}
-	if err := engine.VerifyAcceptedPayment(base, opening); err != nil {
-		if arbitrationErr := engine.VerifyArbitratedPayment(base, opening); arbitrationErr != nil {
-			return nil, err
+	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
+		return nil, fmt.Errorf("%w: delivery deadline has passed", pool.ErrInvalidEvidence)
+	}
+	authHash, err := bitfs.PaymentAuthorizationHash(authorization.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(delivery.PaymentAuthorizationHash, authHash[:]) {
+		return nil, fmt.Errorf("%w: 004 delivery references a different authorization", pool.ErrInvalidEvidence)
+	}
+	if err := bitfs.VerifySignature(opening.SellerPubKey, authHash[:], delivery.SellerPaymentAuthorizationHashSignature); err != nil {
+		return nil, fmt.Errorf("%w: 004 seller signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	payloads, err := bitfs.DecodeContentPayloads(delivery.ContentPayloadsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	hashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if len(payloads) != len(hashes) {
+		return nil, fmt.Errorf("%w: 004 payload count does not match 003 hashes", pool.ErrInvalidEvidence)
+	}
+	for index := range payloads {
+		if !bytes.Equal(sha256Bytes(payloads[index]), hashes[index]) {
+			return nil, fmt.Errorf("%w: 004 payload #%d does not match 003 hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	unsigned, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: base, PaymentSequence: terms.PaymentSequence, SellerAmountAfterSat: terms.SellerAmountAfterSat})
+	details, err := pool.DeriveOpeningDetails(opening)
 	if err != nil {
 		return nil, err
 	}
-	sellerSig, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerArbitrationCandidate(ctx, unsigned, opening)
+	claim := &arbitration.ArbitrationClaim{
+		PoolOutputSatoshis:      details.PoolOutputSatoshis,
+		PoolOutputLockingScript: details.PoolLockingScript,
+		RefundTemplateRaw:       opening.RefundTx,
+		TermsCBOR:               authorization.TermsCBOR,
+		BuyerSignature:          authorization.BuyerSignature,
+	}
+	claimCBOR, err := arbitration.MarshalClaim(claim)
 	if err != nil {
 		return nil, err
 	}
-	openingCBOR, err := pool.EncodeOpeningProof(opening)
+	signingCBOR, err := arbitration.SellerClaimSigningCBOR(claimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	authCBOR, err := bitfs.EncodeSignedContentRequest(authorization)
+	sellerClaimSignature, err := bitfs.SignMessage(workflow.privateKey, signingCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, RefundTemplateTxID: refundTemplateTxID, PoolOpeningProofCBOR: openingCBOR, PaymentAuthorizationCBOR: authCBOR, UnsignedStateTxRaw: append([]byte(nil), unsigned.RawTx...), SellerTransactionSignature: sellerSig}, nil
+	if err := bitfs.VerifySignature(workflow.publicKey, signingCBOR, sellerClaimSignature); err != nil {
+		return nil, fmt.Errorf("%w: generated Seller Claim signature failed verification: %v", pool.ErrInvalidEvidence, err)
+	}
+	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, ClaimCBOR: claimCBOR, SellerClaimSignature: sellerClaimSignature, ContentPayloadsCBOR: delivery.ContentPayloadsCBOR}, nil
 }
 
-// CompleteArbitratedPayment verifies the 007 response hashes and arbiter
-// signature against the explicitly supplied opening proof and previous state,
-// merges the seller and arbiter signatures over the authorized unsigned state,
-// and returns the completed SignedPayment. Broadcasting and recording the
-// outcome are the application's responsibilities.
-func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, opening *pool.OpeningProof, previous *pool.PaymentState, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error) {
+// CompleteArbitratedPayment verifies Kind 8/9 entirely from the Claim and
+// Result, independently rebuilds the candidate, and only then signs and
+// merges the Seller transaction signature. OpeningProof and previous state are
+// deliberately absent from this API.
+func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request *arbitration.ArbitrationRequest, response *arbitration.ArbitrationResponse, blockHeight uint32) (*pool.SignedPayment, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
 	if request == nil || response == nil {
 		return nil, fmt.Errorf("%w: arbitration evidence is incomplete", pool.ErrInvalidEvidence)
 	}
+	request = cloneArbitrationRequest(request)
+	response = cloneArbitrationResponse(response)
 	if _, err := arbitration.MarshalRequest(request); err != nil {
 		return nil, err
 	}
 	if _, err := arbitration.MarshalResponse(response); err != nil {
 		return nil, err
 	}
-	authorization, err := bitfs.DecodeSignedContentRequest(request.PaymentAuthorizationCBOR)
+	claim, err := arbitration.UnmarshalClaim(request.ClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	// 唯一真值：PaymentAuthorizationHash = SHA-256(003 TermsCBOR)。
-	// 响应必须绑定与 004/005 相同的授权哈希；完整外壳哈希不是授权哈希。
-	authHash, err := bitfs.PaymentAuthorizationHash(authorization.TermsCBOR)
+	terms, err := bitfs.DecodeContentRequestTerms(claim.TermsCBOR)
 	if err != nil {
 		return nil, err
 	}
-	txHash := sha256.Sum256(request.UnsignedStateTxRaw)
-	if !bytes.Equal(authHash[:], response.PaymentAuthorizationHash) || !bytes.Equal(txHash[:], response.UnsignedStateTxHash) {
-		return nil, fmt.Errorf("%w: arbiter response does not bind request evidence", pool.ErrInvalidEvidence)
-	}
-	if response.RefundTemplateTxID != request.RefundTemplateTxID {
-		return nil, fmt.Errorf("%w: arbiter response does not bind the original request correlation ID", pool.ErrInvalidEvidence)
-	}
-	proof := pool.CloneOpeningProof(opening)
-	if err := workflow.verifySellerOwnsOpening(ctx, proof); err != nil {
-		return nil, err
-	}
-	details, err := pool.DeriveOpeningDetails(proof)
+	keys, err := pool.ParseArbitratedPoolLockingScript(claim.PoolOutputLockingScript)
 	if err != nil {
 		return nil, err
 	}
-	if details.RefundTemplateTxID != request.RefundTemplateTxID {
-		return nil, fmt.Errorf("%w: arbitration request correlation ID does not match opening evidence", pool.ErrInvalidEvidence)
+	if !bytes.Equal(workflow.publicKey, keys.SellerPubKey) {
+		return nil, fmt.Errorf("%w: workflow key does not match Claim seller", pool.ErrInvalidEvidence)
 	}
-	terms, err := bitfs.VerifySignedContentRequestForOpening(authorization, proof)
+	if err := bitfs.VerifySignature(keys.BuyerPubKey, claim.TermsCBOR, claim.BuyerSignature); err != nil {
+		return nil, fmt.Errorf("%w: Buyer authorization signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	sellerSigning, err := arbitration.SellerClaimSigningCBOR(request.ClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	engine, err := workflow.engineFor(proof)
+	if err := bitfs.VerifySignature(keys.SellerPubKey, sellerSigning, request.SellerClaimSignature); err != nil {
+		return nil, fmt.Errorf("%w: Seller Claim signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	payloads, err := bitfs.DecodeContentPayloads(request.ContentPayloadsCBOR)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkSellerPoolNotExpired(proof, time.Now().UTC(), blockHeight); err != nil {
-		return nil, err
-	}
-	unsigned, err := engine.ParseUnsignedPayment(ctx, request.UnsignedStateTxRaw, proof)
+	hashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
 	if err != nil {
 		return nil, err
 	}
-	if unsigned.PaymentSequence != terms.PaymentSequence || unsigned.SellerAmountSat != terms.SellerAmountAfterSat {
-		return nil, fmt.Errorf("%w: arbitration candidate does not match payment authorization", pool.ErrInvalidEvidence)
+	if len(payloads) != len(hashes) {
+		return nil, fmt.Errorf("%w: payload count does not match 003 hashes", pool.ErrInvalidEvidence)
 	}
-	if err := engine.VerifySellerPayment(unsigned, request.SellerTransactionSignature, proof); err != nil {
-		return nil, err
-	}
-	previous = pool.ClonePaymentState(previous)
-	if previous == nil {
-		return nil, pool.ErrStalePaymentSequence
-	}
-	if err := engine.VerifyAcceptedPayment(previous, proof); err != nil {
-		if arbitrationErr := engine.VerifyArbitratedPayment(previous, proof); arbitrationErr != nil {
-			return nil, fmt.Errorf("verify previous accepted payment: %w", err)
+	for index := range payloads {
+		if !bytes.Equal(sha256Bytes(payloads[index]), hashes[index]) {
+			return nil, fmt.Errorf("%w: payload #%d does not match 003 hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	if previous.PaymentSequence+1 != terms.PaymentSequence ||
-		unsigned.PaymentSequence != terms.PaymentSequence {
-		return nil, pool.ErrStalePaymentSequence
+	commitment, err := arbitration.RequestCommitment(request)
+	if err != nil {
+		return nil, err
 	}
-	if previous.SellerAmountSat > terms.SellerAmountAfterSat {
-		return nil, fmt.Errorf("%w: arbitration candidate cannot reduce seller amount", pool.ErrInvalidEvidence)
+	result, err := arbitration.UnmarshalResult(response.ResultCBOR)
+	if err != nil {
+		return nil, err
 	}
-	signed, err := engine.MergeSellerArbiterPayment(unsigned, request.SellerTransactionSignature, response.ArbiterTransactionSignature, proof)
+	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat)
+	if err != nil {
+		return nil, err
+	}
+	if err := pool.CheckArbitrationRefundNotExpired(claim.RefundTemplateRaw, blockHeight); err != nil {
+		return nil, fmt.Errorf("%w: refund template is no longer available for arbitration: %v", pool.ErrInvalidEvidence, err)
+	}
+	authHash, err := bitfs.PaymentAuthorizationHash(claim.TermsCBOR)
+	if err != nil {
+		return nil, err
+	}
+	payloadHash := sha256Bytes(request.ContentPayloadsCBOR)
+	txHash := sha256Bytes(unsigned.RawTx)
+	if !bytes.Equal(result.RequestCommitment, commitment) || !bytes.Equal(result.ContentPayloadsHash, payloadHash) || !bytes.Equal(result.UnsignedStateTxHash, txHash) {
+		return nil, fmt.Errorf("%w: Arbiter Result does not bind request, payloads, and candidate", pool.ErrInvalidEvidence)
+	}
+	resultSigning, err := arbitration.ArbiterResultSigningCBOR(response.ResultCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if err := bitfs.VerifySignature(keys.ArbiterPubKey, resultSigning, response.ArbiterResultSignature); err != nil {
+		return nil, fmt.Errorf("%w: Arbiter Result signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(claim.PoolOutputLockingScript)
+	if err != nil {
+		return nil, err
+	}
+	if err := engine.VerifyArbitrationArbiterPayment(unsigned, response.ArbiterTransactionSignature); err != nil {
+		return nil, fmt.Errorf("%w: Arbiter transaction signature is invalid: %v", pool.ErrInvalidEvidence, err)
+	}
+	sellerSig, err := engine.SignArbitrationSellerPayment(ctx, unsigned, workflow.privateKey)
+	if err != nil {
+		return nil, err
+	}
+	signed, err := engine.MergeArbitratedPoolSellerArbiterSignatures(unsigned, sellerSig, response.ArbiterTransactionSignature)
 	if err != nil {
 		return nil, err
 	}
 	if signed == nil || len(signed.RawTx) == 0 {
-		return nil, fmt.Errorf("%w: arbiter returned empty transaction", pool.ErrInvalidEvidence)
+		return nil, fmt.Errorf("%w: merged arbitration transaction is empty", pool.ErrInvalidEvidence)
 	}
 	signed.State.PaymentAuthorizationHash = hash32ToPool(authHash)
 	return signed, nil
+}
+
+func sha256Bytes(value []byte) []byte {
+	hash := sha256.Sum256(value)
+	return append([]byte(nil), hash[:]...)
+}
+
+func cloneArbitrationRequest(value *arbitration.ArbitrationRequest) *arbitration.ArbitrationRequest {
+	if value == nil {
+		return nil
+	}
+	return &arbitration.ArbitrationRequest{Version: value.Version, ClaimCBOR: append([]byte(nil), value.ClaimCBOR...), SellerClaimSignature: append([]byte(nil), value.SellerClaimSignature...), ContentPayloadsCBOR: append([]byte(nil), value.ContentPayloadsCBOR...)}
+}
+
+func cloneArbitrationResponse(value *arbitration.ArbitrationResponse) *arbitration.ArbitrationResponse {
+	if value == nil {
+		return nil
+	}
+	return &arbitration.ArbitrationResponse{Version: value.Version, ResultCBOR: append([]byte(nil), value.ResultCBOR...), ArbiterResultSignature: append([]byte(nil), value.ArbiterResultSignature...), ArbiterTransactionSignature: append([]byte(nil), value.ArbiterTransactionSignature...)}
 }
 
 func hash32ToPool(value bitfs.Hash32) pool.Hash32 { return pool.Hash32(value) }

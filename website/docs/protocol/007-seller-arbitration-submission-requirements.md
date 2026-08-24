@@ -5,7 +5,7 @@ title: 007 · Seller arbitration submission requirements
 
 # 007 · Seller arbitration submission requirements
 
-007 is the v4 custody-and-settlement exception for a Buyer-signed 003 whose
+007 is the custody-and-settlement exception for a Buyer-signed 003 whose
 normal 004/005 path cannot complete. The Seller submits the exact content
 payloads and signs a Claim. The Arbiter verifies and holds those bytes,
 decides a positive arbitration fee, builds the paid payment independently, and
@@ -18,10 +18,10 @@ contains only:
 
 - the claimed pool output satoshis and exact role-ordered P2MS locking script;
 - the canonical unsigned RefundTx raw bytes;
-- the exact Buyer-signed 003 `TermsCBOR` and Buyer signature.
+- the exact Buyer-signed 003 payment authorization document and Buyer signature.
 
-The outer request separately carries the Seller message signature over
-`[4, 8, exact_claim_cbor]` and the canonical 1–64 item
+The outer request separately carries the Seller message signature
+`SignWireDocument(1, 8, exact_claim_cbor)` and the canonical 1–64 item
 `content_payloads_cbor`.
 It MUST NOT contain OpeningProof, FundingTx, fee rate, previous state,
 candidate raw bytes, `RefundTemplateTxID` as a duplicate field, or a Seller
@@ -74,8 +74,8 @@ attached to the same record without overwriting the request, payload, Claim
 ID, or fee.
 
 The Receipt binds the Claim ID, the absolute arbiter amount, and the exact
-`ForkID|All` transaction signature under the ordinary message signature over
-`[4, 9, exact_receipt_cbor]`. The Receipt message signature and the
+`ForkID|All` transaction signature under the ordinary message signature
+`SignWireDocument(1, 9, exact_receipt_cbor)`. The Receipt message signature and the
 transaction signature are separate credentials; neither can substitute for the
 other.
 

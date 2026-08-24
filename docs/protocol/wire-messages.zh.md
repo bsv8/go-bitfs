@@ -1,565 +1,944 @@
-# BitFS v4 报文体系总览（买方 / 卖方 / 仲裁方）
+# BitFS Wire Protocol v1 统一报文规范
 
-本文基于核心代码整理：`wire/wire.go`（报文分发）、`bitfs/quote.go` 与 `bitfs/content.go`（001–004）、
-`pool/types.go` 与 `pool/cbor.go`（002/005）、`arbitration/workflow.go` 与 `arbitration/content_retrieval.go`（007/008）、
-`buyer/workflow.go` / `seller/workflow.go`（角色工作流），并与 `spec/v4/*.cddl` 对照。
+> 状态：现行实现真值。Go SDK（`protocol`/`wire`/`bitfs`/`pool`/`arbitration`/
+> `buyer`/`seller`）与 `spec/v1/wire-messages.cddl` 与本文一一对应；
+> 旧版报文体系已归档至 `spec/legacy/`。
+>
+> 本文定义 wire 的版本模型、报文外形、认证文档、签名域、ID 与命名规则。
+> 买方、卖方、仲裁方的业务职责，001–008 的业务次序，2-of-3 资金池、累计付款、
+> 仲裁费用、托管内容及关闭/退款规则均保持现有协议原意。
 
 ---
 
-## 1. 总体模型
+## 1. 设计结论
 
-### 1.1 三个角色
+BitFS 对外只暴露一个协议版本：
 
-| 角色 | 包 | 职责 |
+```go
+protocol.WireVersion = 1
+```
+
+不再定义或暴露 `pool.MultisigVersion`、`pool.MajorVersion`、
+`arbitration.MajorVersion`、`contentProtocolVersion` 等平行版本常量。
+底层交易库可以有自己的 module/release 版本，但它不是 BitFS wire 字段，也不是
+BitFS 应用需要协商的第二个协议版本。
+
+如果底层 MultisigPool 的变化影响以下任一项，BitFS 必须整体提升
+`protocol.WireVersion`：
+
+- 交易构造、序列号、locktime、输出顺序、金额或矿工费计算；
+- 交易 sighash、签名合并或脚本语义；
+- wire 字节、确定性重建结果或协议验收规则。
+
+如果只是依赖库修复或实现优化，且上述协议可观察结果完全不变，则不提升
+`WireVersion`。
+
+本设计统一规定：
+
+1. 所有完整 wire 报文都以 `[1, wire_kind, ...]` 开头。
+2. `wire_kind` 只使用 `1..11`，不再同时存在 wire Kind `3/4` 与内层 Kind `13/14`。
+3. 认证 CBOR 文档只包含业务字段，不重复外层已经携带的版本和 Kind。
+4. 普通消息签名通过唯一的 `SignWireDocument` 将外层版本、Kind 与 exact 认证文档纳入
+   统一签名上下文，禁止跨协议、跨版本、跨 Kind 解释签名。
+5. 大 payload 和交易原文作为 attachment 传输；认证文档直接或传递地绑定它们。
+6. 交易签名继续覆盖原生交易 sighash，不为追求外形一致而增加没有语义价值的重复签名。
+
+---
+
+## 2. 三层模型
+
+```text
+Transport
+  └── Packet{Kind, CBOR}                         路由与传输
+        └── [wire_version, wire_kind, ...]       完整 wire 报文
+              ├── authenticated_document_cbor   只包含业务字段的认证文档
+              ├── signature                     普通消息签名或交易签名
+              └── attachments                   payload、交易原文
+```
+
+### 2.1 完整 wire 报文
+
+所有报文的前两个元素固定为：
+
+```text
+[1, wire_kind, ...]
+```
+
+外层 `1` 和 `wire_kind` 用于快速路由、尺寸限制、选择严格 decoder，并作为普通消息
+签名的类型化上下文。认证子文档不再重复它们。encoder 固定注入外层版本和 Kind，
+不接受调用方填写。
+
+### 2.2 认证文档
+
+认证文档只包含该对象的业务字段：
+
+```text
+authenticated_document_cbor =
+  deterministic-CBOR([...authenticated_fields])
+```
+
+文档本身没有版本和 Kind。它只能出现在对应的 `[1, wire_kind, ...]` 完整报文中，
+并由该 Kind 的严格 decoder 解释。
+
+但是，不能在删除子文档中的版本和 Kind 后，继续只执行
+`SignMessage(key, authenticated_document_cbor)`。那会使外层版本和 Kind 完全不受认证，
+同一签名可能被换壳后交给另一个版本或 Kind 的 verifier。
+
+普通消息签名统一走唯一 helper：
+
+```text
+WireSignatureInput(wire_version, wire_kind, document_cbor) =
+  deterministic-CBOR([
+    "bitfs/wire-signature", wire_version, wire_kind, document_cbor
+  ])
+
+SignWireDocument(private_key, wire_version, wire_kind, document_cbor) =
+  SignMessage(private_key,
+    WireSignatureInput(wire_version, wire_kind, document_cbor))
+
+VerifyWireDocument(public_key, wire_version, wire_kind, document_cbor, signature) =
+  VerifySignature(public_key,
+    WireSignatureInput(wire_version, wire_kind, document_cbor), signature)
+
+document_id = SHA-256(authenticated_document_cbor)
+```
+
+`WireSignatureInput` 的结果不是 wire 字段，也不持久化为第二份业务文档。统一 helper
+只把外层上下文和 exact `document_cbor` 作为一个 bstr 包装；绝不解码并重新编码文档中的
+业务字段，也不允许每种报文各写一套 signing-domain 拼装代码。
+
+`SignMessage` 仍表示：对输入字节做一次 SHA-256，再生成 low-S DER ECDSA 签名。
+对象 ID 只由对应业务 CBOR 计算，因此 `arbitration_claim_cbor` 与
+`arbitration_claim_id` 等名称仍保持一一对应。
+
+认证文档可以作为 exact evidence 嵌入后续报文，例如
+`payment_authorization_cbor` 会进入 Kind 8 Claim。此时不需要把原 Kind 5 外壳一起嵌入；
+Kind 8 的固定 schema 已声明该字段只能是 v1 Kind 5 payment authorization，verifier 必须
+调用 `VerifyWireDocument(1, 5, payment_authorization_cbor, buyer_signature)`。
+协议不提供脱离具体类型的 generic authenticated-document decoder。
+
+由于 `document_id` 不重复编码版本和 Kind，它是版本及 Kind 命名空间内的 typed ID。
+持久化索引必须使用具体 ID 类型，或使用 `(wire_version, wire_kind, document_id)` 复合键，
+不得建立跨版本、跨 Kind 的无类型全局 32-byte ID 空间。
+
+### 2.3 Attachment
+
+以下对象可以留在认证文档之外：
+
+- 大体积 `content_payloads_cbor`；
+- 原始资金交易；
+- 明确标注为非认证展示信息的字段。
+
+Attachment 必须满足至少一种绑定方式：
+
+1. 认证文档直接包含 attachment 的 SHA-256；
+2. 认证文档引用的另一份已签文档包含逐项内容哈希；
+3. attachment 本身是可独立验证的原始交易。
+
+“不直接进入签名预映像”不等于“不验证”。
+
+---
+
+## 3. 命名规范
+
+### 3.1 后缀只有一种含义
+
+| 后缀 | 唯一含义 | 示例 |
 |---|---|---|
-| 买方 Buyer | `buyer/workflow.go` | 验收报价、发起开池、请求内容、验收交付、签署累计付款、构造取件请求并验收仲裁内容 |
-| 卖方 Seller | `seller/workflow.go` | 签发报价、预签退款、验收资金交易、交付内容、验收付款、发起仲裁 |
-| 仲裁方 Arbiter | `arbitration/workflow.go` | 验证并托管 payload，独立重建付款交易，持久化后追加交易签名，按 Buyer 签名鉴权返回托管证据 |
+| `_cbor` | 一份 exact deterministic CBOR 子文档 | `arbitration_claim_cbor` |
+| `_id` | `SHA-256(corresponding_cbor)` | `arbitration_claim_id` |
+| `_wire_cbor` | 一份完整 `[1, kind, ...]` wire 报文的 exact bytes | `arbitration_request_wire_cbor` |
+| `_wire_id` | `SHA-256(corresponding_wire_cbor)` | `arbitration_request_wire_id` |
+| `_raw` | 非 CBOR 格式的原始序列化字节 | `refund_template_raw` |
+| `_txid` | 按交易协议计算的 transaction ID，不是普通 SHA-256 文档 ID | `refund_template_txid` |
+| `_hash` | 内容摘要，不承担协议对象身份 | `seed_hash`、`content_hash` |
+| `_signature` | 字段名中必须同时体现签名人和被签对象 | `seller_arbitration_claim_signature` |
 
-三方公钥构成 2-of-3 多签资金池（MultisigPool v4）。任何两方合作即可推进或关闭资金池，
-这正是"正常走买卖双方、纠纷走仲裁"的密码学基础。
+因此禁止以下模糊命名：
 
-### 1.2 报文分层的三个层次
-
-```
-传输层选择 Kind ──► Packet{Kind, CBOR}          （传输 Kind 与签名 CBOR 分离；007 的 body type 8/9 明确进入签名域）
-                       │
-                       ▼
-              规范确定性 CBOR 文档               （真正被签名/验证的字节，严格 canonical 校验）
-                       │
-        ┌──────────────┼──────────────┐
-        ▼              ▼              ▼
-   bitfs 包         pool 包       arbitration 包
-  (001/003/004)   (002/005)      (007/008)
+```text
+terms_cbor_hash       // 应改成具体对象的 *_id
+request_hash          // 不清楚是内层文档还是完整 wire
+signature             // 不清楚签名人、签名对象和签名算法语义
+raw_cbor              // raw 与 cbor 语义重叠
 ```
 
-关键原则：
+### 3.2 CBOR 与 ID 必须词根完全对齐
 
-1. **Packet 信封不签名**。`Kind` 只是传输层路由标签；签名永远覆盖内层规范 CBOR 字节。
-2. **所有解码器都是严格的**：定长数组、禁用 CBOR tag、禁用不定长编码、解码后重新编码必须逐字节相等（deterministic round-trip 校验）。
-3. **签名与原文分离传输**（detached signature）：交易里不含角色签名，签名作为独立字段传递，由接收方合并。
-4. **单一真值**：`RefundTemplateTxID`（预签名退款交易的 txid）是整个资金池的统一关联 ID，
-   绝不在报文里重复携带可由其他字段推导的值。
+只有被 wire 报文或其他协议对象实际引用的 ID 才是协议对象，并各自拥有
+独立的 Go named type（见 `protocol/ids.go`）：
 
-### 1.3 报文与规格步骤对照
+```text
+file_quote_terms_cbor          -> file_quote_terms_id            （进入 Kind 5）
+payment_authorization_cbor     -> payment_authorization_id       （Kind 6/7 与查找键）
+arbitration_claim_cbor         -> arbitration_claim_id           （Kind 9/10 路由键）
+content_retrieval_request_cbor -> content_retrieval_request_id   （绑定 Kind 11 两分支）
+content_payloads_cbor          -> content_payloads_id            （Kind 11 available 附件绑定）
+```
 
-| wire.Kind | 常量名 | 规格 | 方向 | Go 类型 |
-|---:|---|---|---|---|
-| 1 | `Quote` | 001 报价凭据 | 卖方 → 买方 | `*bitfs.SignedFileQuote` |
-| 2 | `PoolRefundPresignRequest` | 0201 退款预签请求 | 买方 → 卖方 | `*pool.RefundPresignRequest` |
-| 3 | `PoolRefundPresignResponse` | 0202 退款预签响应 | 卖方 → 买方 | `*pool.RefundPresignResponse` |
-| 4 | `PoolFundingTxDelivery` | 0203 资金交易交付 | 买方 → 卖方 | `*pool.FundingTxDelivery` |
-| 5 | `ContentRequest` | 003 内容请求（付款授权） | 买方 → 卖方 | `*bitfs.SignedContentRequest` |
-| 6 | `ContentDelivery` | 004 内容交付 | 卖方 → 买方 | `*bitfs.SignedContentDelivery` |
-| 7 | `CumulativePayment` | 005 累计付款更新 | 买方 → 卖方 | `*pool.PaymentUpdate` |
-| 8 | `ArbitrationRequest` | 007 仲裁证据包 | 卖方 → 仲裁方 | `*arbitration.ArbitrationRequest` |
-| 9 | `ArbitrationResponse` | 007 仲裁签名结果 | 仲裁方 → 卖方 | `*arbitration.ArbitrationResponse` |
-| 10 | `ArbitrationContentRequest` | 008 托管内容取回请求 | 买方 → 仲裁方 | `*arbitration.ContentRetrievalRequest` |
-| 11 | `ArbitrationContentResponse` | 008 托管内容取回响应 | 仲裁方 → 买方 | `*arbitration.ContentRetrievalResponse` |
+未被任何对象引用的派生文档哈希——例如 `content_delivery_cbor`、
+`arbitration_receipt_cbor`、`content_retrieval_result_cbor` 自身的 SHA-256——
+不是协议对象，不进入规范命名空间，也不定义对应的 Go named type；应用需要时
+可以自行计算，但不得将其当作跨报文的引用键。
 
-> 注：002 在线上拆成 0201/0202/0203 三步；006（无条件关闭池）不产生新报文类型，
-> 复用 `UnsignedPayment` + 双方签名在 API 层传递（见 §5）。
+特别地，仲裁链只使用：
+
+```text
+arbitration_claim_id = SHA-256(arbitration_claim_cbor)
+```
+
+不能再把它定义为“某个临时重组 signing domain 的 hash”，也不能混用
+`claim_hash`、`claim_cbor_hash`、`arbitration_request_id` 等近义词。
+
+### 3.3 其他统一命名
+
+- 公钥统一使用 `*_public_key`，不混用 `pubkey` / `pub_key` / `public_key`；
+- 金额统一使用 `*_satoshis`，不混用 `*_sat` / `*_amount`；
+- Unix 秒统一使用 `*_unix_seconds`；
+- 非 CBOR 原始序列化统一使用“对象词根 + `_raw`”，例如
+  `refund_template_raw`、`funding_transaction_raw`；
+- 普通消息签名使用 `role + document + signature`；
+- 交易签名必须含 `transaction_signature`，避免与普通消息签名混淆；
+- 完整报文类型使用 `Message`，认证子文档不再使用含义宽泛的 `Terms`，除非它确实只表达条款。
 
 ---
 
-## 2. 报文流转全景
+## 4. Wire Kind 注册表
 
-```mermaid
-sequenceDiagram
-    participant B as 买方 Buyer
-    participant S as 卖方 Seller
-    participant A as 仲裁方 Arbiter
-
-    Note over B,S: 阶段一：报价（001）
-    S->>B: Kind 1  SignedFileQuote（定价承诺）
-
-    Note over B,S: 阶段二：开池（002 = 0201→0202→0203）
-    B->>S: Kind 2  RefundPresignRequest（退款交易+买方签名）
-    S->>B: Kind 3  RefundPresignResponse（卖方退款签名+关联ID）
-    B->>S: Kind 4  FundingTxDelivery（资金交易原文）
-    Note over B,S: 双方各自持有完整 OpeningProof，池开立
-
-    Note over B,S: 阶段三：内容交换与滚动付款（003→004→005，可循环）
-    loop 每个内容块
-        B->>S: Kind 5  SignedContentRequest（付款授权）
-        S->>B: Kind 6  SignedContentDelivery（内容+卖方签名）
-        B->>S: Kind 7  PaymentUpdate（授权哈希+买方签名，交易双方本地重建）
-    end
-
-    Note over B,S,A: 阶段四：仲裁（007，仅纠纷时）
-	S->>A: Kind 8  ArbitrationRequest（Claim+payload 托管证据+卖方 Claim 签名）
-    A->>S: Kind 9  ArbitrationResponse（三元回执 ClaimID/费用/交易签名 + 回执签名）
-    Note over S: 卖方合并双方签名并广播
-
-    Note over B,A: 阶段四点五：买方取件（008，Seller/Buyer 无法直连时）
-    B->>A: Kind 10 ArbitrationContentRequest（ClaimID + nonce + Buyer 签名）
-    A->>B: Kind 11 ArbitrationContentResponse（内嵌 exact Kind 8/9）
-    Note over B: Buyer 本地完整验收证据链与 payload，只保存内容
-
-    Note over B,S: 阶段五：关闭（006，无新报文）
-    B->>S: UnsignedPayment + 买方签名（API 层，立即关闭）
-    S->>B: SignedPayment（补卖方签名，买方提交）
-```
-
----
-
-## 3. 各报文详解
-
-以下每节给出：CBOR 编码布局（与 CDDL 一致）、Go 结构体字段含义、以及合理性分析。
-
-通用约定：
-
-- 所有公钥均为 33 字节压缩 secp256k1 公钥（`protocol.ValidateCompressedPubKey` 强制）。
-- 所有签名均为 DER 编码，且与被签字节分离传输；被签字节统一做一次 SHA-256 得到摘要。
-- `Hash32` 为固定 32 字节数组，且禁止全零（全零是"未设置"哨兵值，不得上线）。
-
----
-
-### 3.1 Kind 1 · 报价凭据（001）— 卖方 → 买方
-
-外层（`EncodeSignedFileQuote`，5 元数组，版本独立为 1）：
-
-```
-[1, terms_cbor, seller_pubkey, terms_signature, recommended_filename]
-```
-
-内层条款（`EncodeFileQuoteTerms`，同样 8 元数组，版本 1）：
-
-```
-[1, seed_hash, buyer_pubkey, seed_price_sat, full_block_price_sat,
- file_size, quote_expires_at_unix, supported_arbiter_pubkeys_cbor]
-```
-
-Go 结构体 `SignedFileQuote` / `FileQuoteTerms`（bitfs/messages.go）：
-
-| 字段 | 含义 |
-|---|---|
-| `TermsCBOR` | 内层条款的规范 CBOR 原文，是签名的直接对象 |
-| `SellerPubkey` | 卖方身份公钥，用于验证 `TermsSignature` |
-| `TermsSignature` | 卖方对 `TermsCBOR` 的 DER 签名 |
-| `RecommendedFilename` | 仅展示用的建议文件名，**不在签名范围内**，使用前必须过 `SanitizeRecommendedFilename` |
-| `SeedHash` | 文件种子（seed）的 SHA-256，文件内容的承诺根 |
-| `BuyerPubkey` | 报价专属买方——该报价只能被这个买方使用 |
-| `SeedPriceSat` | 种子（首个内容单元）价格，聪 |
-| `FullBlockPriceSat` | 整块价格，聪；尾块按比例上取整并给卖方 10% 计算容差（`ContentPriceSat`） |
-| `FileSize` | 原始文件字节数；决定块数上限（单 payload 上限 `MaxQuoteFileSize`） |
-| `QuoteExpiresAtUnix` | 报价过期时间（Unix 秒），过期即拒收 |
-| `SupportedArbiterPubkeysCBOR` | 卖方认可的仲裁人公钥列表（自身也是规范 CBOR 子文档，去重校验） |
-
-**合理性分析**
-
-- ✅ 报价绑定唯一买方 + 过期时间 + 内容承诺（SeedHash），防止转售旧报价和无限期占单。
-- ✅ `RecommendedFilename` 排除在签名外是正确的取舍：它是展示元数据而非经济事实；
-  配合 sanitize 函数消除路径穿越风险。
-- ✅ 仲裁人白名单放在报价里，使开池时仲裁人角色的选择有卖方背书的边界，
-  防止买方挑一个与卖方有隙的仲裁人。
-- ⚠️ 注意版本号体系：报价条款独立用版本 1，其余报文用主版本 4。这是有意为之
-  （报价凭据独立演进），阅读代码时不要混淆。
-
----
-
-### 3.2 Kind 2 · 退款预签请求（0201）— 买方 → 卖方
-
-编码（`EncodeRefundPresignRequest`，7 元数组）：
-
-```
-[4, refund_tx, buyer_pubkey, seller_pubkey, arbiter_pubkey,
- fee_rate, buyer_refund_signature]
-```
-
-Go 结构体 `RefundPresignRequest`（pool/types.go）：
-
-| 字段 | 含义 |
-|---|---|
-| `Version` | 工作流主版本，恒为 4 |
-| `RefundTx` | 买方构造的预签名退款交易原始字节——**资金池身份的唯一真值来源** |
-| `BuyerPubKey` / `SellerPubKey` / `ArbiterPubKey` | 三方角色公钥，顺序参与推导 2-of-3 池锁定脚本 |
-| `MinerFeeRateSatPerKB` | 池内全部交易的矿工费率（sat/KB），双方后续构造交易必须一致 |
-| `BuyerRefundSignature` | 买方已对该退款交易附加的 DER 签名 |
-
-**合理性分析**
-
-- ✅ **不携带 RefundTemplateTxID**：卖方通过 `DeriveRefundTemplateTxIDFromRequest`
-  从已完成协议验证的规范未签名 `RefundTx` 派生模板交易 TxID
-  （`Transaction.TxID().CloneBytes()`），
-  从根上消灭了"哈希与交易不一致"的多真值问题。
-- ✅ **不携带 FundingTx 原文**：资金交易 ID 和输出索引从 `RefundTx` 的 input 推导。
-  买方的资金交易此时还是私有的——只有拿到卖方退款签名后才公开（0203），
-  保证"钱进池子之前，退出通道已经双方签字"，这是本协议最重要的安全次序。
-- ✅ 买方签名先行附上，卖方验签通过才肯签自己的那份，双方都不会先暴露裸签名。
-- ✅ 费率提前锁定，避免后续任一方以费率分歧卡住状态推进。
-
----
-
-### 3.3 Kind 3 · 退款预签响应（0202）— 卖方 → 买方
-
-编码（`EncodeRefundPresignResponse`，4 元数组）：
-
-```
-[4, 13, refund_template_txid, seller_refund_signature]
-```
-
-Go 结构体 `RefundPresignResponse`：
-
-| 字段 | 含义 |
-|---|---|
-| `Version` | 主版本 4 |
-| （内嵌 kind `13`） | CBOR 层的消息种类标签，与传输层 Kind 3 呼应，防跨类重放 |
-| `RefundTemplateTxID` | 池关联 ID。**由卖方从收到的请求规范重推导，不允许调用方自填** |
-| `SellerRefundSignature` | 卖方对 `RefundTx` 的 DER 签名 |
-
-**合理性分析**
-
-- ✅ 关联 ID 由响应方重推导而非回显请求值，买方用它匹配自己保存的本地
-  `BuyerOpeningState`（应用私有状态，非 wire 报文），天然抗篡改。
-- ✅ 内嵌 kind 标签（13/14）让 CBOR 文档自带类型，即使传输层贴错 Kind 也无法跨类解码成功。
-- ✅ 买方收到后的处理由应用负责：先持久化完整 `OpeningProof` 和初始退款状态，
-  再继续后续步骤；SDK 不做任何保存。
-
----
-
-### 3.4 Kind 4 · 资金交易交付（0203）— 买方 → 卖方
-
-编码（`EncodeFundingTxDelivery`，4 元数组）：
-
-```
-[4, 14, refund_template_txid, funding_tx]
-```
-
-Go 结构体 `FundingTxDelivery`：
-
-| 字段 | 含义 |
-|---|---|
-| `Version` | 主版本 4 |
-| （内嵌 kind `14`） | CBOR 层消息种类标签 |
-| `RefundTemplateTxID` | 池关联 ID，只能从买方已验证并持久化的 OpeningProof 派生 |
-| `FundingTx` | 买方签名的资金交易原始字节；其第 0 个输出（`PoolOutputIndex = 0`）是池输出 |
-
-**合理性分析**
-
-- ✅ 这是资金交易第一次离开买方进程，时机正确：此时双方退款签名均已就位，
-  即使卖方消失，买方也可在到期后单方（配合超时锁）拿回资金。
-- ✅ 卖方验收时做三件事：交易 ID 匹配 pending 证据、第 0 输出金额/脚本符合推导值、
-  向节点提交并确认——之后才形成完整的 `OpeningProof`（含 `FundingTx`）。
-- ✅ `OpeningProof` 是 Seller 本地 opening 证据；新的 007 Claim 只携带 Seller 声明的 source amount/script、RefundTx、003 条款和 Buyer signature。
-
----
-
-### 3.5 Kind 5 · 内容请求 / 最终付款授权（003）— 买方 → 卖方
-
-外层（`EncodeSignedContentRequest`，3 元数组）：
-
-```
-[4, terms_cbor, buyer_signature]
-```
-
-内层条款（`EncodeContentRequestTerms`，无内层版本的 6 元数组）：
-
-```
-[quote_terms_hash, refund_template_txid, payment_sequence,
- seller_amount_after_sat, content_hashes_cbor, delivery_deadline_unix]
-```
-
-其中 `content_hashes_cbor` 是先对有序 hash 数组独立执行确定性 CBOR 编码、再作为 `bstr` 放入父数组的子文档（1–64 个不重复的 32 字节 hash）。
-
-Go 结构体 `ContentRequestTerms` / `SignedContentRequest`：
-
-| 字段 | 含义 |
-|---|---|
-| `TermsCBOR` | 条款规范字节，买方签名的直接对象；其 SHA-256 即 `PaymentAuthorizationHash` |
-| `BuyerSignature` | 买方对精确 TermsCBOR 的 DER 签名（密钥由 OpeningProof 的 BuyerPubKey 验证） |
-| `QuoteTermsHash` | 引用的 001 报价条款哈希，把本次购买锚定到具体报价；费用池不能替代报价 |
-| `RefundTemplateTxID` | 所在资金池的关联 ID；Buyer/Seller/Arbiter 公钥与矿工费率全部由其 OpeningProof 唯一确定，不再重复传输 |
-| `PaymentSequence` | 本次授权对应的**目标**付款序号；接收方验证它等于当前已接受序号 + 1，且不超过 0xfffffffe |
-| `SellerAmountAfterSat` | 付款后卖方的**绝对累计金额**（聪）；批次价格必须等于它减去当前状态的卖方金额 |
-| `ContentHashesCBOR` | 有序内容 hash 批次（1–64 项）：等于报价 SeedHash 的项即 seed，其余必须是该 seed 提交过的块；顺序是授权的一部分，重复即拒绝 |
-| `DeliveryDeadlineUnix` | 交付截止时间；不得晚于报价过期时间 |
-
-**合理性分析**
-
-- ✅ 这份文件是整个体系的枢纽：一个付款序号授权一组内容 hash，价格逐项推导后安全累加，
-  其哈希贯穿 004（交付绑定）、005（付款绑定）、007（仲裁锚定）。整个批次原子成功或原子失败。
-- ✅ 不再重复携带公钥与费率：这些值已由 RefundTemplateTxID 对应且不可修改的 OpeningProof
-  唯一确定。任何密码学验签都必须同时持有 OpeningProof
-  （`VerifySignedContentRequestForOpening` / 完整入口 `VerifySignedContentRequest`），
-  消除了“不一致时相信谁”的第二真值。
-- ✅ 内容类型从证据推导：hash 等于 SeedHash 即 seed，否则必须出现在 seed 的块列表中；
-  发送方没有任何声明类型的字段。
-- ✅ 序号连续性（目标 = 当前 + 1）+ 绝对累计金额单调递增，使重复/乱序/回退的授权全部失效，
-  天然防重放；stale、跳号、耗尽都返回稳定错误。
-- ✅ 截止时间双向上限约束（未来且 ≤ 报价过期），堵住"永久有效授权"。
-
----
-
-### 3.6 Kind 6 · 内容交付（004）— 卖方 → 买方
-
-外层（`EncodeSignedContentDelivery`，固定 4 元数组；不存在单独的 DeliveryTerms 层）：
-
-```
-[4, payment_authorization_hash, seller_payment_authorization_hash_signature,
- content_payloads_cbor]
-```
-
-其中 `content_payloads_cbor` 同样是独立确定性 CBOR 编码后作为 `bstr` 嵌入的子文档（1–64 个非空 payload，单项不得超过一个 MasterSeed 块长）。
-
-Go 结构体 `SignedContentDelivery`：
-
-| 字段 | 含义 |
-|---|---|
-| `PaymentAuthorizationHash` | 所响应的 003 条款哈希（32 字节），把交付钉死到一次授权；也是应用路由 004 到本地原始 003 的索引 |
-| `SellerPaymentAuthorizationHashSignature` | 卖方对**精确 32 字节哈希**的普通消息签名（SignMessage：内部再 SHA-256 一次，low-S DER）；外壳版本不入签，不签 payload、hex 或 CBOR 包装 |
-| `ContentPayloadsCBOR` | 有序 payload 批次，与 003 hashes 一一对应；不进入签名，但通过 hash 链间接绑定 |
-
-**合理性分析**
-
-- ✅ 大 payload 不再进入签名预映像、CBOR 编码或持久化对象：卖方只对 32 字节哈希走固定消息
-  签名路径，复制和存档成本与内容大小无关。
-- ✅ payload 未直接入签但绑定链完整：
-  `BuyerSignature → 003 TermsCBOR → ordered ContentHashesCBOR + 池 + 序号 + 金额`；
-  `SHA-256(terms_cbor) = PaymentAuthorizationHash ← SellerPaymentAuthorizationHashSignature`；
-  `ContentPayloadsCBOR[i] → SHA-256 → ContentHashesCBOR[i]`。
-  因此接收方必须逐项验证数量、顺序、hash 与长度——任一项错误整批拒绝，绝不部分接受。
-- ✅ 004 不携带池 ID 或内容 hashes：它们都能由授权哈希对应的本地保存 003 恢复；
-  本地找不到 003 时只能暂存/死信或请求重发，不允许从 payload 猜测订单或费用池。
-- ⚠️ 004 不自带时间：时效完全继承自所引用的 003 授权，按验收方本地 UTC 判定；
-  004 不能证明买方在截止前实际收到内容，只证明卖方对该授权给出了可验证 payload。
-
----
-
-### 3.7 Kind 7 · 累计付款更新（005）— 买方 → 卖方
-
-编码（`EncodePaymentUpdate`，3 元最小凭证数组）：
-
-```
-[4, payment_authorization_hash, buyer_transaction_signature]
-```
-
-切换前的 v4 五元容器（含 `refund_template_txid` 与 `unsigned_state_tx_raw`）一律严格拒绝，不存在按长度选择的旧 decoder。
-
-Go 结构体 `PaymentUpdate`：
-
-| 字段 | 含义 |
-|---|---|
-| `Version` | 主版本 4 |
-| `PaymentAuthorizationHash` | 绑定的 003 授权哈希——应用查找键：接收方先用它取回保存的精确原始 003；哈希不可解码出池 ID、金额或交易 |
-| `BuyerTransactionSignature` | 买方对双方本地确定性重建的未签名状态交易的 DER 签名（重建输入：OpeningProof + previous PaymentState + 003 目标序号/金额），与交易分离传输 |
-
-**合理性分析**
-
-- ✅ "交易本地重建 + 分离签名"是全程铁律：线上不传输池 ID、未签名交易或半签名交易。
-  双方都调用唯一的 `BuildPaymentUpdate` 从相同显式输入确定性重建同一笔状态交易；
-  只有对 Seller 重建出的精确交易验签成功，005 才成立。授权哈希是内容寻址键，
-  不是池 ID，也不是访问令牌；找不到原始 003 就不能验收。
-- ✅ 序号与卖方累计金额以 Buyer 已签的 003 为业务授权真值；输入 outpoint、三输出
-  （买方/卖方/仲裁人分配）、费用和 locktime 以 OpeningProof、previous state 与
-  MultisigPool v4 构造规则为交易真值。005 不携带金额，也不存在第二份候选交易表示。
-- ✅ 卖方 `AcceptPayment` 的次序是"验原始 003 → 交叉核对 DeliveryState/opening/
-  previous → 本地重建 → 验买方签名 → 自己补签 → 合并完整交易后返回"，
-  广播与记录结果是调用方应用的职责；SDK 不提交节点，也不维护"本地领先于链"之类的运行状态。
-- ⚠️ unsigned payment state ≠ RefundTemplate：二者可花费同一费用池来源，但不是
-  同一笔交易，不能互换或复用签名。007 与 005 一样只提交原始证据，candidate 由
-  Seller 与 Arbiter 通过同一个 pool builder 独立重建。
-
----
-
-### 3.8 Kind 8 · 仲裁请求（007）— 卖方 → 仲裁方
-
-编码（`MarshalRequest`，五元数组）：
-
-```
-[4, 8, arbitration_claim_cbor, seller_claim_signature, content_payloads_cbor]
-```
-
-`arbitration_claim_cbor` 是无版本、无 type 的五元子文档：
-
-```
-[pool_output_satoshis, pool_output_locking_script, refund_template_raw,
- terms_cbor, buyer_signature]
-```
-
-卖方签名域严格为 deterministic-CBOR(`[4, 8, exact_claim_cbor]`)；签名只证明卖方提交了精确 source context、RefundTx、Buyer 条款和 Buyer 授权。Claim 不携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复 RefundTemplateTxID 或 Seller transaction signature。payload 由 `terms_cbor` 内的有序 `content_hashes_cbor` 密码学绑定；仲裁费不在 Kind 8 中——只有仲裁方收到并逐项验证 payload 之后才由应用确定费用。
-
-仲裁方严格恢复 `[Buyer, Seller, Arbiter]` 顺序的规范 P2MS 脚本，验证 Buyer 对精确 `terms_cbor` 的签名，并由 RefundTx 原文推导 `RefundTemplateTxID` 与 003 条款比较。它逐项验证 payload 数量、顺序、大小、canonical CBOR 和 SHA-256；payload 是本次托管事实，不是 Quote 重新定价输入。
-
-source amount/script 是卖方签名承担的离线声明。SDK 不证明它对应链上 FundingTx output，不查询确认数或 UTXO 未花费状态；错误 source context 会使最终交易不可花费，风险由卖方负责对账。
-
-### 3.9 Kind 9 · 仲裁回执响应（007）— 仲裁方 → 卖方
-
-编码（`MarshalResponse`，四元数组）：
-
-```
-[4, 9, arbitration_receipt_cbor, arbiter_receipt_signature]
-```
-
-`arbitration_receipt_cbor` 是无版本、无 type 的三元子文档：
-
-```
-[arbitration_claim_id, arbiter_amount_sat, arbiter_transaction_signature]
-```
-
-其中：
-
-- `arbitration_claim_id = SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))`，长度固定 32 字节；
-- `arbiter_amount_sat` 是本次状态交易分配给仲裁方的绝对金额，成功响应必须为正数；
-- `arbiter_transaction_signature` 是对 Seller 可独立重建 candidate 的 `ForkID|All` 交易签名，绑定 input、sequence、locktime 和三个输出脚本与金额。
-
-候选交易固定三个资金输出：`output[0]` 为 Buyer P2PKH（扣除 Seller、Arbiter 与既定矿工费后的余额），`output[1]` 为 Seller P2PKH（Buyer 已授权的 `SellerAmountAfterSat`），`output[2]` 为 Arbiter P2PKH（本次回执中的 `ArbiterAmountSat`）。金额守恒：`Buyer + Seller + Arbiter + RefundFee = PoolOutputSatoshis`。
-
-仲裁方签名域严格为 deterministic-CBOR(`[4, 9, exact_receipt_cbor]`) 的普通消息签名。它把精确 Claim ID、精确仲裁金额和精确交易签名字节绑定在一起；交易签名继续负责授权真实池交易。两种签名职责不同，不能互相替代，也不能用回执签名直接填入 2-of-3 解锁脚本。
-
-应用固定执行 `PreparePayment(request, blockHeight, arbiterAmountSat) → 原子持久化 exact request/payload/Claim ID/费用 → SignPreparedPayment → 原子持久化 exact canonical Kind 9 bytes → 发送`。费用由应用先按策略计算（例如按 exact `len(ContentPayloadsCBOR)` 整数阶梯计价），SDK 只验证正数与余额，不注入任何费率策略。SDK 在持久化前绝不产生任何签名。重放以 exact 字节为门槛：只有 Claim ID 与 exact Kind 8 字节完全相同才重发已保存的响应字节，不重新计价、不重签；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层 Seller signature 或 payload 不同时，先用已冻结费用完整执行 PreparePayment——验证失败按 invalid evidence 拒绝且不计冲突，完全有效的变体才是重复证据冲突；不同 Claim ID 建立独立记录。卖方收到响应后从 Claim primitives 独立重算 Claim ID 并比较，从 pool script 恢复 Arbiter 公钥验证回执消息签名，用回执金额调用唯一 candidate builder 重建交易并验证仲裁交易签名，最后才生成 Seller transaction signature，并通过 `MergeArbitratedPoolSellerArbiterSignatures` 合并。旧五元 Kind 9 被严格拒绝；Kind 9 只表达成功响应，拒绝路径走应用错误通道。广播、retention、幂等和重试由应用负责；Buyer 取件的 wire 与签名域已由 SDK 通过 008 的 Kind 10/11 固定（见 §3.10/§3.11），存储、nonce 去重和传输仍由应用负责。
-
----
-
-### 3.10 Kind 10 · 托管内容取回请求（008）— 买方 → 仲裁方
-
-编码（`MarshalContentRetrievalRequest`，五元数组，最大 330 字节）：
-
-```
-[4, 10, arbitration_claim_id, retrieval_nonce, buyer_retrieval_signature]
-```
-
-字段约束：
-
-- `arbitration_claim_id`：32 字节，即 Seller 托管记录的 Claim ID
-  `SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))`；
-- `retrieval_nonce`：32 字节，禁止全零，由买方**应用**用密码学安全随机源生成后显式传入 SDK；
-- `buyer_retrieval_signature`：1–256 字节 DER 签名。
-
-买方签名域严格为 deterministic-CBOR(`[4, 10, claim_id, nonce]`)，经固定 `SignMessage` 路径（内部再 SHA-256 一次，low-S DER）。不签 Claim ID 裸 bytes、nonce 裸 bytes、字符串拼接、hex、JSON、完整五元请求或仲裁交易 sighash。
-
-**合理性分析**
-
-- ✅ Kind 10 不携带 BuyerPubKey、RefundTemplateTxID、PaymentAuthorizationHash、OpeningProof、TermsCBOR 或 ClaimCBOR：仲裁方从 Claim ID 对应的已存 Claim 恢复 Buyer 公钥验签，Claim ID 本身不是 bearer token。
-- ✅ Buyer 无需 Seller Claim 签名、payload 或 Kind 9——只凭本地 OpeningProof + 精确签名 003 就能通过共享 builder 得到相同 Claim ID 并签名。
-- ✅ nonce 是请求重放键而非长期 token：同一 `(ClaimID, Nonce)` 只能被应用原子占用一次；超时后换新 nonce 重签即可。
-- ⚠️ 取件是事后恢复：builder 不重新应用"003 delivery deadline 未过"或"refund 未到期"；这些时间门禁在 Arbiter 签署 Kind 9 之前已经执行。
-
-### 3.11 Kind 11 · 托管内容取回响应（008）— 仲裁方 → 买方
-
-编码（`MarshalContentRetrievalResponse`，四元数组，上限 = 3 + (5+16,843,609) + (3+568) = 16,844,188 字节）：
-
-```
-[4, 11, exact_arbitration_request_cbor, exact_arbitration_response_cbor]
-```
-
-两个子文档都是 `bstr` 嵌入的**原样字节**：
-
-- `exact_arbitration_request_cbor` 是托管库中保存的 exact canonical Kind 8（含 ClaimCBOR、SellerClaimSignature、ContentPayloadsCBOR）；
-- `exact_arbitration_response_cbor` 是同一条记录中已持久化的 exact canonical Kind 9（含 Receipt 与 ArbiterReceiptSignature）。
-
-外壳不新增第三条 Arbiter 签名，因为证据链已经闭合：
-
-```
-SellerClaimSignature   -> exact ClaimCBOR -> Buyer signed TermsCBOR -> ordered content hashes
-ArbiterReceiptSignature-> exact ReceiptCBOR -> same Claim ID -> fee + Arbiter transaction signature
-ContentPayloadsCBOR[i] -> SHA-256 -> ordered content hashes[i]
-```
-
-Buyer 必须整链验证：strict decode 两份内嵌文档 → 从 Kind 8 Claim 重算 Claim ID 并与 Kind 10 和 Kind 9 Receipt 同时比较 → 从 pool script 恢复角色公钥验 Seller/Arbiter 签名 → 用回执费用重建 candidate 验证交易签名 → payload 数量/顺序/hash 复核 → 本地 expected ClaimCBOR 与内嵌 ClaimCBOR **逐字节相等**。payload 只在内嵌 Kind 8 中出现一次；Kind 11 不重复 claim_id、payload、Receipt 或任何公钥材料。
-
-**合理性分析**
-
-- ✅ 内嵌原文而非重编码：返回值必须与持久化字节逐字节相等，不存在第二份托管真值。
-- ✅ 拒绝不编码进 Kind 11：NotFound/NotReady/Unauthorized/NonceReused/Gone 全部走应用错误通道，不存在 optional status union。
-- ✅ 时间无关验收：已签署托管证据在 deadline/refund 成熟之后仍然可验证、可取回（受 retention 约束），不需要假时钟或假区块高度。
-
----
-
-## 4. 贯穿全局的三条主线
-
-### 4.1 关联 ID：RefundTemplateTxID
-
-```
-规范未签名 RefundTx（预签退款交易字节）
-   └── Transaction.TxID().CloneBytes() ──► RefundTemplateTxID = 资金池统一关联 ID
-                       ├── 0202/0203/007 报文的路由键（005 改由授权哈希路由，应用先查回原始 003 再取池 ID）
-                       ├── 双方本地开池证据记录（应用数据库）的主键
-                       ├── 买方本地 BuyerOpeningState（应用私有状态）的键
-                       └── 付款状态链（PaymentState.RefundTemplateTxID）的归属标识
-```
-
-规则：凡能从 `RefundTx` 推导的地方一律不重复传；凡携带它的报文都禁止全零值。
-
-### 4.2 授权链：一份 003 贯穿始终
-
-```
-001 报价 ──(QuoteTermsHash)──► 003 授权 ──(SHA-256 = PaymentAuthorizationHash)
-                                   │
-                     ┌─────────────┼─────────────┐
-                     ▼             ▼             ▼
-                004 交付      005 付款更新     007 仲裁请求
-             （卖方签什么）  （买方为什么付）  （仲裁裁什么）
-```
-
-### 4.3 签名矩阵
-
-| 报文/对象 | 签名人 | 覆盖内容 |
-|---|---|---|
-| 001 条款 | 卖方 | TermsCBOR |
-| 退款交易 | 买方 + 卖方 | 退款交易 sighash（各出一份，合入解锁脚本） |
-| 003 条款 | 买方 | TermsCBOR |
-| 004 授权哈希 | 卖方 | 精确 32 字节 PaymentAuthorizationHash（裸消息签名，不含 payload） |
-| 005 状态交易 | 买方（线上）→ 卖方合并 | 本地重建交易的 sighash（wire 只传哈希+签名） |
-| 007 Claim | 卖方 | 精确 Claim signing domain `[4,8,claim_cbor]` |
-| 007 回执 | 仲裁方 | 精确回执 signing domain `[4,9,receipt_cbor]` |
-| 007 候选交易 | Seller + Arbiter（各自独立重建） | 同一 canonical candidate 的 `ForkID|All` sighash |
-| 008 取件请求 | 买方 | 精确取件 signing domain `[4,10,claim_id,nonce]` |
-| 008 响应外壳 | （无新签名） | 只封装已签的 exact Kind 8/9，Buyer 验证内嵌 Seller/Arbiter 全链签名 |
-
----
-
-## 5. 006 关闭为何没有报文
-
-无条件关闭（006）复用既有数据结构，在 API 层传递而非定义新的线上类型：
-
-1. 买方 `BuildImmediateClose` → 产出 `*pool.UnsignedPayment` + 买方签名
-   （`PaymentSequence = ^uint32(0)` 表示终态）。
-2. 卖方 `SignImmediateClose` → 补卖方签名，返回 `*pool.SignedPayment`。
-3. 买方 `CompleteImmediateClose` → 复核完整终态交易并返回；广播与落库由应用执行。
-
-理由：关闭交易与 005 状态交易同构，只是序号为终态哨兵；引入新报文只会增加一套
-编解码与校验面，无安全增益。到期退款路径同理——直接组装 OpeningProof 中已存的
-双方退款签名广播，无需新报文。
-
----
-
-## 6. 合理性审查汇总
-
-| # | 报文 | 结论 | 备注 |
+| Kind | 统一名称 | 方向 | 业务规格 |
 |---:|---|---|---|
-| 1 | 001 报价 | ✅ 合理 | 文件名排除在签名外且有消毒；仲裁人白名单前置 |
-| 2 | 0201 预签请求 | ✅ 合理 | 无冗余哈希字段；FundingTx 延迟公开是核心安全次序 |
-| 3 | 0202 预签响应 | ✅ 合理 | 关联 ID 重推导 + 内嵌 kind + 幂等重放 |
-| 4 | 0203 资金交付 | ✅ 合理 | 双方退款签名齐备后才公开资金交易 |
-| 5 | 003 内容请求 | ✅ 合理 | 单一目标序号 + 绝对累计金额；身份/费率由 OpeningProof 唯一确定；一个序号授权一批内容 |
-| 6 | 004 内容交付 | ✅ 合理 | 裸授权哈希签名 + payload 间接绑定；批次原子验收（注意必须逐项校验 hash） |
-| 7 | 005 付款更新 | ✅ 合理 | 最小凭证：授权哈希 + 买方对本地重建交易的分离签名；哈希仅作查找键不可解码 |
-| 8 | 007 仲裁请求 | ✅ 合理 | Seller Claim + 精确 payload；仲裁方验证并托管后独立构造 |
-| 9 | 007 回执响应 | ✅ 合理 | Claim ID + 正仲裁费 + 交易签名三元回执；回执签名与交易签名职责分离 |
-| 10 | 008 取件请求 | ✅ 合理 | Claim ID 路由 + nonce 重放键 + Buyer 签名鉴权；不携带任何可推导字段 |
-| 11 | 008 取回响应 | ✅ 合理 | 内嵌 exact Kind 8/9 原文；无新外层签名但证据链完整闭合，payload 只出现一次 |
+| 1 | `FileQuote` | Seller → Buyer | 001 |
+| 2 | `RefundPresignRequest` | Buyer → Seller | 0201 |
+| 3 | `RefundPresignResponse` | Seller → Buyer | 0202 |
+| 4 | `FundingTransactionDelivery` | Buyer → Seller | 0203 |
+| 5 | `ContentRequest` | Buyer → Seller | 003 |
+| 6 | `ContentDelivery` | Seller → Buyer | 004 |
+| 7 | `PaymentUpdate` | Buyer → Seller | 005 |
+| 8 | `ArbitrationRequest` | Seller → Arbiter | 007 |
+| 9 | `ArbitrationResponse` | Arbiter → Seller | 007 |
+| 10 | `ContentRetrievalRequest` | Buyer → Arbiter | 008 |
+| 11 | `ContentRetrievalResponse` | Arbiter → Buyer | 008 |
 
-整体评价：报文集合没有冗余类型，每个字段要么被签名覆盖、要么可从签名材料推导、
-要么明确标注为非经济事实（如 RecommendedFilename）。"单一真值 + 分离签名 +
-严格规范编码 + 幂等重放"四个纪律在全部十一类报文中贯彻一致。
-Buyer 关池不在协议内：协商走 006，或等 nLockTime 后广播 002 的预签名 RefundTx。
+002 的三个子步骤继续保持三个独立 wire Kind。006 继续复用交易构造与签名 API，
+不增加 wire Kind。
+
+### 4.1 十一种完整 wire 外壳
+
+```text
+Kind 1  = [1, 1,
+  file_quote_terms_cbor, seller_public_key,
+  seller_file_quote_terms_signature]
+
+Kind 2  = [1, 2,
+  refund_template_raw,
+  buyer_public_key, seller_public_key, arbiter_public_key,
+  miner_fee_rate_satoshis_per_kilobyte,
+  buyer_refund_transaction_signature]
+
+Kind 3  = [1, 3,
+  refund_template_txid, seller_refund_transaction_signature]
+
+Kind 4  = [1, 4,
+  refund_template_txid, funding_transaction_raw]
+
+Kind 5  = [1, 5,
+  payment_authorization_cbor,
+  buyer_payment_authorization_signature]
+
+Kind 6  = [1, 6,
+  content_delivery_cbor,
+  seller_content_delivery_signature,
+  content_payloads_cbor]
+
+Kind 7  = [1, 7,
+  payment_authorization_id,
+  buyer_payment_transaction_signature]
+
+Kind 8  = [1, 8,
+  arbitration_claim_cbor,
+  seller_arbitration_claim_signature,
+  content_payloads_cbor]
+
+Kind 9  = [1, 9,
+  arbitration_receipt_cbor,
+  arbiter_arbitration_receipt_signature]
+
+Kind 10 = [1, 10,
+  content_retrieval_request_cbor,
+  buyer_content_retrieval_request_signature]
+
+Kind 11 unavailable = [1, 11,
+  content_retrieval_result_cbor,
+  arbiter_content_retrieval_result_signature]
+
+Kind 11 available = [1, 11,
+  content_retrieval_result_cbor,
+  arbiter_content_retrieval_result_signature,
+  content_payloads_cbor]
+```
+
+完整外壳负责传输和严格分发；所有 `*_cbor` 认证文档的精确内容、ID 与签名对象在后文定义。
 
 ---
 
-## 附：代码索引
+## 5. Kind 1 · FileQuote
 
-| 内容 | 位置 |
-|---|---|
-| Kind 定义与 Marshal/Unmarshal 分发 | `wire/wire.go:26`、`wire/wire.go:67` |
-| 报价结构与编码 | `bitfs/messages.go`、`bitfs/quote.go:71` |
-| 内容请求/交付结构与编码 | `bitfs/content.go:88`、`bitfs/content.go:252` |
-| 池报文结构体 | `pool/types.go:85`–`pool/types.go:146` |
-| 池报文 CBOR 编解码 | `pool/cbor.go` |
-| 007 Claim/回执与两段式签名工作流 | `arbitration/workflow.go` |
-| 仲裁请求/回执响应与验证工作流 | `arbitration/workflow.go:50`–`arbitration/workflow.go:151` |
-| 008 Kind 10/11 编解码、托管证据验证与取件签名域 | `arbitration/content_retrieval.go` |
-| 共享 Claim builder（Seller 007 与 Buyer 008 同源） | `arbitration/workflow.go`（`BuildClaimFromAuthorization`） |
-| 买方工作流（001–006 + 008 取件） | `buyer/workflow.go` |
-| 卖方工作流（001–007） | `seller/workflow.go` |
-| CDDL 规范 | `spec/v4/{bitfs,content,pool,payment,arbitration}.cddl` |
+### 5.1 认证条款
+
+```text
+file_quote_terms_cbor = deterministic-CBOR([
+  seed_hash,
+  buyer_public_key,
+  seed_price_satoshis,
+  full_block_price_satoshis,
+  file_size_bytes,
+  quote_expires_at_unix_seconds,
+  supported_arbiter_public_keys_cbor,
+  recommended_filename
+])
+
+file_quote_terms_id = SHA-256(file_quote_terms_cbor)
+
+seller_file_quote_terms_signature =
+  SignWireDocument(seller_private_key, 1, 1, file_quote_terms_cbor)
+```
+
+### 5.2 完整报文
+
+```text
+[1, 1,
+  file_quote_terms_cbor,
+  seller_public_key,
+  seller_file_quote_terms_signature
+]
+```
+
+`recommended_filename` 虽然是经过 sanitize 的非经济展示字段，但它是 Seller 提供的
+内容描述，因此进入 `file_quote_terms_cbor` 并由 Seller 一起签名。sanitize 负责路径安全，
+签名负责来源真实性，两者职责不同。Seller 必须先 sanitize，再编码和签名；Buyer 只验证
+收到的字段已经满足同一 sanitize 规则，不能验签后静默改写。由于它进入条款，文件名不同的
+两份报价具有不同的 `file_quote_terms_id`。`seller_public_key` 仍用于建立和验证报价签名身份。
+
+---
+
+## 6. Kind 2 · RefundPresignRequest
+
+```text
+[1, 2,
+  refund_template_raw,
+  buyer_public_key,
+  seller_public_key,
+  arbiter_public_key,
+  miner_fee_rate_satoshis_per_kilobyte,
+  buyer_refund_transaction_signature
+]
+```
+
+`buyer_refund_transaction_signature` 是退款交易签名，不是普通
+`SignMessage` 签名。接收方必须从 `refund_template_raw` 验证资金来源、角色顺序、
+锁定脚本、金额、费率和退款条件；不另造一份重复的普通消息签名。
+
+Kind 2 不再增加 `SignWireDocument`。Buyer 交易签名的验证输入并不只有
+`refund_template_raw`：固定 ForkID transaction sighash 还绑定待花费资金池 source output
+的 amount 与 locking script，而它们由 Kind 2 的其他字段唯一派生：
+
+```text
+[buyer_public_key, seller_public_key, arbiter_public_key]
+  -> pool_output_locking_script
+
+[refund_template_raw, miner_fee_rate_satoshis_per_kilobyte]
+  -> pool_output_satoshis
+
+[refund_template_raw, pool_output_locking_script, pool_output_satoshis]
+  -> buyer_refund_transaction_signature
+```
+
+Seller 必须先用全部 Kind 2 字段重建并验证这组 source context，再验 Buyer 交易签名，
+最后才允许生成 Seller 交易签名。因此任意替换角色公钥、费率或退款模板，都会造成规范
+重建不一致或 Buyer 交易签名验证失败。
+
+这条结论带有严格前提：Kind 2 将来若增加一个既不能从退款交易/source context 推导，
+也不进入 transaction sighash 的业务字段，就不能继续依赖现有交易签名；届时必须删除该
+冗余字段，或新增独立的 Buyer 认证文档和 `SignWireDocument`。
+
+保持现有业务原意：此时不传 FundingTransaction，必须先取得 Seller 的退款交易签名。
+
+---
+
+## 7. Kind 3 · RefundPresignResponse
+
+```text
+[1, 3,
+  refund_template_txid,
+  seller_refund_transaction_signature
+]
+```
+
+```text
+ValidateRefundTemplate(refund_template_raw)
+
+refund_template_txid =
+  ParseTransaction(refund_template_raw).TxID().CloneBytes()
+```
+
+这里不存在第二份退款模板字节。`refund_template_raw` 就是 Kind 2 携带并由
+OpeningProof 原样保存的规范未签名退款交易：
+资金池角色签名与交易原文分离，input unlocking script 必须为空。只有通过固定 builder
+逐字段重建和逐字节 canonical 校验后，才允许对同一份 `refund_template_raw` 调用固定
+交易库的 `TxID().CloneBytes()`。
+
+`refund_template_txid` 必须由 Seller 从已验证的 Kind 2 重新派生，不能由调用方填写。
+`refund_template_raw` 与 `refund_template_txid` 使用同一词根，后者是前者通过固定
+交易 TxID 算法得到的派生 ID，而不是第二份模板。
+`seller_refund_transaction_signature` 仍是退款交易 sighash 签名。
+
+原 CBOR 内层 Kind `13` 删除；wire Kind `3` 是唯一报文类型编号。
+
+---
+
+## 8. Kind 4 · FundingTransactionDelivery
+
+```text
+[1, 4,
+  refund_template_txid,
+  funding_transaction_raw
+]
+```
+
+`funding_transaction_raw` 包含资金交易自身所需的交易签名。Seller 必须验证其交易 ID、
+资金池输出索引、金额和 locking script 与已保存的开池证据一致。
+
+原 CBOR 内层 Kind `14` 删除；wire Kind `4` 是唯一报文类型编号。
+
+---
+
+## 9. Kind 5 · ContentRequest
+
+### 9.1 付款授权文档
+
+003 条款结构的实际协议语义是“Buyer 的最终付款授权”，因此统一命名为
+`payment_authorization`：
+
+```text
+payment_authorization_cbor = deterministic-CBOR([
+  file_quote_terms_id,
+  refund_template_txid,
+  payment_sequence,
+  seller_amount_after_satoshis,
+  content_hashes_cbor,
+  delivery_deadline_unix_seconds
+])
+
+payment_authorization_id = SHA-256(payment_authorization_cbor)
+
+buyer_payment_authorization_signature =
+  SignWireDocument(buyer_private_key, 1, 5, payment_authorization_cbor)
+```
+
+### 9.2 完整报文
+
+```text
+[1, 5,
+  payment_authorization_cbor,
+  buyer_payment_authorization_signature
+]
+```
+
+报价引用键统一命名为 `file_quote_terms_id`，付款授权引用键统一命名为
+`payment_authorization_id`：两者都是对应认证文档的 SHA-256，只使用这一套
+对象命名，不保留任何哈希式旧名。
+
+---
+
+## 10. Kind 6 · ContentDelivery
+
+### 10.1 交付认证文档
+
+```text
+content_delivery_cbor = deterministic-CBOR([
+  payment_authorization_id
+])
+
+seller_content_delivery_signature =
+  SignWireDocument(seller_private_key, 1, 6, content_delivery_cbor)
+```
+
+### 10.2 完整报文
+
+```text
+[1, 6,
+  content_delivery_cbor,
+  seller_content_delivery_signature,
+  content_payloads_cbor
+]
+```
+
+payload 不直接进入签名预映像，绑定链保持现有业务原意：
+
+```text
+Seller signature
+  -> content_delivery_cbor
+  -> payment_authorization_id
+  -> payment_authorization_cbor
+  -> ordered content_hashes_cbor
+  -> SHA-256(content_payloads[i])
+```
+
+统一 Kind 6 签名上下文认证的是精确 `content_delivery_cbor`，不改变交付内容
+和付款授权的对应关系。
+
+---
+
+## 11. Kind 7 · PaymentUpdate
+
+```text
+[1, 7,
+  payment_authorization_id,
+  buyer_payment_transaction_signature
+]
+```
+
+`buyer_payment_transaction_signature` 继续覆盖 Buyer/Seller 根据 OpeningProof、previous
+PaymentState 和 `payment_authorization_cbor` 本地确定性重建的状态交易 sighash。
+
+Kind 7 不增加普通消息签名：付款意图已经由 Kind 5 的 Buyer 签名表达，花费授权由本字段的
+交易签名表达。`payment_authorization_id` 是查找精确 Kind 5 的内容寻址键。
+
+---
+
+## 12. Kind 8 · ArbitrationRequest
+
+### 12.1 仲裁 Claim 文档
+
+```text
+arbitration_claim_cbor = deterministic-CBOR([
+  pool_output_satoshis,
+  pool_output_locking_script,
+  refund_template_raw,
+  payment_authorization_cbor,
+  buyer_payment_authorization_signature
+])
+
+arbitration_claim_id = SHA-256(arbitration_claim_cbor)
+
+seller_arbitration_claim_signature =
+  SignWireDocument(seller_private_key, 1, 8, arbitration_claim_cbor)
+```
+
+`arbitration_claim_cbor` 本身就是 Claim 的唯一业务字节和 ID 来源。Seller 通过全局唯一的
+`SignWireDocument(..., 1, 8, arbitration_claim_cbor)` 认证它，不再为 Claim 单独定义一套
+字段重组算法：
+
+```text
+arbitration_claim_id = SHA-256(arbitration_claim_cbor)
+seller_arbitration_claim_signature =
+  SignWireDocument(seller_private_key, 1, 8, arbitration_claim_cbor)
+```
+
+因此 `arbitration_claim_cbor` 与 `arbitration_claim_id` 在名称、字节来源和验证路径上
+完全对应。
+
+### 12.2 完整报文
+
+```text
+[1, 8,
+  arbitration_claim_cbor,
+  seller_arbitration_claim_signature,
+  content_payloads_cbor
+]
+```
+
+`content_payloads_cbor` 继续通过 Buyer 已签的 `payment_authorization_cbor` 中的有序
+content hashes 传递绑定，不重复加入 Claim。
+
+---
+
+## 13. Kind 9 · ArbitrationResponse
+
+### 13.1 仲裁 Receipt 文档
+
+```text
+arbitration_receipt_cbor = deterministic-CBOR([
+  arbitration_claim_id,
+  arbiter_amount_satoshis,
+  arbiter_payment_transaction_signature
+])
+
+arbiter_arbitration_receipt_signature =
+  SignWireDocument(arbiter_private_key, 1, 9, arbitration_receipt_cbor)
+```
+
+`arbiter_payment_transaction_signature` 是对本地重建仲裁付款交易的原生交易签名；
+`arbiter_arbitration_receipt_signature` 是对 Claim ID、仲裁金额和交易签名字节的普通
+消息签名。两者职责继续严格分离。
+
+### 13.2 完整报文
+
+```text
+[1, 9,
+  arbitration_receipt_cbor,
+  arbiter_arbitration_receipt_signature
+]
+```
+
+Receipt 有意保持为无版本、无 Kind 的三元业务子文档。版本和 Kind 只存在于完整 wire
+外层，并由统一 `SignWireDocument(..., 1, 9, arbitration_receipt_cbor)` 纳入签名上下文。
+
+---
+
+## 14. Kind 10 · ContentRetrievalRequest
+
+### 14.1 取件请求文档
+
+```text
+content_retrieval_request_cbor = deterministic-CBOR([
+  arbitration_claim_id,
+  retrieval_nonce
+])
+
+content_retrieval_request_id =
+  SHA-256(content_retrieval_request_cbor)
+
+buyer_content_retrieval_request_signature =
+  SignWireDocument(buyer_private_key, 1, 10, content_retrieval_request_cbor)
+```
+
+### 14.2 完整报文
+
+```text
+[1, 10,
+  content_retrieval_request_cbor,
+  buyer_content_retrieval_request_signature
+]
+```
+
+保持现有业务原意：
+
+- `retrieval_nonce` 为 32 字节、禁止全零，由 Buyer 应用使用 CSPRNG 生成；
+- Claim ID 用于查找托管记录，不是 bearer token；
+- Buyer 公钥从 Claim 的资金池 locking script 恢复，不在请求中重复携带；
+- nonce 不加入其他不需要交互式重放防护的报文。
+
+### 14.3 nonce 一次性与重放语义（规范性）
+
+`content_retrieval_request_cbor` 的内容寻址 ID 与 `(arbitration_claim_id,
+retrieval_nonce)` 一一对应，因此 Arbiter 以请求 ID 为键执行以下规则：
+
+1. **占用**：`not_ready`、`custody_gone`、`available` 三种应答都必须在完成
+   Buyer 鉴权之后原子占用该 `(Claim ID, Nonce)`，并把经事务选中的那份
+   Kind 11 持久化为该请求的唯一答案；验签失败的请求绝不占用。候选应答可以
+   在事务外提前签署，但"custody 状态复核 + nonce 唯一键 + exact 首次响应
+   插入"必须是同一个原子提交——只有事务选中的响应才成为协议答案，不需要
+   独立的 pending/reservation 状态，并发产生的未提交签名直接丢弃。提交时
+   必须复核 custody 状态：期间 Kind 9 落地则 NotReady 候选作废并按最新完整
+   状态重建 Available；期间内容被 retention 删除则改答 `custody_gone`。
+2. **重放**：同一 `content_retrieval_request_id` 重放时原样重发第一次持久化
+   的 Kind 11。记录状态随后发生任何变化（Kind 9 落地、留存期删除）都不得
+   升级或重新评估已应答的请求：曾经捕获的 `not_ready` 请求永远不会再变成
+   下载授权。
+3. **新 nonce**：Buyer 收到 `not_ready` 后必须生成新 nonce 和新 Kind 10 签名
+   重试；旧 nonce 不再产生任何新的可交付结果。
+4. **唯一例外** `seller_arbitration_not_received`：没有 Claim 就无法恢复
+   Buyer 公钥完成鉴权。该分支不占用 nonce、不持久化响应；endpoint 必须对
+   随机 Claim ID 查询限流，且不得返回任何记录元数据（见 §15.6）。
+5. **retention 是幂等保证的唯一终止例外**。首次响应的重放幂等只在 custody
+   retention 生命周期内成立；nonce 去重记录至少保留到对应 custody record
+   删除，留存期满安全删除内容时，已持久化的首次响应必须与内容一起删除，
+   且提交路径必须在同一原子事务内复核 retention 状态——删除落地后，相同
+   请求只能得到签名的 `custody_gone`，绝不允许复活已删除内容。
+
+---
+
+## 15. Kind 11 · ContentRetrievalResponse
+
+Kind 11 是 Kind 10 的完整 wire 响应，不再只表达成功。它是一个由 `result` 显式判别的
+两分支 union：
+
+```text
+content_retrieval_result =
+  0  unavailable
+  1  available
+```
+
+- `unavailable`：Arbiter 当前没有可向 Buyer 交付的托管内容；
+- `available`：Arbiter 已完成允许取回内容所需的内部状态转换，直接返回文件块。
+
+两种响应都绑定同一个 `content_retrieval_request_id`，并由 Arbiter 通过 Kind 11
+`SignWireDocument` 签名。不存在“NotFound 只走未签名 HTTP error，而成功才是 wire”的
+不对称设计。
+
+### 15.1 Unavailable 原因
+
+现有业务实际存在三种不可交付原因，不能全部错误描述成“从未收到 Seller 仲裁”：
+
+```text
+content_retrieval_unavailable_reason =
+  0  seller_arbitration_not_received
+  1  seller_arbitration_not_ready
+  2  custody_gone
+```
+
+- `seller_arbitration_not_received`：不存在该 Claim ID 的 Kind 8 托管记录；
+- `seller_arbitration_not_ready`：已收到并持久化 Kind 8，但 Kind 9 尚未完成和持久化；
+- `custody_gone`：曾有完整托管记录，但已按公开 retention policy 删除内容。
+
+`custody_gone` 只有在应用保留最小 tombstone 状态，既能区分“从未收到”和“曾有但
+已删除”，又保留验证 Buyer 所需的 Claim/角色公钥关联时才能返回；如果彻底删除全部状态，
+就只能诚实返回
+`seller_arbitration_not_received`，不能凭空声称曾经托管。
+
+### 15.2 Unavailable 响应
+
+```text
+content_retrieval_result_cbor = deterministic-CBOR([
+  content_retrieval_request_id,
+  0,
+  content_retrieval_unavailable_reason
+])
+
+arbiter_content_retrieval_result_signature =
+  SignWireDocument(arbiter_private_key, 1, 11, content_retrieval_result_cbor)
+```
+
+完整 wire：
+
+```text
+[1, 11,
+  content_retrieval_result_cbor,
+  arbiter_content_retrieval_result_signature
+]
+```
+
+该分支不携带空 payload、`null` Kind 8/9、虚构 Claim、optional attachment 或占位 hash。
+Buyer 验证 request ID 和 Arbiter 签名后，把结果解释为“本次查询当前不可交付”；它不是
+Seller 永远不会仲裁的证明，也不产生退款、关池或付款状态变化。
+
+### 15.3 Available payload ID
+
+```text
+content_payloads_id =
+  SHA-256(content_payloads_cbor)
+```
+
+`content_payloads_id` 绑定本次返回的 exact deterministic CBOR，包括文件块的数量、顺序和
+每个块的原始字节。它使 Arbiter 可以签署固定大小的结果文档，而不必把大 payload 复制进
+签名预映像。它不替代 `payment_authorization_cbor` 中逐块的 `content_hashes_cbor`：前者
+证明“Arbiter 本次返回了哪一份 exact payload 集合”，后者证明“这些块是不是 Buyer 原先
+授权购买的内容”。
+
+### 15.4 Available 响应（包含文件块）
+
+```text
+content_retrieval_result_cbor = deterministic-CBOR([
+  content_retrieval_request_id,
+  1,
+  content_payloads_id
+])
+
+arbiter_content_retrieval_result_signature =
+  SignWireDocument(arbiter_private_key, 1, 11, content_retrieval_result_cbor)
+```
+
+完整 wire：
+
+```text
+[1, 11,
+  content_retrieval_result_cbor,
+  arbiter_content_retrieval_result_signature,
+  content_payloads_cbor
+]
+```
+
+`content_payloads_cbor` 就是 Buyer 请求取回的文件块，不再包装或附带完整 Kind 8/9。
+Kind 8/9 是 Seller 与 Arbiter 之间的仲裁协议证据；Arbiter 可以继续持久化并在内部用它们
+决定内容是否可取回，但它们不是 Buyer 完成内容恢复所需的 wire 数据。
+
+Buyer 收到 Available 后，直接解码 `content_payloads_cbor`，再按自己保存的
+`payment_authorization_cbor` 所承诺的有序 content hash 逐块验证。
+
+Buyer 必须同时验证：
+
+1. `content_retrieval_request_id` 等于自己保存的 exact Kind 10 认证文档 ID；
+2. Arbiter 对 `content_retrieval_result_cbor` 的普通消息签名；
+3. `content_payloads_id` 等于 exact `content_payloads_cbor` 的 SHA-256；
+4. payload 数量、顺序和每个文件块的 hash 与本地保存的
+   `payment_authorization_cbor` 完全一致。
+
+Arbiter 只签含两个 32 字节 ID 的小文档，不把最高约 16.8 MB 的 payload 复制进签名
+预映像；`content_payloads_id` 仍使签名精确绑定本次返回的完整 payload bytes。
+
+### 15.5 两个分支的严格解码
+
+Kind 11 不是按 array 长度猜测旧/新格式：decoder 必须先严格解码
+`content_retrieval_result_cbor` 的 `result`，再选择唯一分支：
+
+| `result` | result CBOR 长度 | 完整 wire 长度 | attachments |
+|---:|---:|---:|---|
+| `0 unavailable` | 3 | 4 | 无 |
+| `1 available` | 3 | 5 | `content_payloads_cbor` |
+
+任何未知 result、错误数组长度、Unavailable 携带 attachment、Available 缺少 attachment、
+attachment ID 不匹配或 trailing field 都必须拒绝，不允许 presence guessing。
+
+### 15.6 负面响应的鉴权边界
+
+当 `seller_arbitration_not_received` 为真时，Arbiter 没有 Claim，也就无法从 pool locking
+script 恢复 Buyer 公钥验证 Kind 10。这是数据依赖决定的事实，不能伪装成“已经完成 Buyer
+鉴权”。此时 Arbiter 可以对结构合法的 request ID 签署不含任何内容的负面响应，但必须：
+
+- 不返回任何 Claim、角色公钥、payload 或记录元数据；
+- 对随机 Claim ID 查询做速率限制，防止把 Arbiter 变成无限签名/查询服务；
+- 不把负面响应解释成 Buyer 身份已经验证；
+- 一旦完整记录或可验证 tombstone 存在，必须先从 Claim/保留的角色关联恢复 Buyer 公钥
+  并验证 Kind 10，才允许返回
+  `not_ready`、`gone` 的受保护状态或 `available` 内容。
+
+`Unauthorized`、Malformed、RateLimited 和内部存储错误仍属于 transport/application error，
+不能伪装成结构合法的 `unavailable` 响应。`not_received / not_ready / gone` 则是 Kind 11
+内经过 Arbiter 签名的正常协议结果。
+
+---
+
+## 16. 完整签名矩阵
+
+| 对象 | 签名人 | 精确签名输入 | 类型 |
+|---|---|---|---|
+| `file_quote_terms_cbor` | Seller | `WireSignatureInput(1, 1, file_quote_terms_cbor)` | `SignWireDocument` |
+| refund transaction | Buyer | refund transaction sighash | 交易签名 |
+| refund transaction | Seller | refund transaction sighash | 交易签名 |
+| `payment_authorization_cbor` | Buyer | `WireSignatureInput(1, 5, payment_authorization_cbor)` | `SignWireDocument` |
+| `content_delivery_cbor` | Seller | `WireSignatureInput(1, 6, content_delivery_cbor)` | `SignWireDocument` |
+| payment transaction | Buyer | rebuilt transaction sighash | 交易签名 |
+| `arbitration_claim_cbor` | Seller | `WireSignatureInput(1, 8, arbitration_claim_cbor)` | `SignWireDocument` |
+| arbitration payment transaction | Arbiter | rebuilt transaction sighash | 交易签名 |
+| `arbitration_receipt_cbor` | Arbiter | `WireSignatureInput(1, 9, arbitration_receipt_cbor)` | `SignWireDocument` |
+| `content_retrieval_request_cbor` | Buyer | `WireSignatureInput(1, 10, content_retrieval_request_cbor)` | `SignWireDocument` |
+| `content_retrieval_result_cbor` | Arbiter | `WireSignatureInput(1, 11, content_retrieval_result_cbor)` | `SignWireDocument` |
+
+统一规则不是“每个报文都额外签一次”，而是：
+
+- 普通业务声明的 CBOR 只含业务字段，统一 helper 把 domain/version/kind 纳入签名输入；
+- 花费授权签原生交易 sighash；
+- 一个签名只承担一种清楚命名的责任。
+
+---
+
+## 17. ID 与证据链
+
+```text
+file_quote_terms_cbor
+  └── SHA-256 -> file_quote_terms_id
+        └── payment_authorization_cbor
+              └── SHA-256 -> payment_authorization_id
+                    ├── content_delivery_cbor
+                    ├── Kind 7 payment lookup
+                    └── arbitration_claim_cbor
+                          └── SHA-256 -> arbitration_claim_id
+                                ├── arbitration_receipt_cbor
+                                └── content_retrieval_request_cbor
+                                      └── SHA-256 -> content_retrieval_request_id
+                                            └── content_retrieval_result_cbor
+```
+
+Kind 11 的 Available 分支另外绑定 exact payload：
+
+```text
+content_payloads_cbor
+  └── SHA-256 -> content_payloads_id
+        └── content_retrieval_result_cbor
+```
+
+`content_retrieval_request_id` 绑定请求，`content_payloads_id` 绑定响应载荷；两者分别阻止
+请求—响应错配和 payload 替换。
+
+---
+
+## 18. 严格编码与验证规则
+
+所有 encoder/decoder 必须遵守：
+
+1. RFC 8949 core deterministic CBOR；
+2. 只允许 definite-length array/bstr；
+3. 禁止 tag、float、map、未声明的 simple value 和 trailing bytes；
+4. 非 union 数组长度固定；显式 union 必须先读 discriminator，再按该分支的固定长度解码，
+   不允许按字段 presence 或数组长度猜测旧/新 shape；
+5. 解码后按唯一 encoder 重编码，必须与输入逐字节相等；
+6. 先检查 wire 最大尺寸，再分配或深度解析；
+7. 所有 exact byte slice 在 API 边界深拷贝；
+8. 所有普通消息签名先用外层版本、Kind 和 exact 子文档重建唯一
+   `WireSignatureInput`，再验证 DER、low-S 与公钥角色；
+9. hash/ID 使用不同的 Go named type，禁止把任意 `[32]byte` 静默互换；
+10. 新版本必须使用新 `WireVersion`，同一版本内禁止兼容 decoder 或字段 presence guessing。
+
+历史上未上线的旧版本迭代目录已移动到 `spec/legacy/` 归档；现行唯一
+CDDL 真值是 `spec/v1/wire-messages.cddl`。
+
+---
+
+## 19. 明确保留的业务原意
+
+本设计没有改变以下业务规则：
+
+- 三方角色和 `[Buyer, Seller, Arbiter]` 固定公钥顺序；
+- 2-of-3 MultisigPool 的交易模型；
+- 先取得双方退款签名，再公开 FundingTransaction；
+- `refund_template_txid` 是资金池统一关联 ID；
+- 一个 003 payment sequence 原子授权一个有序内容批次；
+- 004 payload 通过 003 的有序 content hashes 绑定；
+- 005 只传 authorization ID 与 Buyer 交易签名，交易由双方本地重建；
+- 007 由 Seller 提交 Claim/payload，Arbiter 验证、托管、计费并独立重建交易；
+- 仲裁费用是 Arbiter 状态交易中的正数绝对分配；
+- 008 对“不可交付/可交付”都返回 Arbiter 签名的 Kind 11；可交付分支只取回托管内容，
+  不替 Buyer 关池，不产生 005，不声明交易已经上链；
+- 006 继续通过交易 API 完成，不新增 wire Kind；
+- 广播、数据库、retention、TLS、队列和重试策略仍属于应用层。
+
+---
+
+## 20. 协议结构之外的业务建议（非规范）
+
+以下建议不进入上面的 v1 报文结构，实施前应单独做业务决策。
+
+### 20.1 Kind 10 重试与 nonce
+
+重试与重放语义已经是 §14.3 的规范性规则：三种可鉴权分支原子占用 nonce 并
+持久化首次应答、同请求重放原样返回、`not_ready` 之后必须换新 nonce、
+`not_received` 是不占用的唯一例外但仍须限流。
+
+以下仍是开放的业务建议，实施前需单独决策：
+
+- 为请求增加应用层短时有效期，避免 nonce 记录永久保存；
+- 如果未来取件会扣费或产生一次性副作用，再升级为 Arbiter 发放 server challenge。
+
+这些变化涉及计费和存储语义，因此不在本结构稿中直接加入 `expires_at` 或 server nonce。
+
+### 20.2 Kind 11 与传输机密性
+
+新增 Arbiter 响应签名只解决来源、完整性和请求—响应绑定，不提供内容机密性。
+Kind 11 仍必须通过 TLS 或等价的、验证 Arbiter 身份的安全传输发送。
+
+---
+
+## 21. 落地边界
+
+这是上线前一次性 hard switch，不提供旧/新双写、兼容 decoder、版本自动探测或 alias：
+
+1. 先冻结本文件与新的 `spec/v1/*.cddl`；
+2. 建立唯一 `protocol.WireVersion = 1`，删除其他对外协议版本常量；
+3. 统一 Kind、字段、Go 类型、函数和错误消息命名；
+4. 先生成每个认证文档、ID、签名域和完整 wire 的 golden fixtures；
+5. 再修改 encoder/decoder、workflow 和验证链；
+6. 添加跨协议域、跨版本、跨 Kind、内外 Kind 不一致、attachment 替换、请求/响应错配测试；
+7. 最后更新现行协议文档与网站，删除所有“v4 上线前 hard switch 历史”作为当前规范的表述。
+
+在 v1 冻结之后，任何改变 wire shape、签名对象、ID 算法、交易重建或验收语义的修改，
+都必须提升 `protocol.WireVersion`。
+
+---
+
+## 参考设计原则
+
+- [RFC 8949 · Deterministically Encoded CBOR](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2)
+- [RFC 9052 · COSE Structures and Process](https://www.rfc-editor.org/rfc/rfc9052.html)
+- [BIP 340 · Domain Separation](https://bips.dev/340/)
+- [RFC 9175 · Secure Request-Response Binding](https://www.rfc-editor.org/rfc/rfc9175.html#section-4)

@@ -29,7 +29,7 @@ type poolState struct {
 func (f *protocolFixture) openNamedPool(t *testing.T, satoshis uint64) *poolState {
 	t.Helper()
 	state := &poolState{funding: f.buildFunding(t, satoshis)}
-	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTx: state.funding, ExpiryLockTime: f.expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTransactionRaw: state.funding, ExpiryLockTime: f.expiry, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func (f *protocolFixture) openNamedPool(t *testing.T, satoshis uint64) *poolStat
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := f.buyer.BuildFundingTxDelivery(f.ctx, state.buyerAcc.Opening)
+	delivery, err := f.buyer.BuildFundingTransactionDelivery(f.ctx, state.buyerAcc.Opening)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestTwoPoolsKeepTheirExplicitStatesSeparate(t *testing.T) {
 func TestCrossPoolResponseHashMismatchIsRefused(t *testing.T) {
 	f := newProtocolFixture(t)
 	poolA := f.openNamedPool(t, 100000)
-	preparationB, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTx: f.buildFunding(t, 120000), ExpiryLockTime: f.expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	preparationB, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTransactionRaw: f.buildFunding(t, 120000), ExpiryLockTime: f.expiry, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestCrossPoolFundingDeliveryIsRefused(t *testing.T) {
 	poolA := f.openNamedPool(t, 100000)
 	poolB := f.openNamedPool(t, 110000)
 	// Deliver pool A's proof against pool B's presign evidence.
-	delivery, err := f.buyer.BuildFundingTxDelivery(f.ctx, poolA.buyerAcc.Opening)
+	delivery, err := f.buyer.BuildFundingTransactionDelivery(f.ctx, poolA.buyerAcc.Opening)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,17 +118,17 @@ func TestCrossPoolContentAndArbitrationEvidenceAreRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := arbitration.UnmarshalClaim(arbitrationRequest.ClaimCBOR)
+	claim, err := arbitration.UnmarshalClaim(arbitrationRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(claim.RefundTemplateRaw, poolB.sellerAcc.Opening.RefundTx) {
+	if bytes.Equal(claim.RefundTemplateRaw, poolB.sellerAcc.Opening.RefundTemplateRaw) {
 		t.Fatal("arbitration request bound to the wrong pool")
 	}
 }
 
 // Minimal 005 credentials carry no pool ID, so routing is hash-based: the
-// application looks up the exact saved 003 by PaymentAuthorizationHash and
+// application looks up the exact saved 003 by PaymentAuthorizationID and
 // only the 003's RefundTemplateTxID selects the opening. Supplying a
 // credential from one pool together with another pool's authorization must
 // never merge.
@@ -156,11 +156,11 @@ func TestCrossPoolAuthorizationLookupIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hashA, err := bitfs.PaymentAuthorizationHash(requestA.TermsCBOR)
+	hashA, err := bitfs.PaymentAuthorizationID(requestA.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hashB, err := bitfs.PaymentAuthorizationHash(requestB.TermsCBOR)
+	hashB, err := bitfs.PaymentAuthorizationID(requestB.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +227,7 @@ func TestCrossPoolArbitrationRetrievalIsRefused(t *testing.T) {
 		}
 	}
 	claimIDA := mustClaimIDOf(t, rawKind8A)
+	recordAPayloads := mustDecodeKind8(t, store.recordOf(mustHex(t, claimIDA[:])).requestBytes).ContentPayloadsCBOR
 
 	nonceA := bytes.Repeat([]byte{0x61}, 32)
 	nonceB := bytes.Repeat([]byte{0x62}, 32)
@@ -248,27 +249,54 @@ func TestCrossPoolArbitrationRetrievalIsRefused(t *testing.T) {
 	}
 
 	// 正向：完全匹配的组合各自取回自己的记录。
-	first11, err := store.handleContentRetrieval(raw10A, f.arbiter)
+	first11, err := store.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second11, err := store.handleContentRetrieval(raw10B, f.arbiter)
+	second11, err := store.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(first11, second11) {
 		t.Fatal("two pools returned one identical custody record")
 	}
-	if !bytes.Contains(first11, claimIDA) {
-		t.Fatal("pool A retrieval does not bind pool A's Claim ID")
+	firstParsed, parseErr := arbitration.UnmarshalContentRetrievalResponse(first11)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	firstVerified, verifyErr := arbitration.VerifyContentRetrievalResponse(request10A, poolA.buyerAcc.Opening.ArbiterPublicKey, firstParsed)
+	if verifyErr != nil {
+		t.Fatalf("pool A Kind 11 failed verification: %v", verifyErr)
+	}
+	if !bytes.Equal(firstVerified.PayloadsCBOR, recordAPayloads) {
+		t.Fatal("pool A retrieval does not bind pool A's custody payload bundle")
 	}
 
 	// 交叉：pool A 的 Kind 10 用 pool B 的 opening/authorization 构造必须失败。
 	crossAuth, err := f.buyer.BuildArbitrationContentRequest(f.ctx, poolB.buyerAcc.Opening, requestA, bytes.Repeat([]byte{0x63}, 32))
 	if err == nil {
-		// 若构造成功（不同池的 Claim 不同），验证时也必须拒绝。
-		if _, err := store.handleContentRetrieval(mustMarshalKind10(t, crossAuth), f.arbiter); !errors.Is(err, errRetrievalNotFound) && !errors.Is(err, errRetrievalUnauthorized) {
-			t.Fatalf("cross-pool constructed request error = %v", err)
+		// 不同池的 Claim 不同：若该 Claim 没有托管记录，Arbiter 返回签名的
+		// seller_arbitration_not_received（nil error）；只有鉴权失败才报错。
+		rawKind11Cross, retrievalErr := store.handleContentRetrieval(mustMarshalKind10(t, crossAuth), f.arbiter, f.arbiterKey)
+		if retrievalErr != nil {
+			if !errors.Is(retrievalErr, errRetrievalUnauthorized) {
+				t.Fatalf("cross-pool constructed request error = %v", retrievalErr)
+			}
+		} else {
+			parsedCross, parseErr := arbitration.UnmarshalContentRetrievalResponse(rawKind11Cross)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			if parsedCross.ContentPayloadsCBOR != nil {
+				t.Fatal("cross-pool request unexpectedly received payloads")
+			}
+			decodedCross, decodeErr := arbitration.DecodeContentRetrievalResultDocument(parsedCross.ContentRetrievalResultCBOR)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if decodedCross.UnavailableReason != arbitration.RetrievalSellerArbitrationNotReceived {
+				t.Fatalf("cross-pool reason = %d, want seller_arbitration_not_received", decodedCross.UnavailableReason)
+			}
 		}
 	}
 

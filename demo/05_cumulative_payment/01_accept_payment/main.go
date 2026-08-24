@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -33,13 +32,14 @@ func main() {
 		fail(fmt.Errorf("buyer.AcceptDelivery: %w", err))
 	}
 	update := verified.Update
-	debug("[payment] authorization hash (application lookup key): %s", hex.EncodeToString(update.PaymentAuthorizationHash))
-	debug("[payment] buyer transaction signature: %s", hex.EncodeToString(update.BuyerTransactionSignature))
+	debug("[payment] PaymentAuthorizationID (application lookup key): %s", hex.EncodeToString(update.PaymentAuthorizationID[:]))
+	debug("[payment] buyer transaction signature: %s", hex.EncodeToString(update.BuyerPaymentTransactionSignature))
 	debug("[payment] wire carries no pool ID and no raw transaction; both sides rebuild the exact state transaction locally")
-	// 应用先用 005 携带的授权哈希取回保存的精确原始签名 003；哈希是内容
+	// 应用先用 005 携带的 PaymentAuthorizationID 取回保存的精确原始签名 003；
+	// 它是内容
 	// 寻址键，不可解码出池 ID、金额或交易字节。
-	debug("[app] hash lookup retrieves the exact original signed 003 for the minimal credential")
-	authorization, err := f.LookupPaymentAuthorization(update.PaymentAuthorizationHash)
+	debug("[app] PaymentAuthorizationID lookup retrieves the exact original signed 003 for the minimal credential")
+	authorization, err := f.LookupPaymentAuthorization(update.PaymentAuthorizationID)
 	if err != nil {
 		fail(err)
 	}
@@ -49,21 +49,19 @@ func main() {
 		fail(fmt.Errorf("seller.AcceptPayment: %w", err))
 	}
 	accepted := signed.State
-	var updateAuthHash []byte
-	updateAuthHash = append(updateAuthHash, update.PaymentAuthorizationHash...)
-	if !bytes.Equal(updateAuthHash, accepted.PaymentAuthorizationHash[:]) || !bytes.Equal(updateAuthHash, deliveryState.PaymentAuthorizationHash[:]) {
-		fail(fmt.Errorf("authorization hash changed across seller acceptance"))
+	if update.PaymentAuthorizationID != accepted.PaymentAuthorizationID || update.PaymentAuthorizationID != deliveryState.PaymentAuthorizationID {
+		fail(fmt.Errorf("PaymentAuthorizationID changed across seller acceptance"))
 	}
-	debug("[payment] authorization hash consistent across 003/004/005 and accepted state: true")
+	debug("[payment] PaymentAuthorizationID consistent across 003/004/005 and accepted state: true")
 	rawUpdate, err := pool.EncodePaymentUpdate(update)
 	if err != nil {
 		fail(err)
 	}
-	debug("[payment] request terms bytes: %d", len(request.TermsCBOR))
+	debug("[payment] request terms bytes: %d", len(request.PaymentAuthorizationCBOR))
 	debug("[payment] delivery payload batch bytes: %d", len(delivery.ContentPayloadsCBOR))
 	debug("[accepted] sequence: %d", accepted.PaymentSequence)
-	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSat)
-	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSat)
+	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSatoshis)
+	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSatoshis)
 	fmt.Printf("PAYMENT_UPDATE_HEX=%s\n", hex.EncodeToString(rawUpdate))
 	fmt.Printf("ACCEPTED_TX_HEX=%s\n", hex.EncodeToString(signed.RawTx))
 	debug("=== Cumulative payment complete ===")

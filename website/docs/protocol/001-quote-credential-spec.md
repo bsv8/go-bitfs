@@ -5,19 +5,28 @@ title: "001 · BitFS Quote Credential Specification"
 
 # 001 · BitFS Quote Credential Specification
 
-## Encoding, Signing, and Hashing
+## Encoding, signing, and hashing
 
-All structures use RFC 8949 core deterministic CBOR. `TermsCBOR` MUST be the raw deterministic CBOR bytes of `FileQuoteTerms`:
+All structures use RFC 8949 core deterministic CBOR. The quote is wire
+Kind 1: a fixed five-element shell whose seller signature covers the exact
+`file_quote_terms_cbor` through the unified `SignWireDocument(1, 1, ...)`
+helper — the typed signing input `["bitfs/wire-signature", 1, 1,
+file_quote_terms_cbor]` authenticates version and kind together with the
+exact document bytes. No bare-hash signature exists.
 
 ```text
-TermsSignature = Sign_seller(TermsCBOR)
-Verify(SellerPubkey, TermsCBOR, TermsSignature)
-FileQuoteTermsHash = SHA256(TermsCBOR)
+kind-1-file-quote = [
+    1,                                  ; wire-version, injected by the encoder
+    1,                                  ; wire kind
+    file_quote_terms_cbor,
+    seller_public_key,
+    seller_file_quote_terms_signature   ; SignWireDocument(1, 1, ...)
+]
+
+file_quote_terms_id = SHA-256(file_quote_terms_cbor)
 ```
 
-No signature domain is used. Implementations MUST verify `TermsSignature` solely against the quote terms as described above.
-
-The normative CDDL is located at [`https://github.com/bsv8/go-bitfs/blob/main/spec/file-quote.cddl`](https://github.com/bsv8/go-bitfs/blob/main/spec/file-quote.cddl).
+The normative CDDL truth is [`spec/v1/wire-messages.cddl`](https://github.com/bsv8/go-bitfs/blob/main/spec/v1/wire-messages.cddl).
 
 ## `FileQuoteTerms`
 
@@ -25,54 +34,80 @@ CBOR array positions are fixed as follows:
 
 | Position | Field | Implementation Requirement |
 |---:|---|---|
-| 0 | `version` | Currently `1`. |
-| 1 | `seed_hash` | MUST be 32 bytes. |
-| 2 | `buyer_pubkey` | Only this public key MAY accept and sign subsequent purchase requests. |
-| 3 | `seed_price_sat` | Seed price in satoshis. |
-| 4 | `full_block_price_sat` | Full 256 KiB block price in satoshis. |
-| 5 | `file_size` | Total file size in bytes. |
-| 6 | `quote_expires_at_unix` | Quote expiration as a Unix timestamp in seconds. |
-| 7 | `supported_arbiter_pubkeys_cbor` | Independent deterministic CBOR of an array of arbiter public keys. |
+| 0 | `seed_hash` | MUST be 32 bytes. |
+| 1 | `buyer_public_key` | Only this compressed public key MAY accept and sign subsequent purchase requests. |
+| 2 | `seed_price_satoshis` | Seed price in satoshis. |
+| 3 | `full_block_price_satoshis` | Full block price in satoshis. |
+| 4 | `file_size_bytes` | Total file size in bytes. |
+| 5 | `quote_expires_at_unix_seconds` | Quote expiration as a Unix timestamp in seconds. |
+| 6 | `supported_arbiter_public_keys_cbor` | Independent deterministic CBOR of an array of arbiter public keys. |
+| 7 | `recommended_filename` | Sanitized display suggestion; signed by the seller like every other term. |
 
-The block count MUST be derived from `file_size`: `0` maps to `0` blocks; a positive value maps to `ceil(file_size / 262144)`. The current seed payload limit is 256 KiB; the maximum quote size is 8192 blocks. The arbiter public key array MAY be empty, but public keys within it MUST NOT be empty or duplicated.
+The authentication document carries no version or kind field. The block
+count MUST be derived from `file_size_bytes`: `0` maps to `0` blocks; a
+positive value maps to `ceil(file_size_bytes / 262144)`. Each payload is at
+most one MasterSeed block (256 KiB). The arbiter public key array MAY be
+empty, but public keys within it MUST NOT be empty or duplicated.
+`recommended_filename` MUST pass the sanitize rules before encoding and
+signing; because it is part of the terms, two quotes differing only in the
+filename have different `file_quote_terms_id` values.
 
 ## `SignedFileQuote`
 
-CBOR array positions are fixed as follows:
+The SDK type carries the exact child bytes plus the seller public key and
+signature:
 
-| Position | Field | Implementation Requirement |
-|---:|---|---|
-| 0 | `version` | Currently `1`. |
-| 1 | `terms_cbor` | Full raw CBOR of `FileQuoteTerms`. |
-| 2 | `seller_pubkey` | Used to verify the terms signature. |
-| 3 | `terms_signature` | Seller's signature over `terms_cbor`. |
-| 4 | `recommended_filename` | Display suggestion only; MUST NOT be treated as ground truth for content, price, or identity. |
+```text
+SignedContentRequest-style fields:
+  file_quote_terms_cbor              ; exact canonical bytes, never re-encoded
+  seller_public_key                  ; verifies the terms signature
+  seller_file_quote_terms_signature  ; SignWireDocument(1, 1, ...)
+```
 
-During verification, implementations MUST re-decode and deterministically re-encode `terms_cbor`, then verify the signature, field lengths, quote expiration, and arbiter array. Clients displaying the filename MUST sanitize path separators and control characters.
+During verification, implementations MUST strictly decode and
+deterministically re-encode `file_quote_terms_cbor`, then verify the unified
+signature against the recovered seller key, followed by field widths, quote
+expiration, and the arbiter array. Clients displaying the filename MUST
+sanitize path separators and control characters; verification only checks
+that the received field already satisfies the same sanitize rules and never
+rewrites it silently.
 
-## Subsequent References and Retention
+## Subsequent references and retention
 
-Normal messages in 003 carry only `FileQuoteTermsHash`. The seller MUST locate and re-verify the original quote credential by this hash; both parties MUST retain the full quote credential until the associated payment settlement and arbitration window has closed. For offline verification, migration, or arbitration, the full quote credential together with subsequent credentials constitutes the evidence package.
+003 payment authorizations carry only `file_quote_terms_id`. The seller MUST
+locate and re-verify the original quote credential by this ID; both parties
+MUST retain the full quote credential until the associated payment settlement
+and arbitration window has closed. For offline verification, migration, or
+arbitration, the full quote credential together with subsequent credentials
+constitutes the evidence package.
 
-## Tail Block
+## Tail block
 
-Quotes do not carry a tail-block price. Implementations MUST calculate the tail block proportionally based on its actual length relative to 256 KiB, applying a 10% calculation tolerance concession on the seller's side. This rule is not the sole integer formula for V1 automatic arbitration; the cumulative amount signed out by the buyer in 005 is the final enforceable amount.
+Quotes do not carry a tail-block price. Implementations MUST calculate the
+tail block proportionally based on its actual length relative to one MasterSeed
+block, applying a 10% calculation tolerance concession on the seller's side.
+This rule is not the sole integer formula for automatic arbitration; the
+cumulative amount signed out by the buyer in 005 is the final enforceable
+amount.
 
 ## Go API
 
 ```go
-arbiterCBOR, err := bitfs.EncodeSupportedArbiterPubkeys(arbiterPubkeys)
+arbiterCBOR, err := bitfs.EncodeSupportedArbiterPublicKeys(arbiterPublicKeys)
 terms := &bitfs.FileQuoteTerms{
-    SeedHash:                    seedHash,
-    BuyerPubkey:                 buyerPubkey,
-    SeedPriceSat:                10,
-    FullBlockPriceSat:           100,
-    FileSize:                    fileSize,
-    QuoteExpiresAtUnix:          expiresAtUnix,
-    SupportedArbiterPubkeysCBOR: arbiterCBOR,
+    SeedHash:                       seedHash,
+    BuyerPublicKey:                 buyerPublicKey,
+    SeedPriceSatoshis:              10,
+    FullBlockPriceSatoshis:         100,
+    FileSizeBytes:                  fileSizeBytes,
+    QuoteExpiresAtUnixSeconds:      expiresAtUnixSeconds,
+    SupportedArbiterPublicKeysCBOR: arbiterCBOR,
 }
-quote, err := bitfs.NewSignedFileQuote(terms, sellerPubkey, "download.bin", signTermsCBOR)
-verifiedTerms, err := bitfs.VerifySignedFileQuote(quote, verifySellerTermsSignature)
+quote, err := bitfs.NewSignedFileQuote(terms, sellerPrivateKey, "download.bin")
+verifiedTerms, err := bitfs.VerifyFileQuoteEvidence(quote)
+quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 ```
 
-The caller is responsible for specifying public key format, signing algorithm, and signature verifier; the library does not bind to any wallet or elliptic curve implementation.
+The workflow holds only the official BSV private key; signing and verification
+go through the fixed `SignWireDocument(1, 1, ...)` helper, so callers supply
+no signing domain, verifier callback, or curve implementation.

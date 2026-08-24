@@ -2,7 +2,7 @@
 //
 // 0202 的 RefundPresignResponse 显式携带费用池统一关联 ID RefundTemplateTxID。
 // 本命令从 stdin 读取响应，按该关联 ID 从买方自己的 checkpoint 加载 0201
-// 保存的 BuyerOpeningState（原 request 与私有 FundingTx），显式传给 SDK；
+// 保存的 BuyerOpeningState（原 request 与私有 FundingTransactionRaw），显式传给 SDK；
 // SDK 重新派生 hash、严格比较错配并验证卖方签名。跨进程、无 session、
 // 无需原请求文件，全部由调用方状态承载。
 package main
@@ -42,13 +42,13 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	response, err := wire.UnmarshalPoolRefundPresignResponse(responseRaw)
+	response, err := wire.UnmarshalRefundPresignResponse(responseRaw)
 	if err != nil {
 		fail(fmt.Errorf("decode RefundPresignResponse: %w", err))
 	}
 	debug("[transport] buyer <- seller: PoolRefundPresignResponse (%d bytes)", len(responseRaw))
 	debug("[buyer] refund tx hash: %s", hex.EncodeToString(response.RefundTemplateTxID[:]))
-	debug("[buyer] 从应用 checkpoint 找回 0201 的 request/FundingTx 并检验卖方退款签名")
+	debug("[buyer] 从应用 checkpoint 找回 0201 的 request/FundingTransactionRaw 并检验卖方退款签名")
 	checkpointPath := poolopening.BuyerOpeningCheckpointPath()
 	state, err := poolopening.LoadBuyerOpeningState(checkpointPath, response.RefundTemplateTxID)
 	if err != nil {
@@ -68,7 +68,7 @@ func main() {
 	debug("[buyer] seller refund signature: valid")
 	debug("[buyer] opening proof 已保存到应用 checkpoint %s", proofPath)
 	debug("[buyer] initial payment sequence: %d", acceptance.InitialPayment.PaymentSequence)
-	debug("[local state] FundingTx 现在才允许交付给卖方；完整 OpeningProof 只保存在可信的调用方存储中")
+	debug("[local state] FundingTransactionRaw 现在才允许交付给卖方；完整 OpeningProof 只保存在可信的调用方存储中")
 	// stdout 只输出标量字段：0204 仅凭 REFUND_TEMPLATE_TXID_HEX 就能从买方
 	// checkpoint 加载 proof 并构造交付报文；OpeningProof 不作为进程间交接物。
 	fmt.Printf("REFUND_TEMPLATE_TXID_HEX=%s\n", hex.EncodeToString(acceptance.Reference.RefundTemplateTxID[:]))

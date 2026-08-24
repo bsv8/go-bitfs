@@ -3,10 +3,12 @@ package bitfs
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"testing"
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // quoteDeadline returns a delivery deadline safely in the future; deadline vs
@@ -25,9 +27,9 @@ func constructorOtherKey(t *testing.T) *ec.PrivateKey {
 	return key
 }
 
-func constructorRequestTerms(t *testing.T) *ContentRequestTerms {
+func constructorRequestTerms(t *testing.T) *PaymentAuthorization {
 	t.Helper()
-	quoteHash, err := FileQuoteTermsHash(mustConstructorQuote(t).TermsCBOR)
+	quoteID, err := FileQuoteTermsID(mustConstructorQuote(t).FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,13 +37,13 @@ func constructorRequestTerms(t *testing.T) *ContentRequestTerms {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &ContentRequestTerms{
-		QuoteTermsHash:       quoteHash[:],
-		RefundTemplateTxID:   bytes.Repeat([]byte{1}, sha256.Size),
-		PaymentSequence:      3,
-		SellerAmountAfterSat: 10,
-		ContentHashesCBOR:    hashesCBOR,
-		DeliveryDeadlineUnix: quoteDeadline(t),
+	return &PaymentAuthorization{
+		FileQuoteTermsID:            quoteID,
+		RefundTemplateTxID:          bytes.Repeat([]byte{1}, sha256.Size),
+		PaymentSequence:             3,
+		SellerAmountAfterSatoshis:   10,
+		ContentHashesCBOR:           hashesCBOR,
+		DeliveryDeadlineUnixSeconds: quoteDeadline(t),
 	}
 }
 
@@ -54,59 +56,70 @@ func mustConstructorQuote(t *testing.T) *SignedFileQuote {
 	return quote
 }
 
-// 003 买方签名必须精确覆盖 TermsCBOR：对同一字节验签成功，对外壳、哈希或
-// 任何其他字节都不成立。
-func TestBuyerSignatureCoversExactlyTheTermsCBOR(t *testing.T) {
-	terms := constructorRequestTerms(t)
-	request, err := NewSignedContentRequest(terms, quoteTestKey())
+// 003 买方签名必须通过统一 helper 精确覆盖 payment_authorization_cbor：对同一
+// 字节验签成功，对外壳、哈希或任何其他字节都不成立。
+func TestBuyerSignatureCoversExactlyTheAuthorizationCBOR(t *testing.T) {
+	authorization := constructorRequestTerms(t)
+	request, err := NewSignedContentRequest(authorization, quoteTestKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySignature(quoteTestPubkey(), request.TermsCBOR, request.BuyerSignature); err != nil {
-		t.Fatalf("buyer signature does not verify over the exact terms CBOR: %v", err)
+	if err := protocol.VerifyWireDocument(quoteTestPubkey(), protocol.WireVersion, 5, request.PaymentAuthorizationCBOR, request.BuyerPaymentAuthorizationSignature); err != nil {
+		t.Fatalf("buyer signature does not verify over the exact authorization CBOR: %v", err)
 	}
 	outer, err := EncodeSignedContentRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySignature(quoteTestPubkey(), outer, request.BuyerSignature); err == nil {
-		t.Fatal("buyer signature verified over the 003 wire shell")
+	if err := VerifySignature(quoteTestPubkey(), outer, request.BuyerPaymentAuthorizationSignature); err == nil {
+		t.Fatal("buyer signature verified over the Kind 5 wire shell")
 	}
-	authHash := sha256.Sum256(request.TermsCBOR)
-	if err := VerifySignature(quoteTestPubkey(), authHash[:], request.BuyerSignature); err == nil {
-		t.Fatal("buyer signature verified over the authorization hash")
+	authID := sha256.Sum256(request.PaymentAuthorizationCBOR)
+	if err := VerifySignature(quoteTestPubkey(), authID[:], request.BuyerPaymentAuthorizationSignature); err == nil {
+		t.Fatal("buyer signature verified over the authorization ID")
+	}
+	// 跨 Kind 换壳必须失败：同一文档拿到 Kind 6 签名域下验证不成立。
+	if err := protocol.VerifyWireDocument(quoteTestPubkey(), protocol.WireVersion, 6, request.PaymentAuthorizationCBOR, request.BuyerPaymentAuthorizationSignature); err == nil {
+		t.Fatal("Kind 5 signature verified inside the Kind 6 signing context")
+	}
+	// 跨版本换壳必须失败。
+	if err := protocol.VerifyWireDocument(quoteTestPubkey(), protocol.WireVersion+1, 5, request.PaymentAuthorizationCBOR, request.BuyerPaymentAuthorizationSignature); err == nil {
+		t.Fatal("signature verified under a future wire version")
 	}
 }
 
-// 004 卖方签名是裸消息签名：精确 32 字节 PaymentAuthorizationHash 经过固定
-// SignMessage（内部再 SHA-256 一次）后验证成功；对 CBOR 包装、hex 文本、
-// 预先再哈希的摘要或 payload 都不成立。
-func TestSellerSignatureCoversExactlyTheAuthorizationHash(t *testing.T) {
-	authHash := sha256.Sum256([]byte("authorization bytes"))
-	delivery, err := NewSignedContentDelivery(authHash[:], [][]byte{[]byte("payload")}, constructorOtherKey(t))
+// 004 卖方签名通过统一 helper 覆盖精确 content_delivery_cbor；对裸授权 ID、
+// hex 文本、预先再哈希的摘要或 payload 都不成立。
+func TestSellerSignatureCoversExactlyTheDeliveryDocument(t *testing.T) {
+	authID := sha256.Sum256([]byte("authorization bytes"))
+	delivery, err := NewSignedContentDelivery(authID, [][]byte{[]byte("payload")}, constructorOtherKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	pubkey := constructorOtherKey(t).PubKey().Compressed()
-	if err := VerifySignature(pubkey, authHash[:], delivery.SellerPaymentAuthorizationHashSignature); err != nil {
-		t.Fatalf("seller signature does not verify over the bare hash: %v", err)
+	if err := protocol.VerifyWireDocument(pubkey, protocol.WireVersion, 6, delivery.ContentDeliveryCBOR, delivery.SellerContentDeliverySignature); err != nil {
+		t.Fatalf("seller signature does not verify over the exact delivery document: %v", err)
 	}
-	wrapped, err := canonicalEnc.Marshal([]any{contentProtocolVersion, bstr(authHash[:])})
+	if err := VerifySignature(pubkey, authID[:], delivery.SellerContentDeliverySignature); err == nil {
+		t.Fatal("seller signature verified over the bare authorization ID")
+	}
+	if err := VerifySignature(pubkey, []byte(toHex(authID[:])), delivery.SellerContentDeliverySignature); err == nil {
+		t.Fatal("seller signature verified over hex text")
+	}
+	doubleDigest := sha256.Sum256(authID[:])
+	if err := VerifySignature(pubkey, doubleDigest[:], delivery.SellerContentDeliverySignature); err == nil {
+		t.Fatal("seller signature verified over a pre-hashed digest")
+	}
+	if err := VerifySignature(pubkey, []byte("payload"), delivery.SellerContentDeliverySignature); err == nil {
+		t.Fatal("seller signature verified over payload bytes")
+	}
+	// content_delivery_cbor 必须恰好编码被引用的授权 ID。
+	bound, err := DecodeContentDeliveryDocument(delivery.ContentDeliveryCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySignature(pubkey, wrapped, delivery.SellerPaymentAuthorizationHashSignature); err == nil {
-		t.Fatal("seller signature verified over a CBOR-wrapped hash")
-	}
-	if err := VerifySignature(pubkey, []byte(toHex(authHash[:])), delivery.SellerPaymentAuthorizationHashSignature); err == nil {
-		t.Fatal("seller signature verified over hex text")
-	}
-	doubleDigest := sha256.Sum256(authHash[:])
-	if err := VerifySignature(pubkey, doubleDigest[:], delivery.SellerPaymentAuthorizationHashSignature); err == nil {
-		t.Fatal("seller signature verified over a pre-hashed digest")
-	}
-	if err := VerifySignature(pubkey, []byte("payload"), delivery.SellerPaymentAuthorizationHashSignature); err == nil {
-		t.Fatal("seller signature verified over payload bytes")
+	if bound != authID {
+		t.Fatal("delivery document does not bind the supplied authorization ID")
 	}
 }
 
@@ -119,14 +132,23 @@ func toHex(value []byte) string {
 	return string(out)
 }
 
-func TestDeliveryConstructorRejectsWrongHashLengths(t *testing.T) {
-	if _, err := NewSignedContentDelivery(bytes.Repeat([]byte{1}, sha256.Size-1), [][]byte{[]byte("payload")}, constructorOtherKey(t)); err == nil {
-		t.Fatal("31-byte authorization hash accepted")
+func TestDeliveryConstructorRejectsZeroOrMismatchedAuthorizationID(t *testing.T) {
+	// 31 字节/nil 等错误宽度的 payment_authorization_id 已被 named type 在
+	// 编译期排除；运行时唯一必须拒绝的是全零哨兵 ID。
+	if _, err := NewSignedContentDelivery(protocol.PaymentAuthorizationID{}, [][]byte{[]byte("payload")}, constructorOtherKey(t)); !errors.Is(err, protocol.ErrZeroIdentifier) {
+		t.Fatalf("all-zero authorization id error = %v, want protocol.ErrZeroIdentifier", err)
 	}
-	if _, err := NewSignedContentDelivery(nil, [][]byte{[]byte("payload")}, constructorOtherKey(t)); err == nil {
-		t.Fatal("nil authorization hash accepted")
+	zeroSlice := make([]byte, sha256.Size)
+	var zeroID protocol.PaymentAuthorizationID
+	copy(zeroID[:], zeroSlice)
+	if !zeroID.IsZero() {
+		t.Fatal("test premise broken: zero id is not the zero sentinel")
 	}
-	if _, err := NewSignedContentDelivery(bytes.Repeat([]byte{1}, sha256.Size), [][]byte{}, constructorOtherKey(t)); err == nil {
-		t.Fatal("empty payload batch accepted")
+	if _, err := NewSignedContentDelivery(zeroID, [][]byte{[]byte("payload")}, constructorOtherKey(t)); !errors.Is(err, protocol.ErrZeroIdentifier) {
+		t.Fatalf("all-zero authorization id error = %v, want protocol.ErrZeroIdentifier", err)
+	}
+	// 空 payload 批次仍按 payload 校验拒绝，与零 ID 检查相互独立。
+	if _, err := NewSignedContentDelivery(zeroID, [][]byte{}, constructorOtherKey(t)); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("empty payload batch error = %v, want ErrInvalidEvidence", err)
 	}
 }

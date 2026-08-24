@@ -1,4 +1,4 @@
-// Package integration exercises the complete BitFS v4 protocol lifecycle
+// Package integration exercises the complete BitFS v1 protocol lifecycle
 // 001–008 with the test acting as the calling application. Every quote,
 // opening state, proof, payment state, and delivery context is held in local
 // variables and passed explicitly into each SDK call. The 007 arbitration
@@ -12,6 +12,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
 )
 
@@ -39,14 +41,15 @@ type integrationSigner struct{ key *ec.PrivateKey }
 
 // arbitrationCustodyRecord is one application custody record, indexed by
 // Claim ID. It persists the exact received Kind 8 raw bytes (not a decoded
-// struct), the payload bundle, the derived Claim ID, and the frozen fee; after
-// signing the exact canonical Kind 9 bytes are appended to the same record.
+// struct) and the frozen fee; the payload bundle has no second stored truth —
+// it lives only inside the exact Kind 8 bytes and is re-derived through strict
+// decoding and full verification. After signing the exact canonical Kind 9
+// bytes are appended to the same record.
 type arbitrationCustodyRecord struct {
-	requestBytes     []byte // exact received raw Kind 8 CBOR, deep-copied on save
-	payloadsCBOR     []byte
-	claimID          []byte
-	arbiterAmountSat uint64
-	responseBytes    []byte // exact canonical saved Kind 9, resent verbatim on retry
+	requestBytes          []byte // exact received raw Kind 8 CBOR, deep-copied on save
+	claimID               protocol.ArbitrationClaimID
+	arbiterAmountSatoshis uint64
+	responseBytes         []byte // exact canonical saved Kind 9, resent verbatim on retry
 }
 
 // memoryArbitrationCustodyStore is the application's 007/008 store plus the
@@ -67,23 +70,27 @@ type memoryArbitrationCustodyStore struct {
 	priceCalls int
 	signCalls  int
 
-	// nonceRecords 是应用侧 (ClaimID, Nonce) 原子占用表：先验签成功后才占用，
-	// 唯一键由数据库保证；这里用互斥锁模拟唯一键的并发语义。旧 nonce 记录
-	// 至少保留到对应 custody record 删除（本测试中永久保留）。
-	mu           sync.Mutex
-	nonceRecords map[string]bool // key: hex(ClaimID) + ":" + hex(Nonce)
-	goneClaims   map[string]bool // retention 结束并已安全删除的 Claim ID
+	// servedResponses 是应用侧 (ClaimID, Nonce) 原子占用表 + 首次持久化 Kind 11：
+	// 验签成功后由唯一的原子提交入口写入（数据库唯一键语义）；旧 nonce 记录
+	// 至少保留到对应 custody record 删除（本测试中永久保留）。同一
+	// content_retrieval_request_id 重放时原样重发，状态变化后不升级。
+	// hookBeforeCommit 是确定性测试屏障：模拟"候选应答构造完成"与"事务提交"
+	// 之间的调度暂停；生产实现没有对应物。
+	mu               sync.Mutex
+	servedResponses  map[string][]byte            // key: hex(ClaimID)+":"+hex(Nonce) -> 首次持久化的 exact Kind 11
+	goneClaims       map[string]*custodyTombstone // retention 结束后的最小可验证墓碑
+	hookBeforeCommit func()
 }
 
 func newMemoryArbitrationCustodyStore() *memoryArbitrationCustodyStore {
-	return &memoryArbitrationCustodyStore{records: make(map[string]*arbitrationCustodyRecord), nonceRecords: make(map[string]bool), goneClaims: make(map[string]bool)}
+	return &memoryArbitrationCustodyStore{records: make(map[string]*arbitrationCustodyRecord), servedResponses: make(map[string][]byte), goneClaims: make(map[string]*custodyTombstone)}
 }
 
 // priceArbitrationFee is this application's fee policy entry point; production
 // services would consult their own price book here.
 func (store *memoryArbitrationCustodyStore) priceArbitrationFee(decoded *arbitration.ArbitrationRequest) (uint64, error) {
 	store.priceCalls++
-	return arbitrationFeeSat, nil
+	return arbitrationFeeSatoshis, nil
 }
 
 // handleArbitrationRequest implements the mandated application flow:
@@ -100,11 +107,11 @@ func (store *memoryArbitrationCustodyStore) handleArbitrationRequest(rawKind8 []
 	if err != nil {
 		return nil, err
 	}
-	claimID, err := arbitration.ArbitrationClaimID(decoded.ClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(decoded.ArbitrationClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	key := hex.EncodeToString(claimID)
+	key := hex.EncodeToString(claimID[:])
 
 	// 阶段一：锁内一次性取得记录状态深拷贝；密码学验证在锁外执行。
 	store.mu.Lock()
@@ -117,7 +124,7 @@ func (store *memoryArbitrationCustodyStore) handleArbitrationRequest(rawKind8 []
 		// deadline/refund、Arbiter 身份与按已冻结费用重建交易），再判定是
 		// 否构成重复证据冲突。PreparePayment 不产生签名，也不重新调用费用
 		// 策略——直接复用记录中冻结的费用。
-		if _, err := arbiter.PreparePayment(context.Background(), decoded, blockHeight, saved.arbiterAmountSat); err != nil {
+		if _, err := arbiter.PreparePayment(context.Background(), decoded, blockHeight, saved.arbiterAmountSatoshis); err != nil {
 			// 完整验证失败 = 无效请求（攻击者拼接的假 bundle、篡改的签名、
 			// 过期证据等），按 invalid evidence 拒绝；这绝不是 collision。
 			return nil, err
@@ -140,7 +147,7 @@ func (store *memoryArbitrationCustodyStore) handleArbitrationRequest(rawKind8 []
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, err)
 		}
-		prepared, err = arbiter.PreparePayment(context.Background(), savedDecoded, blockHeight, saved.arbiterAmountSat)
+		prepared, err = arbiter.PreparePayment(context.Background(), savedDecoded, blockHeight, saved.arbiterAmountSatoshis)
 		if err != nil {
 			return nil, err
 		}
@@ -169,10 +176,9 @@ func (store *memoryArbitrationCustodyStore) handleArbitrationRequest(rawKind8 []
 			return nil, errRetentionGone
 		}
 		store.records[key] = &arbitrationCustodyRecord{
-			requestBytes:     append([]byte(nil), rawKind8...),
-			payloadsCBOR:     prepared.ContentPayloadsCBOR(),
-			claimID:          append([]byte(nil), prepared.ClaimID()...),
-			arbiterAmountSat: prepared.ArbiterAmountSat(),
+			requestBytes:          append([]byte(nil), rawKind8...),
+			claimID:               prepared.ArbitrationClaimID(),
+			arbiterAmountSatoshis: prepared.ArbiterAmountSatoshis(),
 		}
 		current = store.snapshotLocked(key)
 	} else if !bytes.Equal(current.requestBytes, rawKind8) {
@@ -195,15 +201,21 @@ func (store *memoryArbitrationCustodyStore) handleArbitrationRequest(rawKind8 []
 	return append([]byte(nil), raw...), nil
 }
 
-// 应用级错误通道：Kind 11 只表达成功取回，NotFound/NotReady/Unauthorized/
-// NonceReused/Gone 全部走这些哨兵错误，绝不编码为结构合法的 Kind 11。
+// 应用级错误通道：Kind 11 的 available 与 unavailable 都是仲裁方签名的 wire
+// 响应（§15），同一 exact Kind 10 的并发重复请求经原子提交入口重放首次提交
+// 的相同 Kind 11；只有 Unauthorized、Malformed、RateLimited 与内部存储损坏/
+// 冲突走这些哨兵错误，绝不伪装成结构合法的 Kind 11。
 var (
-	errRetrievalNotFound     = errors.New("custody record not found")
-	errRetrievalNotReady     = errors.New("custody record is not retrievable yet")
 	errRetrievalUnauthorized = errors.New("buyer retrieval unauthorized")
-	errNonceReused           = errors.New("(claim id, nonce) already used")
 	errRetentionGone         = errors.New("custody content deleted after retention")
 	errCustodyCorrupt        = errors.New("stored custody bytes failed strict decode")
+	// errCustodyConflict：同一 Claim ID 下持久化的 request 字节与验证时的
+	// 快照不一致——这是存储冲突/证据冲突，必须停止自动处理并报警；绝不能
+	// 降级成 custody_gone，也不占用 nonce、不落任何 Kind 11。
+	errCustodyConflict = errors.New("custody evidence conflict: stored request bytes changed under one claim id; stop automation and alarm")
+	// errInternalStorage：记录消失且没有任何 tombstone——retention 流程不会
+	// 产生这种状态，属于内部存储错误；不得凭空签署 custody_gone。
+	errInternalStorage = errors.New("internal storage error: custody record vanished without a tombstone")
 )
 
 // snapshotLocked 返回 key 对应记录的深拷贝快照；必须在持有 store.mu 时调用。
@@ -213,10 +225,9 @@ func (store *memoryArbitrationCustodyStore) snapshotLocked(key string) *arbitrat
 		return nil
 	}
 	snapshot := &arbitrationCustodyRecord{
-		requestBytes:     append([]byte(nil), record.requestBytes...),
-		payloadsCBOR:     append([]byte(nil), record.payloadsCBOR...),
-		claimID:          append([]byte(nil), record.claimID...),
-		arbiterAmountSat: record.arbiterAmountSat,
+		requestBytes:          append([]byte(nil), record.requestBytes...),
+		claimID:               record.claimID,
+		arbiterAmountSatoshis: record.arbiterAmountSatoshis,
 	}
 	if record.responseBytes != nil {
 		snapshot.responseBytes = append([]byte(nil), record.responseBytes...)
@@ -228,7 +239,7 @@ func (store *memoryArbitrationCustodyStore) snapshotLocked(key string) *arbitrat
 func (store *memoryArbitrationCustodyStore) putRecord(record *arbitrationCustodyRecord) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.records[hex.EncodeToString(record.claimID)] = record
+	store.records[hex.EncodeToString(record.claimID[:])] = record
 }
 
 // recordOf 返回 key 对应记录的深拷贝快照（测试用只读访问）。
@@ -262,105 +273,322 @@ func (store *memoryArbitrationCustodyStore) retrievableLocked(key string) bool {
 	return exists && record != nil && record.responseBytes != nil
 }
 
-// occupyNonce 模拟数据库唯一键/CAS：同一 (ClaimID, Nonce) 只允许一个胜者。
-// 调用方必须已经通过 SDK 验签；未通过签名的请求不会到达这里。
-func (store *memoryArbitrationCustodyStore) occupyNonce(claimID, nonce []byte) bool {
+// commitFirstAnswer 用于状态不可变（tombstone-gone）路径的提交入口：调用方先
+// 在锁外构造好候选应答，这里在同一个互斥临界区内完成"重放检查 + (Claim ID,
+// Nonce) 唯一键占用 + exact 首次响应插入"。并发败者的未提交签名在此被直接
+// 丢弃，重放已提交胜者的字节——数据库里永远只有一份。
+func (store *memoryArbitrationCustodyStore) commitFirstAnswer(nonceKey string, raw []byte) []byte {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	key := hex.EncodeToString(claimID) + ":" + hex.EncodeToString(nonce)
-	if store.nonceRecords[key] {
-		return false
+	if served, ok := store.servedResponses[nonceKey]; ok {
+		return append([]byte(nil), served...)
 	}
-	store.nonceRecords[key] = true
-	return true
+	store.servedResponses[nonceKey] = append([]byte(nil), raw...)
+	return append([]byte(nil), raw...)
 }
 
-// expireRetention 模拟留存期结束并安全删除内容，但保留 nonce 去重记录。
-func (store *memoryArbitrationCustodyStore) expireRetention(claimID []byte) {
-	key := hex.EncodeToString(claimID)
+// commitOutcome 是状态感知原子提交的裁决结果。
+type commitOutcome int
+
+const (
+	// commitServed：已有首次响应，raw 为已提交字节（并发胜者或重放）。
+	commitServed commitOutcome = iota
+	// commitCommitted：本调用提交的候选成为协议答案，raw 即该候选字节。
+	commitCommitted
+	// commitBecameComplete：Kind 9 在候选构造期间落地。NotReady 候选作废；
+	// fresh 携带最新完整快照，调用方必须在锁外重建 Available 后走
+	// commitAvailableAnswer 完成最终的原子插入。
+	commitBecameComplete
+)
+
+// beforeCommit 是确定性测试屏障：模拟候选应答构造完成与事务提交之间的调度
+// 暂停；生产实现没有对应物。
+func (store *memoryArbitrationCustodyStore) beforeCommit() {
+	if store.hookBeforeCommit != nil {
+		store.hookBeforeCommit()
+	}
+}
+
+// commitUnavailableAnswer 在单一互斥临界区内完成 "custody 状态复核 + nonce
+// 唯一键 + exact 首次响应插入"。snapshotRequestBytes 是调用方验证证据时使用
+// 的快照字节；rawNotReady/rawGone 是锁外预先签署好的候选。
+//
+// 裁决规则（custody_gone 只属于"曾有记录、已按 retention 删除"这一种事实）：
+//
+//	已有首次响应                      -> commitServed（原样重发）
+//	记录已删除且存在 tombstone        -> 提交 rawGone
+//	记录消失且没有 tombstone          -> errInternalStorage（不签署任何 Kind 11）
+//	requestBytes 与验证快照不一致     -> errCustodyConflict（不占用 nonce、不落 Kind 11）
+//	仍是 Prepared                     -> 提交 rawNotReady
+//	Kind 9 已落地                     -> commitBecameComplete（NotReady 作废，需重建 Available）
+func (store *memoryArbitrationCustodyStore) commitUnavailableAnswer(claimKey, nonceKey string, snapshotRequestBytes, rawNotReady, rawGone []byte) (commitOutcome, []byte, *arbitrationCustodyRecord, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.goneClaims[key] = true
+	if served, ok := store.servedResponses[nonceKey]; ok {
+		return commitServed, append([]byte(nil), served...), nil, nil
+	}
+	fresh := store.snapshotLocked(claimKey)
+	tombstone := store.goneClaims[claimKey]
+	switch {
+	case fresh == nil && tombstone != nil:
+		store.servedResponses[nonceKey] = append([]byte(nil), rawGone...)
+		return commitCommitted, append([]byte(nil), rawGone...), nil, nil
+	case fresh == nil:
+		return commitServed, nil, nil, errInternalStorage
+	case !bytes.Equal(fresh.requestBytes, snapshotRequestBytes):
+		return commitServed, nil, nil, errCustodyConflict
+	case fresh.responseBytes == nil:
+		store.servedResponses[nonceKey] = append([]byte(nil), rawNotReady...)
+		return commitCommitted, append([]byte(nil), rawNotReady...), nil, nil
+	default:
+		return commitBecameComplete, nil, fresh, nil
+	}
+}
+
+// commitAvailableAnswer 在 custody 状态确认为 Complete 的前提下原子插入
+// Available。裁决规则与 commitUnavailableAnswer 一致：
+//
+//	已有首次响应                    -> 原样重发
+//	记录已删除且存在 tombstone      -> 提交 rawGone
+//	记录消失且没有 tombstone        -> errInternalStorage
+//	requestBytes 与验证快照不一致   -> errCustodyConflict
+//	responseBytes 与验证快照不一致  -> errCustodyCorrupt（不落任何 Kind 11）
+//	状态未变                        -> 提交 rawAvailable
+func (store *memoryArbitrationCustodyStore) commitAvailableAnswer(claimKey, nonceKey string, expect *arbitrationCustodyRecord, rawAvailable, rawGone []byte) ([]byte, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if served, ok := store.servedResponses[nonceKey]; ok {
+		return append([]byte(nil), served...), nil
+	}
+	fresh := store.snapshotLocked(claimKey)
+	tombstone := store.goneClaims[claimKey]
+	switch {
+	case fresh == nil && tombstone != nil:
+		store.servedResponses[nonceKey] = append([]byte(nil), rawGone...)
+		return append([]byte(nil), rawGone...), nil
+	case fresh == nil:
+		return nil, errInternalStorage
+	case !bytes.Equal(fresh.requestBytes, expect.requestBytes):
+		return nil, errCustodyConflict
+	case fresh.responseBytes == nil || !bytes.Equal(fresh.responseBytes, expect.responseBytes):
+		return nil, fmt.Errorf("%w: stored response bytes changed under one claim id", errCustodyCorrupt)
+	}
+	store.servedResponses[nonceKey] = append([]byte(nil), rawAvailable...)
+	return append([]byte(nil), rawAvailable...), nil
+}
+
+// custodyTombstone 是 retention 删除后的最小墓碑：保留资金池锁定脚本，
+// 使 Arbiter 仍能从 Claim 关联恢复 Buyer 公钥完成 Kind 10 鉴权（§15.1）。
+type custodyTombstone struct {
+	poolLockingScript []byte
+}
+
+// expireRetention 模拟留存期结束并安全删除内容，但保留可验证的 tombstone
+// 与 nonce 去重记录；tombstone 不足以重建 payload，只支持鉴权与 gone 判定。
+// 已持久化的首次响应与内容一起删除：删除后同请求重放不再泄露 payload，
+// 而是由 tombstone 鉴权路径回答签名的 gone。重复执行 retention 是幂等的：
+// 记录已不存在时不触碰 tombstone 与已提交的 Gone 应答，幂等重放继续生效。
+func (store *memoryArbitrationCustodyStore) expireRetention(claimID protocol.ArbitrationClaimID) {
+	key := hex.EncodeToString(claimID[:])
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record := store.records[key]
+	existed := record != nil && len(record.requestBytes) > 0
+	if existed {
+		decoded, err := arbitration.UnmarshalRequest(record.requestBytes)
+		if err == nil {
+			claim, claimErr := arbitration.UnmarshalClaim(decoded.ArbitrationClaimCBOR)
+			if claimErr == nil {
+				store.goneClaims[key] = &custodyTombstone{poolLockingScript: append([]byte(nil), claim.PoolOutputLockingScript...)}
+			}
+		}
+	}
 	delete(store.records, key)
+	if !existed {
+		return
+	}
+	for nonceKey := range store.servedResponses {
+		if strings.HasPrefix(nonceKey, key+":") {
+			delete(store.servedResponses, nonceKey)
+		}
+	}
 }
 
 // handleContentRetrieval 实现施工单固定的应用级顺序：
 //
-//	strict decode Kind 10 -> 按 Claim ID 查 custody record
-//	  -> 锁内一次性深拷贝 exact Kind 8/9 快照
-//	  -> 锁外执行存储损坏检查与 SDK 完整验证（先验签）
-//	  -> CAS 前重新加锁确认记录版本未变，再原子占用 nonce
-//	  -> 构造 Kind 11，内嵌已验证的 exact Kind 8/9 副本
-func (store *memoryArbitrationCustodyStore) handleContentRetrieval(rawKind10 []byte, arbiter *arbitration.Workflow) ([]byte, error) {
+//	strict decode Kind 10 -> 派生 request ID（SHA-256(exact request cbor)，
+//	  与 (ClaimID, Nonce) 一一对应）
+//	  -> 阶段〇 锁内查首次持久化响应：命中则原样重发——同一
+//	     content_retrieval_request_id 的重放永远得到第一份 Kind 11，
+//	     状态变化后绝不升级为 available
+//	  -> 快照 tombstone / custody record
+//	  -> not_received：无法鉴权的明确例外——不占用 nonce、不持久化响应；
+//	     生产实现必须限流且不得返回敏感状态（§15.6）
+//	  -> gone：tombstone 恢复 Buyer 公钥完成鉴权后，提交签名的四元 gone Kind 11
+//	  -> 锁外损坏检查（失败关闭）+ SDK 完整验证（先验签）
+//	  -> not_ready：鉴权通过后锁外构造 NotReady/Gone 候选，再进入状态感知
+//	     原子提交：期间 Kind 9 落地则放弃 NotReady、基于新快照重建 Available；
+//	     期间内容被 retention 删除则改答 Gone——旧 nonce 永远不会再变成下载
+//	     授权，Buyer 必须换新 nonce 重试
+//	  -> available：锁外构造候选 Available；随后在单一原子事务内完成
+//	     "custody 版本/retention 状态复核 + nonce 唯一键 + exact 响应插入"。
+//	     验证期间内容被 retention 删除时，候选 payload 签名直接作废，改答
+//	     并持久化签名的 gone——绝不复活已删除内容。并发产生的未提交签名
+//	     一律丢弃，最终只返回已成功提交的那一份响应字节。
+func (store *memoryArbitrationCustodyStore) handleContentRetrieval(rawKind10 []byte, arbiter *arbitration.Workflow, arbiterKey *ec.PrivateKey) ([]byte, error) {
 	retrievalRequest, err := arbitration.UnmarshalContentRetrievalRequest(rawKind10)
 	if err != nil {
 		return nil, err
 	}
-	key := hex.EncodeToString(retrievalRequest.ClaimID)
-
-	// 阶段一：锁内取得快照。
-	store.mu.Lock()
-	gone := store.goneClaims[key]
-	record := store.snapshotLocked(key)
-	store.mu.Unlock()
-	if gone && record == nil {
-		return nil, errRetentionGone
-	}
-	if record == nil {
-		return nil, errRetrievalNotFound
-	}
-	requestBytes, responseBytes := record.requestBytes, record.responseBytes
-
-	// 锁外：失败关闭的损坏检查。有 Kind 8、没有 Kind 9 是合法 NotReady，
-	// 不是损坏；无法 strict decode 才是损坏。
-	storedRequest, err := arbitration.UnmarshalRequest(requestBytes)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, err)
-	}
-	if responseBytes == nil {
-		return nil, errRetrievalNotReady
-	}
-	storedResponse, err := arbitration.UnmarshalResponse(responseBytes)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, err)
-	}
-	// 先验签：SDK 完整验证托管证据链 + Buyer 对 [4,10,claim_id,nonce] 的签名。
-	// 存储证据本身验证失败属于持久化冲突/攻击：按损坏隔离告警。
-	if _, err := arbitration.VerifyCustodiedContent(storedRequest, storedResponse); err != nil {
-		return nil, fmt.Errorf("%w: stored evidence failed verification; isolate and alarm: %v", errCustodyCorrupt, err)
-	}
-	if _, err := arbiter.VerifyContentRetrievalRequest(retrievalRequest, storedRequest, storedResponse); err != nil {
-		// 统一 Unauthorized 语义：不泄露 Claim 是否存在或哪个字段失败。
-		return nil, fmt.Errorf("%w: %v", errRetrievalUnauthorized, err)
-	}
-
-	// 阶段二：CAS 前重新加锁，确认记录版本/状态没有变化，再原子占用 nonce；
-	// CAS 成功即释放锁——真实实现应在事务提交后结束数据库占用，
-	// 再用已验证的快照构造响应，绝不在持锁状态下做 CBOR 构造。
-	store.mu.Lock()
-	fresh := store.snapshotLocked(key)
-	if fresh == nil || !bytes.Equal(fresh.requestBytes, requestBytes) {
-		store.mu.Unlock()
-		return nil, errRetentionGone
-	}
-	if fresh.responseBytes == nil || !bytes.Equal(fresh.responseBytes, responseBytes) {
-		store.mu.Unlock()
-		return nil, errRetrievalNotReady
-	}
-	nonceKey := key + ":" + hex.EncodeToString(retrievalRequest.Nonce)
-	if store.nonceRecords[nonceKey] {
-		store.mu.Unlock()
-		return nil, errNonceReused
-	}
-	store.nonceRecords[nonceKey] = true
-	store.mu.Unlock()
-
-	// 锁外：用已验证的快照构造 Kind 11。
-	response, err := arbitration.BuildContentRetrievalResponse(requestBytes, responseBytes)
+	claimID, retrievalNonce, err := arbitration.DecodeContentRetrievalRequestDocument(retrievalRequest.ContentRetrievalRequestCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return arbitration.MarshalContentRetrievalResponse(response)
+	requestIDHash := sha256.Sum256(retrievalRequest.ContentRetrievalRequestCBOR)
+	requestID := protocol.ContentRetrievalRequestID(requestIDHash)
+	key := hex.EncodeToString(claimID[:])
+	nonceKey := key + ":" + hex.EncodeToString(retrievalNonce)
+
+	buildUnavailable := func(reason arbitration.ContentRetrievalUnavailableReason) ([]byte, error) {
+		response, buildErr := arbitration.BuildContentRetrievalUnavailable(requestID, reason, arbiterKey)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return arbitration.MarshalContentRetrievalResponse(response)
+	}
+
+	// 阶段〇：幂等重放。
+	store.mu.Lock()
+	if served, ok := store.servedResponses[nonceKey]; ok {
+		store.mu.Unlock()
+		return append([]byte(nil), served...), nil
+	}
+	tombstone := store.goneClaims[key]
+	record := store.snapshotLocked(key)
+	store.mu.Unlock()
+
+	if record == nil && tombstone == nil {
+		// not_received：没有 Claim 就无法恢复 Buyer 公钥完成鉴权。这是唯一
+		// 不占用 nonce、不持久化响应的例外分支；生产实现必须对随机 Claim ID
+		// 查询限流，防止把 Arbiter 变成无限签名服务（§15.6）。
+		return buildUnavailable(arbitration.RetrievalSellerArbitrationNotReceived)
+	}
+	if record == nil {
+		// gone：墓碑保留了资金池锁定脚本，可恢复 Buyer 公钥完成鉴权；内容
+		// 已按 retention policy 删除，构造并原子提交签名的四元 gone Kind 11。
+		keys, keysErr := pool.ParseArbitratedPoolLockingScript(tombstone.poolLockingScript)
+		if keysErr != nil {
+			return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, keysErr)
+		}
+		if protocol.VerifyWireDocument(keys.BuyerPublicKey, protocol.WireVersion, 10, retrievalRequest.ContentRetrievalRequestCBOR, retrievalRequest.BuyerContentRetrievalRequestSignature) != nil {
+			return nil, fmt.Errorf("%w: %v", errRetrievalUnauthorized, errors.New("tombstone buyer authentication failed"))
+		}
+		rawGone, buildErr := buildUnavailable(arbitration.RetrievalCustodyGone)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return store.commitFirstAnswer(nonceKey, rawGone), nil
+	}
+
+	// 锁外：失败关闭的损坏检查。有 Kind 8、没有 Kind 9 是合法 NotReady，
+	// 不是损坏；无法 strict decode 才是损坏。
+	storedRequest, err := arbitration.UnmarshalRequest(record.requestBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, err)
+	}
+	if record.responseBytes == nil {
+		// not_ready：已有持久化 Kind 8，但 Kind 9 尚未签署完成。先用已验证
+		// Kind 8 的 Claim 关联完成 Buyer 鉴权；随后锁外构造 NotReady 与 Gone
+		// 两个候选，再进入状态感知的原子提交——提交临界区会复核 custody
+		// 状态：期间 Kind 9 落地则放弃 NotReady 并重建 Available，期间内容被
+		// retention 删除则改答 Gone。绝不在删除后应答 not_ready，也绝不让
+		// 已 ready 的记录继续回答 not_ready。
+		if authErr := arbiter.AuthenticateContentRetrievalRequest(retrievalRequest, storedRequest); authErr != nil {
+			return nil, fmt.Errorf("%w: %v", errRetrievalUnauthorized, authErr)
+		}
+		rawNotReady, buildErr := buildUnavailable(arbitration.RetrievalSellerArbitrationNotReady)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		rawGone, buildErr := buildUnavailable(arbitration.RetrievalCustodyGone)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		store.beforeCommit()
+		outcome, raw, fresh, commitErr := store.commitUnavailableAnswer(key, nonceKey, record.requestBytes, rawNotReady, rawGone)
+		if commitErr != nil {
+			return nil, commitErr
+		}
+		if outcome == commitBecameComplete {
+			// Kind 9 在窗口内落地：NotReady 候选作废。基于最新完整快照重新
+			// 执行锁外损坏检查与完整验证，构造 Available 后走状态感知插入。
+			rebuiltRequest, rebuildErr := arbitration.UnmarshalRequest(fresh.requestBytes)
+			if rebuildErr != nil {
+				return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, rebuildErr)
+			}
+			rebuiltResponse, rebuildErr := arbitration.UnmarshalResponse(fresh.responseBytes)
+			if rebuildErr != nil {
+				return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, rebuildErr)
+			}
+			if _, err := arbitration.VerifyCustodiedContent(rebuiltRequest, rebuiltResponse); err != nil {
+				return nil, fmt.Errorf("%w: stored evidence failed verification; isolate and alarm: %v", errCustodyCorrupt, err)
+			}
+			reverified, err := arbiter.VerifyContentRetrievalRequest(retrievalRequest, rebuiltRequest, rebuiltResponse)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", errRetrievalUnauthorized, err)
+			}
+			rebuiltAvailable, err := arbitration.BuildContentRetrievalAvailableRaw(requestID, reverified.PayloadsCBOR, arbiterKey)
+			if err != nil {
+				return nil, err
+			}
+			rawAvailable, err := arbitration.MarshalContentRetrievalResponse(rebuiltAvailable)
+			if err != nil {
+				return nil, err
+			}
+			store.beforeCommit()
+			raw, commitErr = store.commitAvailableAnswer(key, nonceKey, fresh, rawAvailable, rawGone)
+			if commitErr != nil {
+				return nil, commitErr
+			}
+		}
+		return raw, nil
+	}
+	storedResponse, err := arbitration.UnmarshalResponse(record.responseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCustodyCorrupt, err)
+	}
+	// 先验签：存储证据本身验证失败属于持久化冲突/攻击，按损坏隔离告警。
+	if _, err := arbitration.VerifyCustodiedContent(storedRequest, storedResponse); err != nil {
+		return nil, fmt.Errorf("%w: stored evidence failed verification; isolate and alarm: %v", errCustodyCorrupt, err)
+	}
+	// Buyer 对精确 content_retrieval_request_cbor 的统一签名验证；统一
+	// Unauthorized 语义：不泄露 Claim 是否存在或哪个字段失败。
+	verified, err := arbiter.VerifyContentRetrievalRequest(retrievalRequest, storedRequest, storedResponse)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errRetrievalUnauthorized, err)
+	}
+
+	// 锁外构造两个候选应答：content_payloads_id 绑定 VerifyCustodiedContent
+	// 返回并验证过的 exact payload bundle——托管证据链是 payload 的唯一真值；
+	// gone 兜底用于验证期间内容被 retention 删除的竞争窗口。签名可以在
+	// 事务外完成；未提交的签名之后会被直接丢弃。
+	response, err := arbitration.BuildContentRetrievalAvailableRaw(requestID, verified.PayloadsCBOR, arbiterKey)
+	if err != nil {
+		return nil, err
+	}
+	rawAvailable, err := arbitration.MarshalContentRetrievalResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	rawGoneFallback, err := buildUnavailable(arbitration.RetrievalCustodyGone)
+	if err != nil {
+		return nil, err
+	}
+	store.beforeCommit()
+
+	// 状态感知的单一原子事务：custody 版本/retention 复核 + nonce 唯一键 +
+	// exact 响应插入在同一临界区完成；并发产生的未提交签名直接丢弃。
+	return store.commitAvailableAnswer(key, nonceKey, record, rawAvailable, rawGoneFallback)
 }
 
 func (s integrationSigner) PublicKey(context.Context) ([]byte, error) {
@@ -437,13 +665,13 @@ func newProtocolFixtureWithExpiry(t *testing.T, expiry uint32) *protocolFixture 
 	}
 	f.seedContent(t)
 
-	arbiters, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{f.arbiterKey.PubKey().Compressed()})
+	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 001: seller creates the quote, buyer verifies and accepts it; both sides
 	// keep their own copy as application state.
-	quote, err := f.seller.CreateQuote(f.ctx, bitfs.FileQuoteTerms{SeedHash: masterseed.Sum256(f.seed).Bytes(), BuyerPubkey: f.buyerKey.PubKey().Compressed(), SeedPriceSat: 100, FullBlockPriceSat: 1000, FileSize: uint64(len(f.source)), QuoteExpiresAtUnix: f.now.Add(time.Hour).Unix(), SupportedArbiterPubkeysCBOR: arbiters}, "file.bin")
+	quote, err := f.seller.CreateQuote(f.ctx, bitfs.FileQuoteTerms{SeedHash: masterseed.Sum256(f.seed).Bytes(), BuyerPublicKey: f.buyerKey.PubKey().Compressed(), SeedPriceSatoshis: 100, FullBlockPriceSatoshis: 1000, FileSizeBytes: uint64(len(f.source)), QuoteExpiresAtUnixSeconds: f.now.Add(time.Hour).Unix(), SupportedArbiterPublicKeysCBOR: arbiters}, "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +694,7 @@ func (f *protocolFixture) seedContent(t *testing.T) {
 
 func (f *protocolFixture) buildFunding(t *testing.T, satoshis uint64) []byte {
 	t.Helper()
-	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPubKey: f.buyerKey.PubKey().Compressed(), SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPublicKey: f.buyerKey.PubKey().Compressed(), SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +712,7 @@ func (f *protocolFixture) buildFunding(t *testing.T, satoshis uint64) []byte {
 // and returns every intermediate value explicitly.
 func (f *protocolFixture) openPool(t *testing.T, fundingTx []byte) (*buyer.RefundPresignAcceptance, *seller.PoolFundingAcceptance, *pool.OpeningProof) {
 	t.Helper()
-	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTx: fundingTx, ExpiryLockTime: f.expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTransactionRaw: fundingTx, ExpiryLockTime: f.expiry, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +724,7 @@ func (f *protocolFixture) openPool(t *testing.T, fundingTx []byte) (*buyer.Refun
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := f.buyer.BuildFundingTxDelivery(f.ctx, acceptance.Opening)
+	delivery, err := f.buyer.BuildFundingTransactionDelivery(f.ctx, acceptance.Opening)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,14 +748,14 @@ func (f *protocolFixture) openMainPool(t *testing.T) {
 
 func (f *protocolFixture) facts() uint32 { return 900000 }
 
-// arbitrationFeeSat 是集成测试中应用层固定、可审计的正仲裁费：调用方先计价，
+// arbitrationFeeSatoshis 是集成测试中应用层固定、可审计的正仲裁费：调用方先计价，
 // 再把明确金额交给 SDK；SDK 不注入任何费率策略。
-const arbitrationFeeSat uint64 = 777
+const arbitrationFeeSatoshis uint64 = 777
 
 func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: f.completed.Opening.BuyerPubKey, SellerPubKey: f.completed.Opening.SellerPubKey, ArbiterPubKey: f.completed.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: f.completed.Opening.BuyerPublicKey, SellerPublicKey: f.completed.Opening.SellerPublicKey, ArbiterPublicKey: f.completed.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,16 +793,16 @@ func TestFullLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err := engine.VerifyAcceptedPayment(latest, f.completed.Opening); err != nil {
 		t.Fatalf("accepted payment invalid: %v", err)
 	}
-	if latest.SellerAmountSat != 100 {
-		t.Fatalf("seller amount = %d, want seed price 100", latest.SellerAmountSat)
+	if latest.SellerAmountSatoshis != 100 {
+		t.Fatalf("seller amount = %d, want seed price 100", latest.SellerAmountSatoshis)
 	}
 
 	// 006: immediate close from explicit latest state.
-	unsigned, buyerSig, err := f.buyer.BuildImmediateClose(f.ctx, f.completed.Opening, latest, latest.SellerAmountSat, f.facts())
+	unsigned, buyerSignature, err := f.buyer.BuildImmediateClose(f.ctx, f.completed.Opening, latest, latest.SellerAmountSatoshis, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed, err := f.seller.SignImmediateClose(f.ctx, f.completed.Opening, unsigned, buyerSig, f.facts())
+	closed, err := f.seller.SignImmediateClose(f.ctx, f.completed.Opening, unsigned, buyerSignature, f.facts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +831,7 @@ func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts(), arbitrationFeeSat)
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts(), arbitrationFeeSatoshis)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,14 +843,14 @@ func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: f.completed.Opening.BuyerPubKey, SellerPubKey: f.completed.Opening.SellerPubKey, ArbiterPubKey: f.completed.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: f.completed.Opening.BuyerPublicKey, SellerPublicKey: f.completed.Opening.SellerPublicKey, ArbiterPublicKey: f.completed.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.VerifyArbitratedPayment(&signed.State, f.completed.Opening); err != nil {
 		t.Fatalf("arbitrated payment invalid: %v", err)
 	}
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,8 +858,8 @@ func TestArbitrationLifecycleWithExplicitStatePassing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.ArbiterAmountSat != arbitrationFeeSat || signed.State.ArbiterAmountSat != arbitrationFeeSat || rawState.Outputs[2].Satoshis != arbitrationFeeSat {
-		t.Fatalf("paid fee mismatch: receipt %d state %d raw %d want %d", receipt.ArbiterAmountSat, signed.State.ArbiterAmountSat, rawState.Outputs[2].Satoshis, arbitrationFeeSat)
+	if receipt.ArbiterAmountSatoshis != arbitrationFeeSatoshis || signed.State.ArbiterAmountSatoshis != arbitrationFeeSatoshis || rawState.Outputs[2].Satoshis != arbitrationFeeSatoshis {
+		t.Fatalf("paid fee mismatch: receipt %d state %d raw %d want %d", receipt.ArbiterAmountSatoshis, signed.State.ArbiterAmountSatoshis, rawState.Outputs[2].Satoshis, arbitrationFeeSatoshis)
 	}
 }
 
@@ -655,11 +883,11 @@ func TestArbitrationCustodyPersistenceGatesSigning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordKey := hex.EncodeToString(claimID)
+	recordKey := hex.EncodeToString(claimID[:])
 
 	// 托管保存失败：处理器必须在任何签名之前失败，且不产生响应。
 	failingStore := newMemoryArbitrationCustodyStore()
@@ -697,22 +925,21 @@ func TestArbitrationCustodyPersistenceGatesSigning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("saved raw Kind 8 failed strict re-decode: %v", err)
 	}
-	if !bytes.Equal(recovered.ClaimCBOR, arbitrationRequest.ClaimCBOR) || !bytes.Equal(recovered.ContentPayloadsCBOR, arbitrationRequest.ContentPayloadsCBOR) {
+	if !bytes.Equal(recovered.ArbitrationClaimCBOR, arbitrationRequest.ArbitrationClaimCBOR) || !bytes.Equal(recovered.ContentPayloadsCBOR, arbitrationRequest.ContentPayloadsCBOR) {
 		t.Fatal("recovered request does not round-trip to the original evidence")
 	}
-	localClaimID, err := arbitration.ArbitrationClaimID(recovered.ClaimCBOR)
+	localClaimID, err := arbitration.ArbitrationClaimID(recovered.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(localClaimID, record.claimID) {
+	if localClaimID != record.claimID {
 		t.Fatal("custody record retained a Claim ID inconsistent with the saved raw request")
 	}
-	if record.arbiterAmountSat != arbitrationFeeSat {
-		t.Fatalf("custody fee = %d, want the frozen %d", record.arbiterAmountSat, arbitrationFeeSat)
+	if record.arbiterAmountSatoshis != arbitrationFeeSatoshis {
+		t.Fatalf("custody fee = %d, want the frozen %d", record.arbiterAmountSatoshis, arbitrationFeeSatoshis)
 	}
-	if len(record.payloadsCBOR) == 0 || !bytes.Equal(record.payloadsCBOR, arbitrationRequest.ContentPayloadsCBOR) {
-		t.Fatal("custody record did not retain the exact payload bundle")
-	}
+	// payload 没有第二份存储真值：它只存在于 exact Kind 8 字节内，由严格
+	// 解码重新派生并与授权哈希链绑定（上方 recovered.ContentPayloadsCBOR）。
 
 	// 同一 Claim 重试：直接重发已保存 canonical bytes；计价器与签名器计数
 	// 不再增加；重发字节与首次响应逐字节一致；返回的是副本而非内部引用。
@@ -784,15 +1011,15 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimIDA, err := arbitration.ArbitrationClaimID(arbitrationA.ClaimCBOR)
+	claimIDA, err := arbitration.ArbitrationClaimID(arbitrationA.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimIDB, err := arbitration.ArbitrationClaimID(arbitrationB.ClaimCBOR)
+	claimIDB, err := arbitration.ArbitrationClaimID(arbitrationB.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(claimIDA, claimIDB) {
+	if claimIDA == claimIDB {
 		t.Fatal("test premise broken: the two Claims share one Claim ID")
 	}
 	responseB, err := store.handleArbitrationRequest(rawB, f.arbiter, f.facts())
@@ -802,7 +1029,7 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 	if bytes.Equal(responseA, responseB) {
 		t.Fatal("a different valid Claim received the first Claim's saved response")
 	}
-	recordB := store.recordOf(hex.EncodeToString(claimIDB))
+	recordB := store.recordOf(hex.EncodeToString(claimIDB[:]))
 	if recordB == nil || !bytes.Equal(recordB.requestBytes, rawB) {
 		t.Fatal("the second Claim did not get its own custody record")
 	}
@@ -823,11 +1050,11 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conflictClaimID, err := arbitration.ArbitrationClaimID(sameClaimOtherBundle.ClaimCBOR)
+	conflictClaimID, err := arbitration.ArbitrationClaimID(sameClaimOtherBundle.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(conflictClaimID, claimIDA) {
+	if conflictClaimID != claimIDA {
 		t.Fatal("test premise broken: swapping payloads changed the Claim ID")
 	}
 	if _, err := store.handleArbitrationRequest(rawInvalidPayload, f.arbiter, f.facts()); !errors.Is(err, pool.ErrInvalidEvidence) {
@@ -837,7 +1064,7 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 	// 4. 同 Claim ID、Seller Claim signature 被篡改：同样必须先完整验签，
 	//    验签失败按 invalid evidence 拒绝，不计冲突。
 	badSignature := cloneArbitrationRequestForTest(arbitrationA)
-	badSignature.SellerClaimSignature[len(badSignature.SellerClaimSignature)-1] ^= 1
+	badSignature.SellerArbitrationClaimSignature[len(badSignature.SellerArbitrationClaimSignature)-1] ^= 1
 	rawBadSignature, err := arbitration.MarshalRequest(badSignature)
 	if err != nil {
 		t.Fatal(err)
@@ -846,10 +1073,10 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 		t.Fatalf("tampered seller signature on a known claim error = %v, want pool.ErrInvalidEvidence", err)
 	}
 
-	// 5. 同 Claim ID、外层 Seller 签名不同但密码学有效（ECDSA high-S 可延展
-	//    变体，通过完整 Seller/Buyer/payload/余额验证）：这才是真正的重复
-	//    证据冲突——报警并停止自动流程，且绝不覆盖原记录。
-	baseSig, err := ec.ParseDERSignature(arbitrationA.SellerClaimSignature)
+	// 5. 同 Claim ID、ECDSA high-S 可延展变体：协议统一强制 low-S，
+	//    high-S 变体必须作为 invalid evidence 拒绝——同一认证文档只存在
+	//    一份有效 wire 签名，绝不进入重复证据冲突通道。
+	baseSig, err := ec.ParseDERSignature(arbitrationA.SellerArbitrationClaimSignature)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,36 +1085,31 @@ func TestArbitrationCustodyIdempotencyConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(variantSignature, arbitrationA.SellerClaimSignature) {
+	if bytes.Equal(variantSignature, arbitrationA.SellerArbitrationClaimSignature) {
 		t.Fatal("test premise broken: the malleated signature is byte-identical")
 	}
-	validVariant := cloneArbitrationRequestForTest(arbitrationA)
-	validVariant.SellerClaimSignature = variantSignature
-	rawValidVariant, err := arbitration.MarshalRequest(validVariant)
+	highSVariant := cloneArbitrationRequestForTest(arbitrationA)
+	highSVariant.SellerArbitrationClaimSignature = variantSignature
+	rawHighSVariant, err := arbitration.MarshalRequest(highSVariant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 变体签名本身必须能通过协议固定验证器，证明它确实是"有效但不同"。
-	domain, err := arbitration.SellerClaimSigningCBOR(validVariant.ClaimCBOR)
+	keys, err := pool.ParseArbitratedPoolLockingScript(mustClaimForTest(t, highSVariant.ArbitrationClaimCBOR).PoolOutputLockingScript)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := pool.ParseArbitratedPoolLockingScript(mustClaimForTest(t, validVariant.ClaimCBOR).PoolOutputLockingScript)
-	if err != nil {
-		t.Fatal(err)
+	if err := protocol.VerifyWireDocument(keys.SellerPublicKey, protocol.WireVersion, 8, highSVariant.ArbitrationClaimCBOR, highSVariant.SellerArbitrationClaimSignature); !errors.Is(err, protocol.ErrHighSSignature) {
+		t.Fatalf("high-S seller signature error = %v, want protocol.ErrHighSSignature", err)
 	}
-	if err := bitfs.VerifySignature(keys.SellerPubKey, domain, validVariant.SellerClaimSignature); err != nil {
-		t.Fatalf("test premise broken: the malleated signature does not verify: %v", err)
+	recordA := store.recordOf(hex.EncodeToString(claimIDA[:]))
+	if _, err := store.handleArbitrationRequest(rawHighSVariant, f.arbiter, f.facts()); !errors.Is(err, pool.ErrInvalidEvidence) {
+		t.Fatalf("high-S same-claim variant error = %v, want pool.ErrInvalidEvidence", err)
 	}
-	recordA := store.recordOf(hex.EncodeToString(claimIDA))
-	if _, err := store.handleArbitrationRequest(rawValidVariant, f.arbiter, f.facts()); err == nil {
-		t.Fatal("a fully valid different-bytes variant was accepted instead of conflicted")
+	if !bytes.Equal(recordA.requestBytes, rawA) || !bytes.Equal(recordA.responseBytes, responseA) || recordA.arbiterAmountSatoshis != arbitrationFeeSatoshis {
+		t.Fatal("the high-S rejection path mutated the stored evidence or response")
 	}
-	if !bytes.Equal(recordA.requestBytes, rawA) || !bytes.Equal(recordA.responseBytes, responseA) || recordA.arbiterAmountSat != arbitrationFeeSat {
-		t.Fatal("the conflict path mutated the stored evidence or response")
-	}
-	if store.conflicts != 1 {
-		t.Fatalf("conflict counter = %d, want exactly 1 (only the fully valid variant)", store.conflicts)
+	if store.conflicts != 0 {
+		t.Fatalf("conflict counter = %d, want 0: a high-S variant is invalid evidence, not a conflict", store.conflicts)
 	}
 
 	// 4. exact 同一请求重试：计价与签名计数保持不变。
@@ -951,16 +1173,15 @@ func TestArbitrationCrashRecoverySignsFromSavedEvidenceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimID, err := arbitration.ArbitrationClaimID(decoded.ClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(decoded.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := hex.EncodeToString(claimID)
+	key := hex.EncodeToString(claimID[:])
 	crashedStore.putRecord(&arbitrationCustodyRecord{
-		requestBytes:     append([]byte(nil), rawKind8...),
-		payloadsCBOR:     prepared.ContentPayloadsCBOR(),
-		claimID:          prepared.ClaimID(),
-		arbiterAmountSat: prepared.ArbiterAmountSat(),
+		requestBytes:          append([]byte(nil), rawKind8...),
+		claimID:               prepared.ArbitrationClaimID(),
+		arbiterAmountSatoshis: prepared.ArbiterAmountSatoshis(),
 	})
 
 	// 恢复：处理器发现"只有托管、没有响应"，从保存的 exact bytes 与保存的
@@ -981,7 +1202,7 @@ func TestArbitrationCrashRecoverySignsFromSavedEvidenceOnly(t *testing.T) {
 }
 
 func cloneArbitrationRequestForTest(request *arbitration.ArbitrationRequest) *arbitration.ArbitrationRequest {
-	return &arbitration.ArbitrationRequest{Version: request.Version, ClaimCBOR: append([]byte(nil), request.ClaimCBOR...), SellerClaimSignature: append([]byte(nil), request.SellerClaimSignature...), ContentPayloadsCBOR: append([]byte(nil), request.ContentPayloadsCBOR...)}
+	return &arbitration.ArbitrationRequest{ArbitrationClaimCBOR: append([]byte(nil), request.ArbitrationClaimCBOR...), SellerArbitrationClaimSignature: append([]byte(nil), request.SellerArbitrationClaimSignature...), ContentPayloadsCBOR: append([]byte(nil), request.ContentPayloadsCBOR...)}
 }
 
 func mustClaimForTest(t *testing.T, claimCBOR []byte) *arbitration.ArbitrationClaim {
@@ -1000,17 +1221,17 @@ func TestWrongBuyerCannotActOnAnotherBuyersPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wrongBuyer.BuildFundingTxDelivery(f.ctx, f.acceptance.Opening); err == nil {
+	if _, err := wrongBuyer.BuildFundingTransactionDelivery(f.ctx, f.acceptance.Opening); err == nil {
 		t.Fatal("wrong buyer delivered another buyer's funding transaction")
 	}
-	if _, _, err := wrongBuyer.BuildImmediateClose(f.ctx, f.completed.Opening, f.completed.InitialPayment, f.completed.InitialPayment.SellerAmountSat, f.facts()); err == nil {
+	if _, _, err := wrongBuyer.BuildImmediateClose(f.ctx, f.completed.Opening, f.completed.InitialPayment, f.completed.InitialPayment.SellerAmountSatoshis, f.facts()); err == nil {
 		t.Fatal("wrong buyer signed an immediate close")
 	}
 }
 
 func TestWrongSellerCannotPresignOrDeliverForAnotherSellersPool(t *testing.T) {
 	f := newProtocolFixture(t)
-	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTx: f.buildFunding(t, 100000), ExpiryLockTime: f.expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	preparation, err := f.buyer.PreparePoolOpening(f.ctx, pool.OpeningInput{FundingTransactionRaw: f.buildFunding(t, 100000), ExpiryLockTime: f.expiry, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1047,7 +1268,7 @@ func TestExpiredFactsRejectForwardOperationsButEnableRefundBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refund build after expiry failed: %v", err)
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: f.completed.Opening.BuyerPubKey, SellerPubKey: f.completed.Opening.SellerPubKey, ArbiterPubKey: f.completed.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: f.completed.Opening.BuyerPublicKey, SellerPublicKey: f.completed.Opening.SellerPublicKey, ArbiterPublicKey: f.completed.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,8 +1301,8 @@ func TestStaleSequenceAndTamperedEvidenceAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := &pool.PaymentUpdate{Version: verified.Update.Version, PaymentAuthorizationHash: append([]byte(nil), verified.Update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), verified.Update.BuyerTransactionSignature...)}
-	tampered.PaymentAuthorizationHash[0] ^= 0xff
+	tampered := &pool.PaymentUpdate{PaymentAuthorizationID: verified.Update.PaymentAuthorizationID, BuyerPaymentTransactionSignature: append([]byte(nil), verified.Update.BuyerPaymentTransactionSignature...)}
+	tampered.PaymentAuthorizationID[0] ^= 0xff
 	if _, err := f.seller.AcceptPayment(f.ctx, f.completed.Opening, f.completed.InitialPayment, request, deliveryState, tampered, f.facts()); err == nil {
 		t.Fatal("tampered authorization hash was accepted")
 	}
@@ -1097,7 +1318,7 @@ func TestConsecutiveCumulativePaymentRoundsShareConfirmedState(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
 	opening := f.completed.Opening
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opening.BuyerPubKey, SellerPubKey: opening.SellerPubKey, ArbiterPubKey: opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opening.BuyerPublicKey, SellerPublicKey: opening.SellerPublicKey, ArbiterPublicKey: opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,11 +1356,11 @@ func TestConsecutiveCumulativePaymentRoundsShareConfirmedState(t *testing.T) {
 	// complete dual-signed state as their latest.
 	buyerLatest := &signed1.State
 	sellerLatest := &signed1.State
-	if buyerLatest.PaymentSequence != sellerLatest.PaymentSequence || buyerLatest.SellerAmountSat != sellerLatest.SellerAmountSat {
+	if buyerLatest.PaymentSequence != sellerLatest.PaymentSequence || buyerLatest.SellerAmountSatoshis != sellerLatest.SellerAmountSatoshis {
 		t.Fatal("buyer and seller persisted different confirmed states")
 	}
-	if buyerLatest.PaymentSequence != confirmed.PaymentSequence+1 || buyerLatest.SellerAmountSat != 100 {
-		t.Fatalf("round-one state = seq %d amount %d, want seq %d amount 100", buyerLatest.PaymentSequence, buyerLatest.SellerAmountSat, confirmed.PaymentSequence+1)
+	if buyerLatest.PaymentSequence != confirmed.PaymentSequence+1 || buyerLatest.SellerAmountSatoshis != 100 {
+		t.Fatalf("round-one state = seq %d amount %d, want seq %d amount 100", buyerLatest.PaymentSequence, buyerLatest.SellerAmountSatoshis, confirmed.PaymentSequence+1)
 	}
 
 	// Round two must consume round one's confirmed state.
@@ -1150,8 +1371,8 @@ func TestConsecutiveCumulativePaymentRoundsShareConfirmedState(t *testing.T) {
 	if signed2.State.PaymentSequence != buyerLatest.PaymentSequence+1 {
 		t.Fatalf("round-two sequence = %d, want %d", signed2.State.PaymentSequence, buyerLatest.PaymentSequence+1)
 	}
-	if signed2.State.SellerAmountSat != buyerLatest.SellerAmountSat+100 {
-		t.Fatalf("round-two cumulative amount = %d, want %d", signed2.State.SellerAmountSat, buyerLatest.SellerAmountSat+100)
+	if signed2.State.SellerAmountSatoshis != buyerLatest.SellerAmountSatoshis+100 {
+		t.Fatalf("round-two cumulative amount = %d, want %d", signed2.State.SellerAmountSatoshis, buyerLatest.SellerAmountSatoshis+100)
 	}
 	if !bytes.Equal(signed2.RawTx, signed2.State.RawTx) {
 		t.Fatal("round-two merged transaction does not match its parsed state")
@@ -1198,7 +1419,8 @@ func (store *memoryArbitrationCustodyStore) runCustodyThroughKind9(t *testing.T,
 	if _, err := store.handleArbitrationRequest(rawKind8, f.arbiter, f.facts()); err != nil {
 		t.Fatal(err)
 	}
-	custodyKey := mustHex(t, mustClaimIDOf(t, rawKind8))
+	runClaimID := mustClaimIDOf(t, rawKind8)
+	custodyKey := mustHex(t, runClaimID[:])
 	record := store.recordOf(custodyKey)
 	if record == nil || record.responseBytes == nil || !store.retrievable(custodyKey) {
 		t.Fatal("custody record did not reach the Retrievable state")
@@ -1206,13 +1428,49 @@ func (store *memoryArbitrationCustodyStore) runCustodyThroughKind9(t *testing.T,
 	return rawKind8, record.responseBytes
 }
 
-func mustClaimIDOf(t *testing.T, rawKind8 []byte) []byte {
+// assertSignedUnavailable 校验 not_received/not_ready 分支的协议真值：
+// 四元 [1,11,...] 外壳、Arbiter 统一签名、请求 ID 绑定、无附件、原因正确。
+func assertSignedUnavailable(t *testing.T, f *protocolFixture, request10A *arbitration.ContentRetrievalRequest, rawKind11 []byte, wantReason arbitration.ContentRetrievalUnavailableReason) {
+	t.Helper()
+	if len(rawKind11) < 3 || rawKind11[0] != 0x84 || rawKind11[1] != 0x01 || rawKind11[2] != 0x0b {
+		t.Fatalf("unavailable Kind 11 must be a four-element [1,11,...] array: %x", rawKind11)
+	}
+	response, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.ContentPayloadsCBOR != nil {
+		t.Fatal("unavailable Kind 11 carried an attachment")
+	}
+	result, err := arbitration.VerifyContentRetrievalResponse(request10A, f.completed.Opening.ArbiterPublicKey, response)
+	if err != nil {
+		t.Fatalf("unavailable Kind 11 failed verification: %v", err)
+	}
+	if result.Available {
+		t.Fatal("unavailable branch verified as available")
+	}
+	decoded, err := arbitration.DecodeContentRetrievalResultDocument(response.ContentRetrievalResultCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.UnavailableReason != wantReason {
+		t.Fatalf("unavailable reason = %d, want %d", decoded.UnavailableReason, wantReason)
+	}
+}
+
+func mustClaimIDBytes(t *testing.T, prepared *arbitration.PreparedPayment) []byte {
+	t.Helper()
+	id := prepared.ArbitrationClaimID()
+	return append([]byte(nil), id[:]...)
+}
+
+func mustClaimIDOf(t *testing.T, rawKind8 []byte) protocol.ArbitrationClaimID {
 	t.Helper()
 	request, err := arbitration.UnmarshalRequest(rawKind8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1240,7 +1498,7 @@ func TestBuyerArbitratedContentRetrievalLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawKind8, storedRawKind9 := store.runCustodyThroughKind9(t, f, request003)
+	rawKind8, _ := store.runCustodyThroughKind9(t, f, request003)
 	claimID := mustClaimIDOf(t, rawKind8)
 
 	// Buyer：应用生成密码学安全随机 nonce（此处用 crypto/rand 演示），发送前
@@ -1257,10 +1515,10 @@ func TestBuyerArbitratedContentRetrievalLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(rawKind10, claimID) {
+	if !bytes.Contains(rawKind10, claimID[:]) {
 		t.Fatal("Kind 10 does not route by the independently rebuilt Claim ID")
 	}
-	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter)
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1268,8 +1526,12 @@ func TestBuyerArbitratedContentRetrievalLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(retrievalResponse.ArbitrationRequestCBOR, rawKind8) || !bytes.Equal(retrievalResponse.ArbitrationResponseCBOR, storedRawKind9) {
-		t.Fatal("Kind 11 did not return the exact persisted custody bytes")
+	verifiedResult, err := arbitration.VerifyContentRetrievalResponse(retrievalRequest, f.completed.Opening.ArbiterPublicKey, retrievalResponse)
+	if err != nil {
+		t.Fatalf("Kind 11 failed verification against the buyer request: %v", err)
+	}
+	if !verifiedResult.Available || !bytes.Equal(verifiedResult.PayloadsCBOR, mustDecodeKind8(t, rawKind8).ContentPayloadsCBOR) {
+		t.Fatal("Kind 11 payload attachment does not bind the custodied bundle")
 	}
 	// Buyer 验收并保存 payload；验收不产生 005、不改 previous、不关池。
 	previousSnapshot := pool.ClonePaymentState(f.completed.InitialPayment)
@@ -1280,26 +1542,34 @@ func TestBuyerArbitratedContentRetrievalLifecycle(t *testing.T) {
 	if len(verified.Payloads) != 1 || !bytes.Equal(verified.Payloads[0], f.seed) {
 		t.Fatal("retrieved payloads do not match the custodied content")
 	}
-	if !bytes.Equal(verified.ClaimID, claimID) || verified.Receipt == nil || !bytes.Equal(verified.Receipt.ClaimID, claimID) {
-		t.Fatal("verified audit data does not bind the Claim ID")
+	if verified.ArbitrationClaimID != claimID || verified.ContentRetrievalRequestID != protocol.ContentRetrievalRequestID(requestIDOf(t, retrievalRequest)) {
+		t.Fatal("verified audit data does not bind the Claim ID and request ID")
 	}
 	if !samePaymentStateForIntegration(previousSnapshot, f.completed.InitialPayment) {
 		t.Fatal("acceptance changed the previous payment state")
 	}
 }
 
+func requestIDOf(t *testing.T, request *arbitration.ContentRetrievalRequest) []byte {
+	t.Helper()
+	digest := sha256.Sum256(request.ContentRetrievalRequestCBOR)
+	return digest[:]
+}
+
 func samePaymentStateForIntegration(left, right *pool.PaymentState) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.RefundTemplateTxID == right.RefundTemplateTxID && left.PaymentSequence == right.PaymentSequence && left.SellerAmountSat == right.SellerAmountSat && bytes.Equal(left.RawTx, right.RawTx)
+	return left.RefundTemplateTxID == right.RefundTemplateTxID && left.PaymentSequence == right.PaymentSequence && left.SellerAmountSatoshis == right.SellerAmountSatoshis && bytes.Equal(left.RawTx, right.RawTx)
 }
 
-// TestBuyerRetrievalApplicationErrorChannels pins every application-level
-// failure path: NotFound, NotReady (custody prepared but Kind 9 unsigned),
-// Unauthorized, NonceReused including concurrent CAS, new-nonce retry,
+// TestBuyerRetrievalResponsesAndApplicationErrorChannels pins every
+// response branch and application-level failure path: the three signed Kind 11
+// answers (not_received / not_ready / available), replay of the first
+// persisted answer, Unauthorized, concurrent identical requests resolving to
+// one committed response, new-nonce retry after an explicit not_ready,
 // retention Gone, and corrupted storage.
-func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
+func TestBuyerRetrievalResponsesAndApplicationErrorChannels(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
 
@@ -1319,7 +1589,7 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 		}
 		return raw
 	}
-	buildChain := func(deadline time.Time) (*bitfs.SignedContentRequest, []byte) {
+	buildChain := func(deadline time.Time) (*bitfs.SignedContentRequest, protocol.ArbitrationClaimID) {
 		input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(deadline.Unix())}
 		request003, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
 		if err != nil {
@@ -1332,15 +1602,14 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	store := newMemoryArbitrationCustodyStore()
 
 	// NotReady：只有托管、尚未签署 Kind 9 的记录不得返回 payload。
-	preparedOnly, err := f.arbiter.PreparePayment(f.ctx, mustDecodeKind8(t, mustMarshalKind8ForRetrieval(t, f, requestA)), f.facts(), arbitrationFeeSat)
+	preparedOnly, err := f.arbiter.PreparePayment(f.ctx, mustDecodeKind8(t, mustMarshalKind8ForRetrieval(t, f, requestA)), f.facts(), arbitrationFeeSatoshis)
 	if err != nil {
 		t.Fatal(err)
 	}
 	store.putRecord(&arbitrationCustodyRecord{
-		requestBytes:     append([]byte(nil), mustMarshalKind8ForRetrieval(t, f, requestA)...),
-		payloadsCBOR:     preparedOnly.ContentPayloadsCBOR(),
-		claimID:          preparedOnly.ClaimID(),
-		arbiterAmountSat: preparedOnly.ArbiterAmountSat(),
+		requestBytes:          append([]byte(nil), mustMarshalKind8ForRetrieval(t, f, requestA)...),
+		claimID:               preparedOnly.ArbitrationClaimID(),
+		arbiterAmountSatoshis: preparedOnly.ArbiterAmountSatoshis(),
 	})
 	nonceA := bytes.Repeat([]byte{0x11}, 32)
 	kind10A, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, requestA, nonceA)
@@ -1351,14 +1620,41 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.handleContentRetrieval(raw10A, f.arbiter); !errors.Is(err, errRetrievalNotReady) {
-		t.Fatalf("NotReady error = %v", err)
+	// not_ready 现在是 Arbiter 签名的四元 Kind 11：可验签、绑定请求 ID、无附件。
+	// 该回答同时原子占用了 (ClaimID, NonceA) 并持久化为该请求的唯一答案。
+	notReadyRaw, err := store.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatalf("NotReady path returned an application error: %v", err)
+	}
+	assertSignedUnavailable(t, f, kind10A, notReadyRaw, arbitration.RetrievalSellerArbitrationNotReady)
+
+	// 同一 content_retrieval_request_id 立即重放：原样返回第一次持久化的
+	// not_ready，而不是重新评估或返回瞬态占用错误。
+	replayedNotReady, err := store.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(replayedNotReady, notReadyRaw) {
+		t.Fatal("not_ready replay did not return the first persisted response")
 	}
 
-	// 完成签署后同一请求可以取回；同时证明验签失败不污染 nonce 表。
+	// 完成签署后同一请求仍必须得到同一份 not_ready：曾经捕获的 Kind 10 永远
+	// 不能在状态变化后升级为下载授权；Buyer 必须换新 nonce。
 	if _, err := store.handleArbitrationRequest(mustMarshalKind8ForRetrieval(t, f, requestA), f.arbiter, f.facts()); err != nil {
 		t.Fatal(err)
 	}
+	if !store.retrievable(hex.EncodeToString(claimIDA[:])) {
+		t.Fatal("custody record did not become retrievable after Kind 9 signing")
+	}
+	upgraded, err := store.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(upgraded, notReadyRaw) {
+		t.Fatal("a captured not_ready request became a download authorization after the record turned ready")
+	}
+	assertSignedUnavailable(t, f, kind10A, upgraded, arbitration.RetrievalSellerArbitrationNotReady)
+
 	wrongBuyer, err := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: integrationKey(t, "44")})
 	if err != nil {
 		t.Fatal(err)
@@ -1370,34 +1666,35 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	if err == nil {
 		t.Fatal("wrong buyer unexpectedly built a valid Kind 10 for another buyer's opening")
 	}
-	signing, signingErr := arbitration.BuyerRetrievalSigningCBOR(kind10A.ClaimID, forgeNonce)
-	if signingErr != nil {
-		t.Fatal(signingErr)
+	kind10AClaimID, _, decodeErr := arbitration.DecodeContentRetrievalRequestDocument(kind10A.ContentRetrievalRequestCBOR)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
-	badSig, sigErr := bitfs.SignMessage(integrationKey(t, "44"), signing)
+	forgeDoc, forgeDocErr := arbitration.EncodeContentRetrievalRequestDocument(kind10AClaimID, forgeNonce)
+	if forgeDocErr != nil {
+		t.Fatal(forgeDocErr)
+	}
+	badSig, sigErr := protocol.SignWireDocument(integrationKey(t, "44"), protocol.WireVersion, 10, forgeDoc)
 	if sigErr != nil {
 		t.Fatal(sigErr)
 	}
-	forgeRequest = &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), kind10A.ClaimID...), Nonce: append([]byte(nil), forgeNonce...), BuyerSignature: badSig}
-	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, forgeRequest), f.arbiter); !errors.Is(err, errRetrievalUnauthorized) {
+	forgeRequest = &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: forgeDoc, BuyerContentRetrievalRequestSignature: badSig}
+	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, forgeRequest), f.arbiter, f.arbiterKey); !errors.Is(err, errRetrievalUnauthorized) {
 		t.Fatalf("Unauthorized error = %v", err)
 	}
 	store.mu.Lock()
-	polluted := len(store.nonceRecords) != 0
+	polluted := false
+	for nonceKey := range store.servedResponses {
+		if strings.HasSuffix(nonceKey, ":"+hex.EncodeToString(forgeNonce)) {
+			polluted = true
+		}
+	}
 	store.mu.Unlock()
 	if polluted {
 		t.Fatal("a failed-signature request polluted the nonce table")
 	}
 
-	first11, err := store.handleContentRetrieval(raw10A, f.arbiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// NonceReused：同 (ClaimID, Nonce) 第二次必须失败。
-	if replay, err := store.handleContentRetrieval(raw10A, f.arbiter); !errors.Is(err, errNonceReused) || replay != nil {
-		t.Fatalf("NonceReused error = %v result %v", err, replay)
-	}
-	// 新 nonce 重试：retention 期内合法重复下载，内容一致。
+	// 新 nonce 重试：retention 期内唯一合法的再次取回路径。
 	retryNonce := bytes.Repeat([]byte{0x33}, 32)
 	kind10Retry, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, requestA, retryNonce)
 	if err != nil {
@@ -1407,40 +1704,76 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second11, err := store.handleContentRetrieval(raw10Retry, f.arbiter)
+	first11, err := store.handleContentRetrieval(raw10Retry, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(first11, second11) {
-		t.Fatal("retry with a fresh nonce returned different custody bytes")
+	firstParsed, parsedErr := arbitration.UnmarshalContentRetrievalResponse(first11)
+	if parsedErr != nil {
+		t.Fatal(parsedErr)
+	}
+	if len(firstParsed.ContentPayloadsCBOR) == 0 {
+		t.Fatal("fresh-nonce retrieval did not deliver payloads")
+	}
+	// Available 重放：同样原样重发第一次持久化的响应字节。
+	replayAvailable, err := store.handleContentRetrieval(raw10Retry, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(replayAvailable, first11) {
+		t.Fatal("available replay did not return the first persisted response verbatim")
 	}
 
 	// NotFound：未知 Claim ID。
 	unknownClaimID := bytes.Repeat([]byte{0x7f}, 32)
-	signingUnknown, err := arbitration.BuyerRetrievalSigningCBOR(unknownClaimID, nonceA)
+	var typedUnknownID protocol.ArbitrationClaimID
+	copy(typedUnknownID[:], unknownClaimID)
+	unknownDoc, err := arbitration.EncodeContentRetrievalRequestDocument(typedUnknownID, nonceA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sigUnknown, err := bitfs.SignMessage(f.buyerKey, signingUnknown)
+	sigUnknown, err := protocol.SignWireDocument(f.buyerKey, protocol.WireVersion, 10, unknownDoc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknownRequest := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: unknownClaimID, Nonce: append([]byte(nil), nonceA...), BuyerSignature: sigUnknown}
-	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, unknownRequest), f.arbiter); !errors.Is(err, errRetrievalNotFound) {
-		t.Fatalf("NotFound error = %v", err)
+	unknownRequest := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: unknownDoc, BuyerContentRetrievalRequestSignature: sigUnknown}
+	// not_received：没有 Claim，无法鉴权 Buyer；仍返回签名的最小四元 Kind 11。
+	// 明确例外：不占用 nonce、不持久化响应；生产实现必须限流。
+	notFoundRaw, nfErr := store.handleContentRetrieval(mustMarshalKind10(t, unknownRequest), f.arbiter, f.arbiterKey)
+	if nfErr != nil {
+		t.Fatalf("NotFound path returned an application error: %v", nfErr)
 	}
+	assertSignedUnavailable(t, f, unknownRequest, notFoundRaw, arbitration.RetrievalSellerArbitrationNotReceived)
+	store.mu.Lock()
+	if len(store.servedResponses) != 2 {
+		store.mu.Unlock()
+		t.Fatalf("not_received must not write any state: served=%d", len(store.servedResponses))
+	}
+	store.mu.Unlock()
 
-	// Gone：留存期结束并安全删除后返回 Gone，nonce 记录保留。
+	// Gone：留存期结束并安全删除后返回 Gone；nonce 记录保留，已持久化的
+	// 首次响应随内容一起删除——删除后重放不再泄露 payload。tombstone 保留
+	// Claim/角色公钥关联；先完成 Buyer 鉴权再返回签名的四元 Kind 11，
+	// 绝不泄露任何 payload 或记录元数据。
 	store.expireRetention(claimIDA)
-	if _, err := store.handleContentRetrieval(raw10Retry, f.arbiter); !errors.Is(err, errRetentionGone) {
-		t.Fatalf("Gone error = %v", err)
+	goneRaw, goneErr := store.handleContentRetrieval(raw10Retry, f.arbiter, f.arbiterKey)
+	if goneErr != nil {
+		t.Fatalf("Gone path returned an application error: %v", goneErr)
+	}
+	assertSignedUnavailable(t, f, kind10Retry, goneRaw, arbitration.RetrievalCustodyGone)
+	goneReplay, goneReplayErr := store.handleContentRetrieval(raw10Retry, f.arbiter, f.arbiterKey)
+	if goneReplayErr != nil {
+		t.Fatal(goneReplayErr)
+	}
+	if !bytes.Equal(goneReplay, goneRaw) {
+		t.Fatal("gone replay did not return the first persisted response verbatim")
 	}
 
 	// 存储损坏：exact Kind 8 字节损坏时失败关闭，隔离记录。
 	store2 := newMemoryArbitrationCustodyStore()
 	raw8B, _ := store2.runCustodyThroughKind9(t, f, requestA)
 	claimIDB := mustClaimIDOf(t, raw8B)
-	recordB := store2.recordOf(hex.EncodeToString(claimIDB))
+	recordB := store2.recordOf(hex.EncodeToString(claimIDB[:]))
 	savedCopy := append([]byte(nil), recordB.requestBytes...)
 	// 破坏 CBOR 结构头，使 strict decode 直接失败（失败关闭，隔离记录）。
 	recordB.requestBytes[0] ^= 0xff
@@ -1453,16 +1786,18 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store2.handleContentRetrieval(raw10B, f.arbiter); !errors.Is(err, errCustodyCorrupt) {
+	if _, err := store2.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey); !errors.Is(err, errCustodyCorrupt) {
 		t.Fatalf("corruption error = %v", err)
 	}
 	recordB.requestBytes = savedCopy
 	store2.putRecord(recordB)
-	if _, err := store2.handleContentRetrieval(raw10B, f.arbiter); err != nil {
+	if _, err := store2.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey); err != nil {
 		t.Fatalf("restored record still failed: %v", err)
 	}
 
-	// 并发 nonce CAS：两个相同 nonce 的并发请求只有一个成功。
+	// 并发相同 exact Kind 10：原子提交裁决唯一胜者；其余竞争者全部读取并
+	// 返回首次提交的同一份 Kind 11 字节——绝不允许出现第二份不同的成功响应，
+	// 也绝不向 Buyer 暴露瞬态占用错误。
 	store3 := newMemoryArbitrationCustodyStore()
 	raw8C, _ := store3.runCustodyThroughKind9(t, f, requestA)
 	_ = raw8C
@@ -1475,25 +1810,46 @@ func TestBuyerRetrievalApplicationErrorChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const racers = 4
-	results := make(chan error, racers)
+	const racers = 8
+	type raceOutcome struct {
+		raw []byte
+		err error
+	}
+	results := make(chan raceOutcome, racers)
 	for index := 0; index < racers; index++ {
 		go func() {
-			_, err := store3.handleContentRetrieval(raw10C, f.arbiter)
-			results <- err
+			raw, err := store3.handleContentRetrieval(raw10C, f.arbiter, f.arbiterKey)
+			results <- raceOutcome{raw: raw, err: err}
 		}()
 	}
-	successes := 0
+	var committedResponse []byte
 	for index := 0; index < racers; index++ {
-		err := <-results
-		if err == nil {
-			successes++
-		} else if !errors.Is(err, errNonceReused) {
-			t.Fatalf("concurrent racer failed with %v", err)
+		outcome := <-results
+		if outcome.err != nil {
+			t.Fatalf("concurrent racer failed with %v", outcome.err)
+		}
+		if committedResponse == nil {
+			committedResponse = outcome.raw
+		}
+		if !bytes.Equal(outcome.raw, committedResponse) {
+			t.Fatal("concurrent identical requests observed more than one stored response")
 		}
 	}
-	if successes != 1 {
-		t.Fatalf("concurrent nonce CAS winners = %d, want exactly 1", successes)
+	if committedResponse == nil {
+		t.Fatal("no concurrent racer produced a response")
+	}
+	parsedC, parseCErr := arbitration.UnmarshalContentRetrievalResponse(committedResponse)
+	if parseCErr != nil {
+		t.Fatal(parseCErr)
+	}
+	if len(parsedC.ContentPayloadsCBOR) == 0 {
+		t.Fatal("committed response did not deliver payloads")
+	}
+	store3.mu.Lock()
+	servedCount := len(store3.servedResponses)
+	store3.mu.Unlock()
+	if servedCount != 1 {
+		t.Fatalf("stored responses = %d, want exactly 1", servedCount)
 	}
 }
 
@@ -1517,8 +1873,9 @@ func mustDecodeKind8(t *testing.T, raw []byte) *arbitration.ArbitrationRequest {
 
 // TestRetrievalRacesWithKind9AppendAndRetentionDelete runs retrieval against
 // concurrent custody-state transitions under -race: appending Kind 9 turns a
-// CustodyPrepared record into Retrievable, retention deletion turns everything
-// into Gone. Every outcome must stay inside the declared error channels, the
+// CustodyPrepared record into Retrievable (state-aware commit rebuilds the
+// Available answer), retention deletion turns every answer into signed Gone.
+// Every outcome must stay inside the declared error channels, the
 // nonce table must never be polluted by failed attempts, and the record must
 // be retrievable exactly once per nonce after it becomes ready.
 func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
@@ -1550,15 +1907,14 @@ func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.arbiter.PreparePayment(f.ctx, decoded, f.facts(), arbitrationFeeSat)
+	prepared, err := f.arbiter.PreparePayment(f.ctx, decoded, f.facts(), arbitrationFeeSatoshis)
 	if err != nil {
 		t.Fatal(err)
 	}
 	storeA.putRecord(&arbitrationCustodyRecord{
-		requestBytes:     append([]byte(nil), rawKind8...),
-		payloadsCBOR:     prepared.ContentPayloadsCBOR(),
-		claimID:          prepared.ClaimID(),
-		arbiterAmountSat: prepared.ArbiterAmountSat(),
+		requestBytes:          append([]byte(nil), rawKind8...),
+		claimID:               prepared.ArbitrationClaimID(),
+		arbiterAmountSatoshis: prepared.ArbiterAmountSatoshis(),
 	})
 	nonceA := bytes.Repeat([]byte{0x91}, 32)
 	kind10A, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceA)
@@ -1569,23 +1925,51 @@ func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 记录就绪前的第一次询问：not_ready 被签名并持久化为该请求的唯一答案。
+	notReadyAnswer, err := storeA.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSignedUnavailable(t, f, kind10A, notReadyAnswer, arbitration.RetrievalSellerArbitrationNotReady)
 
 	raceResult := make(chan error, 1)
 	go func() {
-		var lastErr error
 		for attempt := 0; attempt < 200; attempt++ {
-			_, err := storeA.handleContentRetrieval(raw10A, f.arbiter)
-			if err == nil {
-				raceResult <- nil
-				return
-			}
-			if !errors.Is(err, errRetrievalNotReady) {
+			// not_ready 之后必须换新 nonce：旧 nonce 的答案已持久化，永远
+			// 不会再升级为可交付授权。
+			attemptNonce := make([]byte, arbitration.RetrievalNonceBytes)
+			if _, err := rand.Read(attemptNonce); err != nil {
 				raceResult <- err
 				return
 			}
-			lastErr = err
+			attemptKind10, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, attemptNonce)
+			if err != nil {
+				raceResult <- err
+				return
+			}
+			attemptRaw, err := arbitration.MarshalContentRetrievalRequest(attemptKind10)
+			if err != nil {
+				raceResult <- err
+				return
+			}
+			raw11Race, err := storeA.handleContentRetrieval(attemptRaw, f.arbiter, f.arbiterKey)
+			if err != nil {
+				raceResult <- err
+				return
+			}
+			// not_ready 分支返回无附件的签名 Kind 11；可交付分支带 payload。
+			raceParsed, parseErr := arbitration.UnmarshalContentRetrievalResponse(raw11Race)
+			if parseErr != nil {
+				raceResult <- parseErr
+				return
+			}
+			if raceParsed.ContentPayloadsCBOR != nil {
+				raceResult <- nil
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		raceResult <- lastErr
+		raceResult <- errors.New("custody record never became retrievable")
 	}()
 	response, err := f.arbiter.SignPreparedPayment(f.ctx, prepared)
 	if err != nil {
@@ -1595,13 +1979,18 @@ func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeA.appendResponse(hex.EncodeToString(claimID), rawKind9)
+	storeA.appendResponse(hex.EncodeToString(claimID[:]), rawKind9)
 	if err := <-raceResult; err != nil {
 		t.Fatalf("retrieval racing with Kind 9 append failed outside the declared channels: %v", err)
 	}
-	// 记录就绪后：同一 nonce 已被竞速胜者占用（NonceReused），新 nonce 必须成功。
-	if _, err := storeA.handleContentRetrieval(raw10A, f.arbiter); !errors.Is(err, errNonceReused) {
-		t.Fatalf("same-nonce replay after success error = %v", err)
+	// 记录就绪后重放就绪前的 Kind 10：仍必须得到同一份 not_ready——状态
+	// 变化绝不把已应答的请求升级为 available。
+	upgradedAnswer, err := storeA.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(upgradedAnswer, notReadyAnswer) {
+		t.Fatal("a captured not_ready request was upgraded after the record became retrievable")
 	}
 	retryNonce := bytes.Repeat([]byte{0x92}, 32)
 	kind10Retry, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, retryNonce)
@@ -1612,25 +2001,28 @@ func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw11, err := storeA.handleContentRetrieval(raw10Retry, f.arbiter)
+	raw11, err := storeA.handleContentRetrieval(raw10Retry, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatalf("fresh-nonce retrieval after readiness failed: %v", err)
 	}
-	storedKind8 := storeA.recordOf(hex.EncodeToString(claimID)).requestBytes
-	storedKind9 := storeA.recordOf(hex.EncodeToString(claimID)).responseBytes
-	if !bytes.Contains(raw11, storedKind8) || !bytes.Contains(raw11, storedKind9) {
-		t.Fatal("Kind 11 does not embed the exact persisted bytes")
+	// payload 唯一真值：附件必须逐字节等于托管 exact Kind 8 内的 bundle。
+	storedRequest := mustDecodeKind8(t, storeA.recordOf(hex.EncodeToString(claimID[:])).requestBytes)
+	parsed11, parseErr := arbitration.UnmarshalContentRetrievalResponse(raw11)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	if !bytes.Equal(parsed11.ContentPayloadsCBOR, storedRequest.ContentPayloadsCBOR) {
+		t.Fatal("Kind 11 attachment is not the exact persisted payload bundle")
 	}
 
 	// ---- 阶段 B：并发取件 vs retention 删除。----
 	storeB := newMemoryArbitrationCustodyStore()
 	storeB.putRecord(&arbitrationCustodyRecord{
-		requestBytes:     append([]byte(nil), rawKind8...),
-		payloadsCBOR:     prepared.ContentPayloadsCBOR(),
-		claimID:          prepared.ClaimID(),
-		arbiterAmountSat: prepared.ArbiterAmountSat(),
+		requestBytes:          append([]byte(nil), rawKind8...),
+		claimID:               prepared.ArbitrationClaimID(),
+		arbiterAmountSatoshis: prepared.ArbiterAmountSatoshis(),
 	})
-	storeB.appendResponse(hex.EncodeToString(claimID), rawKind9)
+	storeB.appendResponse(hex.EncodeToString(claimID[:]), rawKind9)
 	nonceB := bytes.Repeat([]byte{0x93}, 32)
 	kind10B, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceB)
 	if err != nil {
@@ -1651,29 +2043,493 @@ func TestRetrievalRacesWithKind9AppendAndRetentionDelete(t *testing.T) {
 			}
 		}
 	}()
-	successes := 0
+	servedGone := 0
+	var firstAvailable []byte
 	for attempt := 0; attempt < 100; attempt++ {
-		_, err := storeB.handleContentRetrieval(raw10B, f.arbiter)
+		raw11B, err := storeB.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
 		switch {
 		case err == nil:
-			successes++
-		case errors.Is(err, errRetentionGone):
-			// 竞争失败方必须得到 Gone，绝不能是其他错误通道。
-		case errors.Is(err, errNonceReused):
-			// 删除尚未落地时同 nonce 重试：合法重放拒绝，不占用新表项。
+			parsed, parseErr := arbitration.UnmarshalContentRetrievalResponse(raw11B)
+			if parseErr != nil {
+				close(stop)
+				t.Fatalf("race response failed strict decode: %v", parseErr)
+			}
+			if parsed.ContentPayloadsCBOR != nil {
+				// 删除落地前的成功应答（含幂等重放）：同一请求永远只对应
+				// 第一份持久化的 available 字节，绝不允许出现第二份。
+				if firstAvailable == nil {
+					firstAvailable = append([]byte(nil), raw11B...)
+				} else if !bytes.Equal(raw11B, firstAvailable) {
+					close(stop)
+					t.Fatal("retention race produced a second distinct available response")
+				}
+			} else {
+				// 删除落地后的竞争方得到签名的四元 gone Kind 11（nil error）。
+				assertSignedUnavailable(t, f, kind10B, raw11B, arbitration.RetrievalCustodyGone)
+				servedGone++
+			}
 		default:
 			close(stop)
 			t.Fatalf("retrieval racing with retention delete returned %v", err)
 		}
 	}
 	close(stop)
-	if successes > 1 {
-		t.Fatalf("deleted content was served %d times", successes)
+	if servedGone == 0 {
+		t.Log("retention delete landed after all race attempts; no signed-gone answer observed")
 	}
+	// 删除已落地时的最终安全属性：同请求重放绝不再泄露 payload，只能得到
+	// 签名的四元 gone Kind 11（首次持久化响应已随内容一起删除）。
 	storeB.mu.Lock()
-	polluted := len(storeB.nonceRecords) != successes
+	_, deleted := storeB.goneClaims[hex.EncodeToString(claimID[:])]
 	storeB.mu.Unlock()
-	if polluted {
-		t.Fatal("nonce table does not match successful occupations during retention race")
+	if deleted {
+		postRaw, postErr := storeB.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
+		if postErr != nil {
+			t.Fatalf("post-deletion replay error = %v", postErr)
+		}
+		postParsed, postParseErr := arbitration.UnmarshalContentRetrievalResponse(postRaw)
+		if postParseErr != nil {
+			t.Fatal(postParseErr)
+		}
+		if postParsed.ContentPayloadsCBOR != nil {
+			t.Fatal("post-deletion replay leaked the cached available payload")
+		}
+		assertSignedUnavailable(t, f, kind10B, postRaw, arbitration.RetrievalCustodyGone)
 	}
+}
+
+// TestAvailableServesOnlyEvidenceChainPayloads pins the single-truth rule for
+// the 008 available branch: the attached bundle is byte-identical to the
+// payload bundle inside the custodied exact Kind 8 evidence. A poisoned
+// duplicate cache holding another valid-but-unrelated payload CBOR must never
+// be signed — any divergence between stored bytes and the verified evidence
+// chain fails closed before the arbiter produces a Kind 11 signature.
+func TestAvailableServesOnlyEvidenceChainPayloads(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+	store := newMemoryArbitrationCustodyStore()
+
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	request003, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind8, _ := store.runCustodyThroughKind9(t, f, request003)
+	claimID := mustClaimIDOf(t, rawKind8)
+	recordKey := hex.EncodeToString(claimID[:])
+
+	// 模拟应用侧遗留的"第二份 payload 缓存"：一份与证据链无关、但自身完全
+	// 合法（可严格解码、数量与块长合规）的 bundle。参考 handler 不存在任何
+	// 会读取它的字段；签发来源只能是验证过的证据链字节。
+	poisonCache, err := bitfs.EncodeContentPayloads([][]byte{[]byte("poisoned-duplicate-cache-payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonce := bytes.Repeat([]byte{0x71}, 32)
+	kind10, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind10, err := arbitration.MarshalContentRetrievalRequest(kind10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceBundle := mustDecodeKind8(t, store.recordOf(recordKey).requestBytes).ContentPayloadsCBOR
+	if !bytes.Equal(parsed.ContentPayloadsCBOR, evidenceBundle) {
+		t.Fatal("available attachment is not the exact custodied evidence bundle")
+	}
+	if bytes.Equal(parsed.ContentPayloadsCBOR, poisonCache) {
+		t.Fatal("handler served the poisoned duplicate cache instead of the verified evidence")
+	}
+
+	// 反向证明唯一防线：即使攻击者把持久化 Kind 8 内的 bundle 篡改成上述另
+	// 一份合法 CBOR，证据链验证（payload hash ≠ Buyer 授权哈希）也必须在任何
+	// Arbiter 签名之前失败关闭——错误内容永远得不到有效 Kind 11。
+	tamperedRecord := store.recordOf(recordKey)
+	tamperedRequest := mustDecodeKind8(t, tamperedRecord.requestBytes)
+	tamperedRequest.ContentPayloadsCBOR = append([]byte(nil), poisonCache...)
+	tamperedRecord.requestBytes, err = arbitration.MarshalRequest(tamperedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.putRecord(tamperedRecord)
+	retryNonce := bytes.Repeat([]byte{0x72}, 32)
+	kind10Retry, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, retryNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind10Retry, err := arbitration.MarshalContentRetrievalRequest(kind10Retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.handleContentRetrieval(rawKind10Retry, f.arbiter, f.arbiterKey); !errors.Is(err, errCustodyCorrupt) {
+		t.Fatalf("tampered custody bundle error = %v, want errCustodyCorrupt before any signing", err)
+	}
+}
+
+// TestKind11CommitAtomicityBarriers pins the atomic commit contract of the
+// 008 available branch with deterministic barriers:
+//
+//  1. a candidate that fails to build/sign leaves zero residue — the nonce
+//     stays free and the retry succeeds;
+//  2. retention landing after the Available candidate was built but before
+//     the transaction commits must discard the candidate signature and answer
+//     (and persist) a signed Gone — deleted content never comes back;
+//  3. N concurrent identical requests each building their own signature end
+//     with exactly one stored response and byte-identical answers for all.
+func TestKind11CommitAtomicityBarriers(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(30 * time.Minute).Unix())}
+	request003, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buildKind10 := func(t *testing.T, nonce []byte) []byte {
+		t.Helper()
+		kind10, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustMarshalKind10(t, kind10)
+	}
+
+	// ---- Barrier 1：候选构造失败不残留任何占用状态。----
+	barrierStore := newMemoryArbitrationCustodyStore()
+	preparedOnly, err := f.arbiter.PreparePayment(f.ctx, mustDecodeKind8(t, mustMarshalKind8ForRetrievalTest(t, f, request003)), f.facts(), arbitrationFeeSatoshis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrierStore.putRecord(&arbitrationCustodyRecord{
+		requestBytes:          mustMarshalKind8ForRetrievalTest(t, f, request003),
+		claimID:               preparedOnly.ArbitrationClaimID(),
+		arbiterAmountSatoshis: preparedOnly.ArbiterAmountSatoshis(),
+	})
+	nonceA := bytes.Repeat([]byte{0x21}, 32)
+	raw10A := buildKind10(t, nonceA)
+	// arbiterKey = nil 使锁外的签名构造必然失败（模拟签名服务不可用）。
+	if _, err := barrierStore.handleContentRetrieval(raw10A, f.arbiter, nil); err == nil {
+		t.Fatal("candidate construction unexpectedly succeeded without an arbiter key")
+	}
+	barrierStore.mu.Lock()
+	residue := len(barrierStore.servedResponses)
+	barrierStore.mu.Unlock()
+	if residue != 0 {
+		t.Fatalf("failed candidate left %d residue entries; the nonce would be permanently stuck", residue)
+	}
+	notReadyAnswer, err := barrierStore.handleContentRetrieval(raw10A, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatalf("retry after failed candidate failed: %v", err)
+	}
+	kind10A := mustDecodeKind10ForBarrier(t, raw10A)
+	assertSignedUnavailable(t, f, kind10A, notReadyAnswer, arbitration.RetrievalSellerArbitrationNotReady)
+
+	// ---- Barrier 2：Available 构造完成、提交前触发 retention → 绝不返回 payload。----
+	fullStore := newMemoryArbitrationCustodyStore()
+	rawKind8, _ := fullStore.runCustodyThroughKind9(t, f, request003)
+	claimID := mustClaimIDOf(t, rawKind8)
+	nonceB := bytes.Repeat([]byte{0x22}, 32)
+	raw10B := buildKind10(t, nonceB)
+	fullStore.hookBeforeCommit = func() {
+		// 确定性屏障：模拟候选签名完成后、事务提交前 retention 删除落地。
+		fullStore.expireRetention(claimID)
+	}
+	rawKind11, err := fullStore.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatalf("post-retention commit returned an error: %v", err)
+	}
+	parsed, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ContentPayloadsCBOR != nil {
+		t.Fatal("content was resurrected after retention deletion")
+	}
+	assertSignedUnavailable(t, f, mustDecodeKind10ForBarrier(t, raw10B), rawKind11, arbitration.RetrievalCustodyGone)
+	nonceKey := hex.EncodeToString(claimID[:]) + ":" + hex.EncodeToString(nonceB)
+	fullStore.mu.Lock()
+	committed := append([]byte(nil), fullStore.servedResponses[nonceKey]...)
+	fullStore.mu.Unlock()
+	if !bytes.Equal(committed, rawKind11) {
+		t.Fatal("the committed first answer is not the served gone response")
+	}
+	replayAfterDeletion, err := fullStore.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(replayAfterDeletion, committed) {
+		t.Fatal("post-deletion replay diverged from the committed gone answer")
+	}
+	fullStore.hookBeforeCommit = nil
+
+	// ---- Barrier 3：并发相同请求各自构造签名，只保存一份且逐字节一致。----
+	concurrentStore := newMemoryArbitrationCustodyStore()
+	_, _ = concurrentStore.runCustodyThroughKind9(t, f, request003)
+	nonceC := bytes.Repeat([]byte{0x23}, 32)
+	raw10C := buildKind10(t, nonceC)
+	const racers = 12
+	results := make(chan []byte, racers)
+	errCh := make(chan error, racers)
+	for index := 0; index < racers; index++ {
+		go func() {
+			raw, err := concurrentStore.handleContentRetrieval(raw10C, f.arbiter, f.arbiterKey)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			results <- raw
+		}()
+	}
+	var committedResponse []byte
+	for index := 0; index < racers; index++ {
+		select {
+		case err := <-errCh:
+			t.Fatalf("concurrent racer failed: %v", err)
+		case raw := <-results:
+			if committedResponse == nil {
+				committedResponse = raw
+			}
+			if !bytes.Equal(raw, committedResponse) {
+				t.Fatal("racers observed different stored responses")
+			}
+		}
+	}
+	parsedCommitted, err := arbitration.UnmarshalContentRetrievalResponse(committedResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsedCommitted.ContentPayloadsCBOR) == 0 {
+		t.Fatal("committed response did not deliver payloads")
+	}
+	concurrentStore.mu.Lock()
+	storedCount := len(concurrentStore.servedResponses)
+	concurrentStore.mu.Unlock()
+	if storedCount != 1 {
+		t.Fatalf("stored responses = %d, want exactly 1", storedCount)
+	}
+
+	// ---- Barrier 4：NotReady 候选构造完成后、提交前 Kind 9 落地。----
+	// 状态感知提交必须放弃 NotReady 候选，基于新快照重建 Available——
+	// 已 ready 的记录绝不允许继续回答 not_ready。
+	nrStore := newMemoryArbitrationCustodyStore()
+	rawKind8Prepared := mustMarshalKind8ForRetrievalTest(t, f, request003)
+	preparedOnly, prepErr := f.arbiter.PreparePayment(f.ctx, mustDecodeKind8(t, rawKind8Prepared), f.facts(), arbitrationFeeSatoshis)
+	if prepErr != nil {
+		t.Fatal(prepErr)
+	}
+	nrStore.putRecord(&arbitrationCustodyRecord{
+		requestBytes:          append([]byte(nil), rawKind8Prepared...),
+		claimID:               preparedOnly.ArbitrationClaimID(),
+		arbiterAmountSatoshis: preparedOnly.ArbiterAmountSatoshis(),
+	})
+	signedResponse, err := f.arbiter.SignPreparedPayment(f.ctx, preparedOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind9Signed, err := arbitration.MarshalResponse(signedResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedClaimID := preparedOnly.ArbitrationClaimID()
+	preparedClaimKey := hex.EncodeToString(preparedClaimID[:])
+	nonceD := bytes.Repeat([]byte{0x24}, 32)
+	kind10D, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10D := mustMarshalKind10(t, kind10D)
+	nrStore.hookBeforeCommit = func() {
+		// 确定性屏障：NotReady 候选已构造，事务提交前 Kind 9 落库。
+		nrStore.appendResponse(preparedClaimKey, rawKind9Signed)
+	}
+	upgradedAnswer, err := nrStore.handleContentRetrieval(raw10D, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatalf("post-Kind9 commit returned an error: %v", err)
+	}
+	parsedUpgraded, err := arbitration.UnmarshalContentRetrievalResponse(upgradedAnswer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedUpgraded.ContentPayloadsCBOR == nil {
+		t.Fatal("a record that became complete was still answered with not_ready")
+	}
+	evidenceBundle := mustDecodeKind8(t, nrStore.recordOf(preparedClaimKey).requestBytes).ContentPayloadsCBOR
+	if !bytes.Equal(parsedUpgraded.ContentPayloadsCBOR, evidenceBundle) {
+		t.Fatal("rebuilt available did not bind the exact evidence bundle")
+	}
+	nonceDKey := preparedClaimKey + ":" + hex.EncodeToString(nonceD)
+	nrStore.mu.Lock()
+	storedUpgrade := append([]byte(nil), nrStore.servedResponses[nonceDKey]...)
+	nrStore.mu.Unlock()
+	if !bytes.Equal(storedUpgrade, upgradedAnswer) {
+		t.Fatal("the committed first answer is not the rebuilt available response")
+	}
+	replayUpgrade, err := nrStore.handleContentRetrieval(raw10D, f.arbiter, f.arbiterKey)
+	if err != nil || !bytes.Equal(replayUpgrade, storedUpgrade) {
+		t.Fatalf("replay after upgraded answer diverged: %v", err)
+	}
+	nrStore.hookBeforeCommit = nil
+
+	// ---- Barrier 5：NotReady 候选构造完成后、提交前 retention 删除。----
+	// 状态感知提交必须改答并持久化签名的 Gone——删除后绝不回答 not_ready。
+	ngStore := newMemoryArbitrationCustodyStore()
+	ngPrepared, ngErr := f.arbiter.PreparePayment(f.ctx, mustDecodeKind8(t, rawKind8Prepared), f.facts(), arbitrationFeeSatoshis)
+	if ngErr != nil {
+		t.Fatal(ngErr)
+	}
+	ngClaimID := ngPrepared.ArbitrationClaimID()
+	ngStore.putRecord(&arbitrationCustodyRecord{
+		requestBytes:          append([]byte(nil), rawKind8Prepared...),
+		claimID:               ngPrepared.ArbitrationClaimID(),
+		arbiterAmountSatoshis: ngPrepared.ArbiterAmountSatoshis(),
+	})
+	nonceE := bytes.Repeat([]byte{0x25}, 32)
+	kind10E, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10E := mustMarshalKind10(t, kind10E)
+	ngStore.hookBeforeCommit = func() {
+		// 确定性屏障：NotReady 候选已构造，事务提交前 retention 删除落地。
+		ngStore.expireRetention(ngClaimID)
+	}
+	goneAfterDelete, err := ngStore.handleContentRetrieval(raw10E, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatalf("post-retention not_ready commit returned an error: %v", err)
+	}
+	assertSignedUnavailable(t, f, kind10E, goneAfterDelete, arbitration.RetrievalCustodyGone)
+	nonceEKey := hex.EncodeToString(ngClaimID[:]) + ":" + hex.EncodeToString(nonceE)
+	ngStore.mu.Lock()
+	storedGone := append([]byte(nil), ngStore.servedResponses[nonceEKey]...)
+	ngStore.mu.Unlock()
+	if !bytes.Equal(storedGone, goneAfterDelete) {
+		t.Fatal("the committed first answer is not the gone response")
+	}
+	ngStore.hookBeforeCommit = nil
+
+	// ---- Barrier 6：重复执行 retention 不得删除 tombstone 状态下已提交的
+	// Gone 应答——幂等重放在留存终止后继续生效。----
+	goneReplay, err := fullStore.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullStore.expireRetention(mustClaimIDOf(t, rawKind8))
+	goneReplayAgain, err := fullStore.handleContentRetrieval(raw10B, f.arbiter, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(goneReplayAgain, goneReplay) {
+		t.Fatal("repeated retention deleted the already committed gone answer")
+	}
+
+	// ---- Barrier 7：验证完成后、提交前同 Claim 存储字节被替换。----
+	// 这不是 retention：绝不能降级成 custody_gone，必须报证据冲突，
+	// 不占用 nonce、不落任何 Kind 11。
+	conflictStore := newMemoryArbitrationCustodyStore()
+	conflictRawKind8, _ := conflictStore.runCustodyThroughKind9(t, f, request003)
+	conflictClaimID := mustClaimIDOf(t, conflictRawKind8)
+	nonceG := bytes.Repeat([]byte{0x27}, 32)
+	kind10G, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10G := mustMarshalKind10(t, kind10G)
+
+	// 构造另一条完全合法的 Kind 8（不同 deadline -> 不同 Claim ID），
+	// 再把它的字节塞进同一条 custody 键下：模拟存储冲突。
+	otherInput := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(f.now.Add(20 * time.Minute).Unix())}
+	request003Other, err := f.buyer.BuildContentRequest(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, otherInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKind8 := mustMarshalKind8ForRetrievalTest(t, f, request003Other)
+	conflictStore.hookBeforeCommit = func() {
+		conflictStore.putRecord(&arbitrationCustodyRecord{
+			requestBytes:          append([]byte(nil), otherKind8...),
+			claimID:               conflictClaimID,
+			arbiterAmountSatoshis: arbitrationFeeSatoshis,
+		})
+	}
+	_, commitErr := conflictStore.handleContentRetrieval(raw10G, f.arbiter, f.arbiterKey)
+	if !errors.Is(commitErr, errCustodyConflict) {
+		t.Fatalf("storage conflict error = %v, want errCustodyConflict", commitErr)
+	}
+	nonceGKey := hex.EncodeToString(conflictClaimID[:]) + ":" + hex.EncodeToString(nonceG)
+	conflictStore.mu.Lock()
+	servedAfterConflict := len(conflictStore.servedResponses)
+	_, occupied := conflictStore.servedResponses[nonceGKey]
+	conflictStore.mu.Unlock()
+	if servedAfterConflict != 0 || occupied {
+		t.Fatal("a storage conflict persisted an answer or occupied the nonce")
+	}
+	conflictStore.hookBeforeCommit = nil
+
+	// ---- Barrier 8：验证完成后、提交前记录无 tombstone 消失。----
+	// 内部存储错误：绝不凭空签署 custody_gone。
+	vanishStore := newMemoryArbitrationCustodyStore()
+	vanishRawKind8, _ := vanishStore.runCustodyThroughKind9(t, f, request003)
+	vanishClaimID := mustClaimIDOf(t, vanishRawKind8)
+	nonceH := bytes.Repeat([]byte{0x28}, 32)
+	kind10H, err := f.buyer.BuildArbitrationContentRequest(f.ctx, f.completed.Opening, request003, nonceH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw10H := mustMarshalKind10(t, kind10H)
+	vanishClaimKey := hex.EncodeToString(vanishClaimID[:])
+	vanishStore.hookBeforeCommit = func() {
+		// 模拟内部存储故障：记录消失且没有任何 tombstone。
+		vanishStore.mu.Lock()
+		delete(vanishStore.records, vanishClaimKey)
+		vanishStore.mu.Unlock()
+	}
+	_, vanishErr := vanishStore.handleContentRetrieval(raw10H, f.arbiter, f.arbiterKey)
+	if !errors.Is(vanishErr, errInternalStorage) {
+		t.Fatalf("vanishing-record error = %v, want errInternalStorage", vanishErr)
+	}
+	nonceHKey := vanishClaimKey + ":" + hex.EncodeToString(nonceH)
+	vanishStore.mu.Lock()
+	servedAfterVanish := len(vanishStore.servedResponses)
+	_, occupiedVanish := vanishStore.servedResponses[nonceHKey]
+	vanishStore.mu.Unlock()
+	if servedAfterVanish != 0 || occupiedVanish {
+		t.Fatal("an internal storage error persisted an answer or occupied the nonce")
+	}
+}
+
+// mustMarshalKind8ForRetrievalTest builds the exact raw Kind 8 for request003.
+func mustMarshalKind8ForRetrievalTest(t *testing.T, f *protocolFixture, request003 *bitfs.SignedContentRequest) []byte {
+	t.Helper()
+	delivery, _, err := f.seller.BuildContentDelivery(f.ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, request003, seller.ContentDeliveryInput{ContentPayloads: [][]byte{append([]byte(nil), f.seed...)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arbitrationRequest, err := f.seller.BuildArbitrationRequest(f.ctx, f.completed.Opening, request003, delivery, f.facts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := arbitration.MarshalRequest(arbitrationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func mustDecodeKind10ForBarrier(t *testing.T, raw []byte) *arbitration.ContentRetrievalRequest {
+	t.Helper()
+	request, err := arbitration.UnmarshalContentRetrievalRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
 }

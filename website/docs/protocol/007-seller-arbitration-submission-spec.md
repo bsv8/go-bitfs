@@ -1,11 +1,11 @@
 ---
 id: 007-seller-arbitration-submission-spec
-title: 007 · v4 Seller arbitration submission specification
+title: 007 · Seller arbitration submission specification
 ---
 
-# 007 · v4 Seller arbitration submission specification
+# 007 · Seller arbitration submission specification
 
-007 is a destructive v4 hard switch. The old five-element Kind 9 result
+007 became a destructive hard switch when the unified wire model landed. The old five-element Kind 9 result
 response is invalid. Kind 9 is now a four-element receipt response that pays
 the Arbiter a positive, explicitly decided fee, and the receipt binds the
 Claim ID, that fee, and the arbitration transaction signature together under
@@ -17,51 +17,51 @@ persisted the custody evidence.
 ## Wire documents
 
 ```text
-ArbitrationRequest = [
-  4, 8, arbitration_claim_cbor, seller_claim_signature,
+kind-8-arbitration-request = [
+  1, 8, arbitration_claim_cbor, seller_arbitration_claim_signature,
   content_payloads_cbor
 ]
 
-ArbitrationClaim = [
+arbitration_claim = [
   pool_output_satoshis, pool_output_locking_script, refund_template_raw,
-  terms_cbor, buyer_signature
+  payment_authorization_cbor, buyer_payment_authorization_signature
 ]
 
-ArbitrationResponse = [
-  4, 9, arbitration_receipt_cbor, arbiter_receipt_signature
+kind-9-arbitration-response = [
+  1, 9, arbitration_receipt_cbor, arbiter_arbitration_receipt_signature
 ]
 
-ArbitrationReceipt = [arbitration_claim_id, arbiter_amount_sat,
-                      arbiter_transaction_signature]
+arbitration_receipt = [arbitration_claim_id, arbiter_amount_satoshis,
+                       arbiter_payment_transaction_signature]
 ```
 
-`Claim` and `Receipt` contain no version or kind. The transport Kind and the
-body's second element must agree. All child documents are deterministic CBOR
-embedded as `bstr`; decoders reject non-canonical bytes, wrong array lengths,
-tags, indefinite lengths, and trailing bytes. Legacy five-element Kind 9 bytes
-fail deterministically; there is no dual-shape decoder.
+`Claim` and `Receipt` contain no version or kind. All child documents are
+deterministic CBOR embedded as `bstr`; decoders reject non-canonical bytes,
+wrong array lengths, tags, indefinite lengths, and trailing bytes. Legacy
+five-element Kind 9 bytes fail deterministically; there is no dual-shape
+decoder.
 
 The Seller message signature is:
 
 ```text
-seller_claim_signing_cbor = [4, 8, exact_claim_cbor]
-seller_claim_signature = SignMessage(SellerKey, seller_claim_signing_cbor)
+seller_arbitration_claim_signature =
+    SignWireDocument(SellerKey, 1, 8, exact_claim_cbor)
 ```
 
 The Receipt message signature is:
 
 ```text
-arbiter_receipt_signing_cbor = [4, 9, exact_receipt_cbor]
-arbiter_receipt_signature = SignMessage(ArbiterKey, arbiter_receipt_signing_cbor)
+arbiter_arbitration_receipt_signature =
+    SignWireDocument(ArbiterKey, 1, 9, exact_receipt_cbor)
 ```
 
-The Claim ID is `arbitration_claim_id = SHA-256(seller_claim_signing_cbor)`,
-fixed at 32 bytes. It indirectly binds the exact Claim CBOR, the exact Buyer
-terms, and the ordered content hashes. A successful receipt requires
-`arbiter_amount_sat > 0`; zero never means free, declined, or undecided. The
-transaction signature is the independent `ForkID|All` signature and cannot
-replace the Receipt message signature; neither signature can be substituted
-into the other's verification path.
+The Claim ID is `arbitration_claim_id = SHA-256(exact_claim_cbor)`, fixed at
+32 bytes. It indirectly binds the exact Claim CBOR, the exact Buyer-signed
+payment authorization, and the ordered content hashes. A successful receipt
+requires `arbiter_amount_satoshis > 0`; zero never means free, declined, or
+undecided. The transaction signature is the independent `ForkID|All`
+signature and cannot replace the Receipt message signature; neither signature
+can be substituted into the other's verification path.
 
 ## Claim and custody validation
 
@@ -101,9 +101,9 @@ constructs exactly three funded outputs:
 ```text
 Input:  refund outpoint, target sequence, empty unlocking script
         source amount/script in memory for sighash only
-Outputs: Buyer   = spendable - SellerAmountAfterSat - ArbiterAmountSat
-         Seller  = SellerAmountAfterSat
-         Arbiter = ArbiterAmountSat (> 0)
+Outputs: Buyer   = spendable - SellerAmountAfterSatoshis - ArbiterAmountSatoshis
+         Seller  = SellerAmountAfterSatoshis
+         Arbiter = ArbiterAmountSatoshis (> 0)
          where spendable = pool - refund_fee
 LockTime: refund template locktime
 ```
@@ -139,11 +139,11 @@ a different Claim ID gets its own record.
 
 After receiving Kind 9, the Seller recomputes the Claim ID from its own Claim
 bytes, recovers the Arbiter public key from the role-ordered pool script,
-verifies the Receipt message signature over `[4, 9, exact_receipt_cbor]`,
+verifies the Receipt message signature through `VerifyWireDocument(1, 9, exact_receipt_cbor)`,
 rebuilds the candidate with the receipt's arbiter amount, and verifies the
 Arbiter transaction signature against it. Only then does it create its own
 transaction signature and call `MergeArbitratedPoolSellerArbiterSignatures`.
-The completed state carries `ArbiterAmountSat` equal to the receipt amount and
+The completed state carries `ArbiterAmountSatoshis` equal to the receipt amount and
 a Seller amount equal to the Buyer-authorized absolute amount.
 
 ## Retrieval boundary

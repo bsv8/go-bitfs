@@ -21,6 +21,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 type sellerTestSigner struct{ key *ec.PrivateKey }
@@ -48,19 +49,19 @@ func sellerTestKey(t *testing.T, hexByte string) *ec.PrivateKey {
 
 // sellerFixture is the application-side state holder for a full 001–007 run.
 type sellerFixture struct {
-	buyerKey   *ec.PrivateKey
-	sellerKey  *ec.PrivateKey
-	arbiterKey *ec.PrivateKey
-	Buyer      *buyer.Workflow
-	Seller     *Workflow
-	Arbiter    *arbitration.Workflow
-	Quote      *bitfs.SignedFileQuote
-	Seed       []byte
-	FundingTx  []byte
-	State      *buyer.BuyerOpeningState
-	Presign    *SellerPresignResult
-	Acceptance *buyer.RefundPresignAcceptance
-	Expiry     uint32
+	buyerKey              *ec.PrivateKey
+	sellerKey             *ec.PrivateKey
+	arbiterKey            *ec.PrivateKey
+	Buyer                 *buyer.Workflow
+	Seller                *Workflow
+	Arbiter               *arbitration.Workflow
+	Quote                 *bitfs.SignedFileQuote
+	Seed                  []byte
+	FundingTransactionRaw []byte
+	State                 *buyer.BuyerOpeningState
+	Presign               *SellerPresignResult
+	Acceptance            *buyer.RefundPresignAcceptance
+	Expiry                uint32
 }
 
 func newSellerFixture(t *testing.T) *sellerFixture {
@@ -91,11 +92,11 @@ func newSellerFixture(t *testing.T) *sellerFixture {
 	}
 	f.Seed = seedBuffer.Bytes()
 	now := time.Now().UTC()
-	arbiters, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{f.arbiterKey.PubKey().Compressed()})
+	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Quote, err = f.Seller.CreateQuote(context.Background(), bitfs.FileQuoteTerms{SeedHash: masterseed.Sum256(f.Seed).Bytes(), BuyerPubkey: f.buyerKey.PubKey().Compressed(), SeedPriceSat: 100, FullBlockPriceSat: 1000, FileSize: uint64(len(source)), QuoteExpiresAtUnix: now.Add(time.Hour).Unix(), SupportedArbiterPubkeysCBOR: arbiters}, "file.bin")
+	f.Quote, err = f.Seller.CreateQuote(context.Background(), bitfs.FileQuoteTerms{SeedHash: masterseed.Sum256(f.Seed).Bytes(), BuyerPublicKey: f.buyerKey.PubKey().Compressed(), SeedPriceSatoshis: 100, FullBlockPriceSatoshis: 1000, FileSizeBytes: uint64(len(source)), QuoteExpiresAtUnixSeconds: now.Add(time.Hour).Unix(), SupportedArbiterPublicKeysCBOR: arbiters}, "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,16 +104,16 @@ func newSellerFixture(t *testing.T) *sellerFixture {
 		t.Fatal(err)
 	}
 
-	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPubKey: f.buyerKey.PubKey().Compressed(), SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPublicKey: f.buyerKey.PubKey().Compressed(), SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: script.NewFromBytes(lock)})
-	f.FundingTx = funding.Bytes()
+	f.FundingTransactionRaw = funding.Bytes()
 	f.Expiry = uint32(now.Add(time.Hour).Unix())
 
-	preparation, err := f.Buyer.PreparePoolOpening(context.Background(), pool.OpeningInput{FundingTx: f.FundingTx, ExpiryLockTime: f.Expiry, MinerFeeRateSatPerKB: 1, SellerPubKey: f.sellerKey.PubKey().Compressed(), ArbiterPubKey: f.arbiterKey.PubKey().Compressed()})
+	preparation, err := f.Buyer.PreparePoolOpening(context.Background(), pool.OpeningInput{FundingTransactionRaw: f.FundingTransactionRaw, ExpiryLockTime: f.Expiry, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: f.sellerKey.PubKey().Compressed(), ArbiterPublicKey: f.arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func newSellerFixture(t *testing.T) *sellerFixture {
 // openPool completes 0204 + 0205 with explicit state passing.
 func (f *sellerFixture) openPool(t *testing.T) *PoolFundingAcceptance {
 	t.Helper()
-	delivery, err := f.Buyer.BuildFundingTxDelivery(context.Background(), f.Acceptance.Opening)
+	delivery, err := f.Buyer.BuildFundingTransactionDelivery(context.Background(), f.Acceptance.Opening)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestPresignPoolOpeningReturnsResponseAndLocalProof(t *testing.T) {
 	if hash != f.State.RefundTemplateTxID || f.Presign.Response.RefundTemplateTxID != hash {
 		t.Fatalf("presign result correlation mismatch: proof %x response %x state %x", hash, f.Presign.Response.RefundTemplateTxID, f.State.RefundTemplateTxID)
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: f.Presign.Opening.BuyerPubKey, SellerPubKey: f.Presign.Opening.SellerPubKey, ArbiterPubKey: f.Presign.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: f.Presign.Opening.BuyerPublicKey, SellerPublicKey: f.Presign.Opening.SellerPublicKey, ArbiterPublicKey: f.Presign.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,7 @@ func TestPresignPoolOpeningReturnsResponseAndLocalProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.VerifySellerRefundSignature(nil, request, f.Presign.Response.SellerRefundSignature); err != nil {
+	if err := engine.VerifySellerRefundSignature(nil, request, f.Presign.Response.SellerRefundTransactionSignature); err != nil {
 		t.Fatalf("seller refund signature invalid: %v", err)
 	}
 }
@@ -176,10 +177,10 @@ func TestPresignPoolOpeningReturnsResponseAndLocalProof(t *testing.T) {
 func TestAcceptPoolFundingReturnsCompleteProofStateAndRawFunding(t *testing.T) {
 	f := newSellerFixture(t)
 	acceptance := f.openPool(t)
-	if len(acceptance.Opening.FundingTx) == 0 || !bytes.Equal(acceptance.FundingTx, f.FundingTx) {
+	if len(acceptance.Opening.FundingTransactionRaw) == 0 || !bytes.Equal(acceptance.FundingTransactionRaw, f.FundingTransactionRaw) {
 		t.Fatal("funding acceptance lost the verified funding transaction")
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: acceptance.Opening.BuyerPubKey, SellerPubKey: acceptance.Opening.SellerPubKey, ArbiterPubKey: acceptance.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: acceptance.Opening.BuyerPublicKey, SellerPublicKey: acceptance.Opening.SellerPublicKey, ArbiterPublicKey: acceptance.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestAcceptPoolFundingReturnsCompleteProofStateAndRawFunding(t *testing.T) {
 
 func TestAcceptPoolFundingRejectsWrongDeliveryHash(t *testing.T) {
 	f := newSellerFixture(t)
-	delivery := &pool.FundingTxDelivery{Version: pool.MajorVersion, RefundTemplateTxID: f.Presign.Response.RefundTemplateTxID, FundingTx: append([]byte(nil), f.FundingTx...)}
+	delivery := &pool.FundingTransactionDelivery{RefundTemplateTxID: f.Presign.Response.RefundTemplateTxID, FundingTransactionRaw: append([]byte(nil), f.FundingTransactionRaw...)}
 	delivery.RefundTemplateTxID[0] ^= 0xff
 	if _, err := f.Seller.AcceptPoolFunding(context.Background(), f.Presign.Opening, delivery); err == nil {
 		t.Fatal("delivery hash mismatch was accepted")
@@ -203,7 +204,7 @@ func TestAcceptPoolFundingRejectsWrongDeliveryHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	good := &pool.FundingTxDelivery{Version: pool.MajorVersion, RefundTemplateTxID: f.Presign.Response.RefundTemplateTxID, FundingTx: append([]byte(nil), f.FundingTx...)}
+	good := &pool.FundingTransactionDelivery{RefundTemplateTxID: f.Presign.Response.RefundTemplateTxID, FundingTransactionRaw: append([]byte(nil), f.FundingTransactionRaw...)}
 	if _, err := other.AcceptPoolFunding(context.Background(), f.Presign.Opening, good); err == nil {
 		t.Fatal("wrong seller signer was accepted")
 	}
@@ -238,14 +239,14 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	}
 	update := verified.Update
 	// Minimal 005 carries only the authorization hash and buyer signature.
-	if len(update.PaymentAuthorizationHash) != 32 || len(update.BuyerTransactionSignature) == 0 {
+	if len(update.PaymentAuthorizationID) != 32 || len(update.BuyerPaymentTransactionSignature) == 0 {
 		t.Fatal("minimal 005 must carry a 32-byte hash and a non-empty buyer signature")
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(update.PaymentAuthorizationHash, authHash[:]) {
+	if update.PaymentAuthorizationID != authID {
 		t.Fatal("005 authorization hash does not match SHA-256 of the signed 003 terms")
 	}
 
@@ -268,43 +269,43 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 		t.Fatal("authorization hash mismatch was accepted")
 	}
 	// A previous state that only fills the field shell must be rejected.
-	if _, err := accept(request, &pool.PaymentState{RefundTemplateTxID: opened.InitialPayment.RefundTemplateTxID, PaymentSequence: opened.InitialPayment.PaymentSequence, SellerAmountSat: opened.InitialPayment.SellerAmountSat}, deliveryState, update); err == nil {
+	if _, err := accept(request, &pool.PaymentState{RefundTemplateTxID: opened.InitialPayment.RefundTemplateTxID, PaymentSequence: opened.InitialPayment.PaymentSequence, SellerAmountSatoshis: opened.InitialPayment.SellerAmountSatoshis}, deliveryState, update); err == nil {
 		t.Fatal("shell-only previous state was accepted")
 	}
 	// Delivery state targets must match the original 003 exactly.
-	wrongAmountState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat + 1}
+	wrongAmountState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationID: deliveryState.PaymentAuthorizationID, PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSatoshis: deliveryState.SellerAmountAfterSatoshis + 1}
 	if _, err := accept(request, opened.InitialPayment, wrongAmountState, update); err == nil {
 		t.Fatal("payment amount did not have to match the delivery state and 003")
 	}
-	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: deliveryState.PaymentAuthorizationHash, PaymentSequence: deliveryState.PaymentSequence - 1, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
+	staleState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationID: deliveryState.PaymentAuthorizationID, PaymentSequence: deliveryState.PaymentSequence - 1, SellerAmountAfterSatoshis: deliveryState.SellerAmountAfterSatoshis}
 	if _, err := accept(request, opened.InitialPayment, staleState, update); err == nil {
 		t.Fatal("stale base sequence was accepted")
 	}
-	wrongHashState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationHash: pool.Hash32(bytes.Repeat([]byte{9}, 32)), PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSat: deliveryState.SellerAmountAfterSat}
+	wrongHashState := &ContentDeliveryState{RefundTemplateTxID: deliveryState.RefundTemplateTxID, PaymentAuthorizationID: protocol.PaymentAuthorizationID(bytes.Repeat([]byte{9}, 32)), PaymentSequence: deliveryState.PaymentSequence, SellerAmountAfterSatoshis: deliveryState.SellerAmountAfterSatoshis}
 	if _, err := accept(request, opened.InitialPayment, wrongHashState, update); err == nil {
 		t.Fatal("delivery state hash mismatch was accepted")
 	}
 	// A buyer signature that is valid for a different transaction (here the
 	// immediate-close candidate) must fail against the locally rebuilt
 	// forward-payment transaction.
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opened.Opening.BuyerPubKey, SellerPubKey: opened.Opening.SellerPubKey, ArbiterPubKey: opened.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opened.Opening.BuyerPublicKey, SellerPublicKey: opened.Opening.SellerPublicKey, ArbiterPublicKey: opened.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	closeCandidate, closeSig, err := f.Buyer.BuildImmediateClose(ctx, opened.Opening, opened.InitialPayment, opened.InitialPayment.SellerAmountSat, 900000)
+	closeCandidate, closeSig, err := f.Buyer.BuildImmediateClose(ctx, opened.Opening, opened.InitialPayment, opened.InitialPayment.SellerAmountSatoshis, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.VerifyBuyerPayment(closeCandidate, closeSig, opened.Opening); err != nil {
 		t.Fatalf("close signature fixture invalid: %v", err)
 	}
-	mismatchedSignature := &pool.PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), closeSig...)}
+	mismatchedSignature := &pool.PaymentUpdate{PaymentAuthorizationID: update.PaymentAuthorizationID, BuyerPaymentTransactionSignature: append([]byte(nil), closeSig...)}
 	if _, err := accept(request, opened.InitialPayment, deliveryState, mismatchedSignature); err == nil {
 		t.Fatal("buyer signature over another transaction was accepted for the rebuilt state")
 	}
 	// Tampering with the wire hash breaks the binding to the supplied 003.
-	tamperedHash := &pool.PaymentUpdate{Version: update.Version, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: append([]byte(nil), update.BuyerTransactionSignature...)}
-	tamperedHash.PaymentAuthorizationHash[0] ^= 0xff
+	tamperedHash := &pool.PaymentUpdate{PaymentAuthorizationID: update.PaymentAuthorizationID, BuyerPaymentTransactionSignature: append([]byte(nil), update.BuyerPaymentTransactionSignature...)}
+	tamperedHash.PaymentAuthorizationID[0] ^= 0xff
 	if _, err := accept(request, opened.InitialPayment, deliveryState, tamperedHash); err == nil {
 		t.Fatal("tampered authorization hash was accepted")
 	}
@@ -318,19 +319,19 @@ func TestContentPaymentCloseLifecycleWithExplicitState(t *testing.T) {
 	if err := engine.VerifyAcceptedPayment(latest, opened.Opening); err != nil {
 		t.Fatalf("merged accepted state invalid: %v", err)
 	}
-	if latest.SellerAmountSat != deliveryState.SellerAmountAfterSat {
-		t.Fatalf("accepted amount %d != authorized absolute amount %d", latest.SellerAmountSat, deliveryState.SellerAmountAfterSat)
+	if latest.SellerAmountSatoshis != deliveryState.SellerAmountAfterSatoshis {
+		t.Fatalf("accepted amount %d != authorized absolute amount %d", latest.SellerAmountSatoshis, deliveryState.SellerAmountAfterSatoshis)
 	}
 	if latest.PaymentSequence != deliveryState.PaymentSequence {
 		t.Fatalf("accepted sequence %d != target %d", latest.PaymentSequence, deliveryState.PaymentSequence)
 	}
 
 	// Immediate close from explicit latest state.
-	unsigned, buyerSig, err := f.Buyer.BuildImmediateClose(ctx, opened.Opening, latest, latest.SellerAmountSat, 900000)
+	unsigned, buyerSignature, err := f.Buyer.BuildImmediateClose(ctx, opened.Opening, latest, latest.SellerAmountSatoshis, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed, err := f.Seller.SignImmediateClose(ctx, opened.Opening, unsigned, buyerSig, 900000)
+	closed, err := f.Seller.SignImmediateClose(ctx, opened.Opening, unsigned, buyerSignature, 900000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +380,7 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opened.Opening.BuyerPubKey, SellerPubKey: opened.Opening.SellerPubKey, ArbiterPubKey: opened.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opened.Opening.BuyerPublicKey, SellerPublicKey: opened.Opening.SellerPublicKey, ArbiterPublicKey: opened.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +388,7 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 		t.Fatalf("arbitrated state invalid: %v", err)
 	}
 	// 最终 raw 的第三输出、SignedPayment 状态与回执金额必须完全一致。
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,23 +396,22 @@ func TestArbitrationLifecycleWithExplicitState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rawTx.Outputs[2].Satoshis != receipt.ArbiterAmountSat || signed.State.ArbiterAmountSat != receipt.ArbiterAmountSat {
-		t.Fatalf("arbiter amount mismatch: raw %d state %d receipt %d", rawTx.Outputs[2].Satoshis, signed.State.ArbiterAmountSat, receipt.ArbiterAmountSat)
+	if rawTx.Outputs[2].Satoshis != receipt.ArbiterAmountSatoshis || signed.State.ArbiterAmountSatoshis != receipt.ArbiterAmountSatoshis {
+		t.Fatalf("arbiter amount mismatch: raw %d state %d receipt %d", rawTx.Outputs[2].Satoshis, signed.State.ArbiterAmountSatoshis, receipt.ArbiterAmountSatoshis)
 	}
-	if receipt.ArbiterAmountSat != sellerTestArbitrationFeeSat {
-		t.Fatalf("receipt fee = %d, want the explicitly decided %d", receipt.ArbiterAmountSat, sellerTestArbitrationFeeSat)
+	if receipt.ArbiterAmountSatoshis != sellerTestArbitrationFeeSat {
+		t.Fatalf("receipt fee = %d, want the explicitly decided %d", receipt.ArbiterAmountSatoshis, sellerTestArbitrationFeeSat)
 	}
 }
 
 func requestFromProofForSellerTest(proof *pool.OpeningProof) (*pool.RefundPresignRequest, error) {
 	return &pool.RefundPresignRequest{
-		Version:              pool.MajorVersion,
-		RefundTx:             append([]byte(nil), proof.RefundTx...),
-		BuyerPubKey:          append([]byte(nil), proof.BuyerPubKey...),
-		SellerPubKey:         append([]byte(nil), proof.SellerPubKey...),
-		ArbiterPubKey:        append([]byte(nil), proof.ArbiterPubKey...),
-		MinerFeeRateSatPerKB: proof.MinerFeeRateSatPerKB,
-		BuyerRefundSignature: append([]byte(nil), proof.BuyerRefundSignature...),
+		RefundTemplateRaw:               append([]byte(nil), proof.RefundTemplateRaw...),
+		BuyerPublicKey:                  append([]byte(nil), proof.BuyerPublicKey...),
+		SellerPublicKey:                 append([]byte(nil), proof.SellerPublicKey...),
+		ArbiterPublicKey:                append([]byte(nil), proof.ArbiterPublicKey...),
+		MinerFeeRateSatoshisPerKilobyte: proof.MinerFeeRateSatoshisPerKilobyte,
+		BuyerRefundTransactionSignature: append([]byte(nil), proof.BuyerRefundTransactionSignature...),
 	}, nil
 }
 
@@ -449,7 +449,7 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 
 	tamperReceipt := func(mutate func(receipt *arbitration.ArbitrationReceipt)) *arbitration.ArbitrationResponse {
 		t.Helper()
-		receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+		receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -459,9 +459,8 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 			t.Fatal(err)
 		}
 		return &arbitration.ArbitrationResponse{
-			Version:                 response.Version,
-			ReceiptCBOR:             tamperedCBOR,
-			ArbiterReceiptSignature: append([]byte(nil), response.ArbiterReceiptSignature...),
+			ArbitrationReceiptCBOR:             tamperedCBOR,
+			ArbiterArbitrationReceiptSignature: append([]byte(nil), response.ArbiterArbitrationReceiptSignature...),
 		}
 	}
 	flipLastByte := func(value []byte) []byte {
@@ -474,12 +473,12 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 		name     string
 		response *arbitration.ArbitrationResponse
 	}{
-		{"claim id", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ClaimID[0] ^= 1 })},
-		{"receipt fee", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ArbiterAmountSat += 1 })},
+		{"claim id", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ArbitrationClaimID[0] ^= 1 })},
+		{"receipt fee", tamperReceipt(func(r *arbitration.ArbitrationReceipt) { r.ArbiterAmountSatoshis += 1 })},
 		{"inner transaction signature", tamperReceipt(func(r *arbitration.ArbitrationReceipt) {
-			r.ArbiterTransactionSignature = flipLastByte(r.ArbiterTransactionSignature)
+			r.ArbiterPaymentTransactionSignature = flipLastByte(r.ArbiterPaymentTransactionSignature)
 		})},
-		{"outer receipt signature", &arbitration.ArbitrationResponse{Version: response.Version, ReceiptCBOR: append([]byte(nil), response.ReceiptCBOR...), ArbiterReceiptSignature: flipLastByte(response.ArbiterReceiptSignature)}},
+		{"outer receipt signature", &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: append([]byte(nil), response.ArbitrationReceiptCBOR...), ArbiterArbitrationReceiptSignature: flipLastByte(response.ArbiterArbitrationReceiptSignature)}},
 	}
 	for _, testCase := range cases {
 		signed, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, testCase.response, 900000)
@@ -500,20 +499,16 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		signing, err := arbitration.ArbiterReceiptSigningCBOR(receiptCBOR)
+		signature, err := protocol.SignWireDocument(f.arbiterKey, protocol.WireVersion, 9, receiptCBOR)
 		if err != nil {
 			t.Fatal(err)
 		}
-		signature, err := bitfs.SignMessage(f.arbiterKey, signing)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return &arbitration.ArbitrationResponse{Version: arbitration.MajorVersion, ReceiptCBOR: receiptCBOR, ArbiterReceiptSignature: signature}
+		return &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: receiptCBOR, ArbiterArbitrationReceiptSignature: signature}
 	}
 
 	// 交易签名属于另一费用：金额字段写原费用，但交易签名覆盖的是按更高费用
 	// 重建的 candidate。
-	receiptForOriginalFee, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receiptForOriginalFee, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,16 +520,16 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherFeeReceipt, err := arbitration.UnmarshalReceipt(otherFeeResponse.ReceiptCBOR)
+	otherFeeReceipt, err := arbitration.UnmarshalReceipt(otherFeeResponse.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mixedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ClaimID: append([]byte(nil), receiptForOriginalFee.ClaimID...), ArbiterAmountSat: receiptForOriginalFee.ArbiterAmountSat, ArbiterTransactionSignature: append([]byte(nil), otherFeeReceipt.ArbiterTransactionSignature...)})
+	mixedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ArbitrationClaimID: receiptForOriginalFee.ArbitrationClaimID, ArbiterAmountSatoshis: receiptForOriginalFee.ArbiterAmountSatoshis, ArbiterPaymentTransactionSignature: append([]byte(nil), otherFeeReceipt.ArbiterPaymentTransactionSignature...)})
 	if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, mixedFeeReceipt, 900000); err == nil {
 		t.Fatal("a transaction signature priced for another fee completed the claim")
 	}
 	// fee 与 candidate 不一致：金额字段抬高，但保留原费用的交易签名。
-	inflatedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ClaimID: append([]byte(nil), receiptForOriginalFee.ClaimID...), ArbiterAmountSat: receiptForOriginalFee.ArbiterAmountSat + 1, ArbiterTransactionSignature: append([]byte(nil), receiptForOriginalFee.ArbiterTransactionSignature...)})
+	inflatedFeeReceipt := forgeSignedReceipt(t, &arbitration.ArbitrationReceipt{ArbitrationClaimID: receiptForOriginalFee.ArbitrationClaimID, ArbiterAmountSatoshis: receiptForOriginalFee.ArbiterAmountSatoshis + 1, ArbiterPaymentTransactionSignature: append([]byte(nil), receiptForOriginalFee.ArbiterPaymentTransactionSignature...)})
 	if _, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, inflatedFeeReceipt, 900000); err == nil {
 		t.Fatal("an inflated receipt fee inconsistent with its transaction signature was accepted")
 	}
@@ -542,7 +537,7 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	// Receipt 签名属于另一 Claim：对第二个 Claim（不同 content hashes）签发
 	// 的完整响应不能完成第一个 Claim。
 	// 第二个 Claim 使用相同资金池、序号和 Seller 金额，仅交付截止时间不同，
-	// 因此 TermsCBOR 与 Claim ID 不同。
+	// 因此 FileQuoteTermsCBOR 与 Claim ID 不同。
 	otherInput := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.Seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(now.Add(20 * time.Minute).Unix())}
 	otherContentRequest, err := f.Buyer.BuildContentRequest(ctx, f.Quote, opened.Opening, opened.InitialPayment, otherInput)
 	if err != nil {
@@ -574,7 +569,7 @@ func TestCompleteArbitratedPaymentRejectsTamperedKind9Evidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: opened.Opening.BuyerPubKey, SellerPubKey: opened.Opening.SellerPubKey, ArbiterPubKey: opened.Opening.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opened.Opening.BuyerPublicKey, SellerPublicKey: opened.Opening.SellerPublicKey, ArbiterPublicKey: opened.Opening.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +587,7 @@ func sellerProducedSignatures(signed *pool.SignedPayment) [][]byte {
 
 // TestSharedClaimBuilderProducesIdenticalClaimEvidence proves the 007 seller
 // path and the 008 buyer retrieval path share one Claim builder: for the same
-// OpeningProof plus exact signed 003, both sides get byte-identical ClaimCBOR
+// OpeningProof plus exact signed 003, both sides get byte-identical ArbitrationClaimCBOR
 // and therefore the identical ArbitrationClaimID, and the golden Kind 8 bytes
 // stay unchanged after the shared-builder switch.
 func TestSharedClaimBuilderProducesIdenticalClaimEvidence(t *testing.T) {
@@ -614,7 +609,7 @@ func TestSharedClaimBuilderProducesIdenticalClaimEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
+	sellerClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,10 +618,10 @@ func TestSharedClaimBuilderProducesIdenticalClaimEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buyer-side shared builder failed: %v", err)
 	}
-	if !bytes.Equal(built.ClaimCBOR, arbitrationRequest.ClaimCBOR) {
-		t.Fatal("shared builder produced different ClaimCBOR than the seller Kind 8")
+	if !bytes.Equal(built.ArbitrationClaimCBOR, arbitrationRequest.ArbitrationClaimCBOR) {
+		t.Fatal("shared builder produced different ArbitrationClaimCBOR than the seller Kind 8")
 	}
-	if !bytes.Equal(built.ClaimID, sellerClaimID) {
+	if built.ArbitrationClaimID != sellerClaimID {
 		t.Fatal("shared builder produced a different Claim ID than the seller path")
 	}
 	// Kind 8 golden 形状在共享 builder 切换后保持不变。
@@ -634,7 +629,7 @@ func TestSharedClaimBuilderProducesIdenticalClaimEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rawKind8) < 2 || rawKind8[0] != 0x85 || rawKind8[1] != 0x04 || rawKind8[2] != 0x08 {
+	if len(rawKind8) < 3 || rawKind8[0] != 0x85 || rawKind8[1] != 0x01 || rawKind8[2] != 0x08 {
 		t.Fatalf("seller Kind 8 shape drifted: %x", rawKind8[:3])
 	}
 }

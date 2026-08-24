@@ -112,32 +112,32 @@ func TestMultisigPoolV4OfficialSharedFixture(t *testing.T) {
 	assertTxFixture(t, "proof", proofState, fixture.ProofStateHex, fixture.ProofStateTxID)
 	assertOutputs(t, "proof", proofState, fixture.ProofOutputs)
 
-	buyerSig, err := mp.SignArbitratedPoolAsBuyer(paidArbiter, funding.PoolAmount, roles, buyer)
+	buyerSignature, err := mp.SignArbitratedPoolAsBuyer(paidArbiter, funding.PoolAmount, roles, buyer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := mp.SignArbitratedPoolAsSeller(paidArbiter, funding.PoolAmount, roles, seller)
+	sellerSignature, err := mp.SignArbitratedPoolAsSeller(paidArbiter, funding.PoolAmount, roles, seller)
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterSig, err := mp.SignArbitratedPoolAsArbiter(paidArbiter, funding.PoolAmount, roles, arbiter)
+	arbiterSignature, err := mp.SignArbitratedPoolAsArbiter(paidArbiter, funding.PoolAmount, roles, arbiter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHex(t, "buyer signature", buyerSig, fixture.BuyerSignatureHex)
-	assertHex(t, "seller signature", sellerSig, fixture.SellerSignatureHex)
-	assertHex(t, "arbiter signature", arbiterSig, fixture.ArbiterSignatureHex)
-	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(paidArbiter, funding.PoolAmount, roles, buyerSig, sellerSig)
+	assertHex(t, "buyer signature", buyerSignature, fixture.BuyerSignatureHex)
+	assertHex(t, "seller signature", sellerSignature, fixture.SellerSignatureHex)
+	assertHex(t, "arbiter signature", arbiterSignature, fixture.ArbiterSignatureHex)
+	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(paidArbiter, funding.PoolAmount, roles, buyerSignature, sellerSignature)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertHex(t, "Buyer+Seller merge", merged.Bytes(), fixture.FinalBuyerSellerHex)
-	merged, err = mp.MergeArbitratedPoolBuyerArbiterSignatures(paidArbiter, funding.PoolAmount, roles, buyerSig, arbiterSig)
+	merged, err = mp.MergeArbitratedPoolBuyerArbiterSignatures(paidArbiter, funding.PoolAmount, roles, buyerSignature, arbiterSignature)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertHex(t, "Buyer+Arbiter merge", merged.Bytes(), fixture.FinalBuyerArbiterHex)
-	merged, err = mp.MergeArbitratedPoolSellerArbiterSignatures(paidArbiter, funding.PoolAmount, roles, sellerSig, arbiterSig)
+	merged, err = mp.MergeArbitratedPoolSellerArbiterSignatures(paidArbiter, funding.PoolAmount, roles, sellerSignature, arbiterSignature)
 	if err != nil {
 		t.Fatal(err)
 	}

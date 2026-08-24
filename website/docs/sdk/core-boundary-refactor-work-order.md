@@ -11,8 +11,9 @@ accept stores, content sources/sinks, or BSV submission backends. Protocol
 specifications 001–008 remain authoritative for wire bytes and protocol
 behavior; existing 001–006 wire shapes remain fixed, 007 uses its current
 five-element Kind 8 Claim request plus four-element Kind 9 Receipt response
-shapes and signing domains, and 008 fixes the five-element Kind 10 buyer
-retrieval request plus the four-element Kind 11 custody evidence response. The `RefundTemplateTxID`
+shapes and signing domains, and 008 fixes the four-element Kind 10 buyer
+retrieval request plus the Arbiter-signed two-branch Kind 11 response whose
+available branch binds the payload bundle through `content_payloads_id`. The `RefundTemplateTxID`
 algorithm remains unchanged.
 
 ## Product definition

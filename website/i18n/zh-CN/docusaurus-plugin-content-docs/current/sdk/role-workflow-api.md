@@ -28,7 +28,7 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 type BuyerOpeningState struct {
     RefundTemplateTxID pool.RefundTemplateTxID
     Request      *pool.RefundPresignRequest
-    FundingTx    []byte // 绝不进入 FundingTxDelivery 以外的任何报文
+    FundingTx    []byte // 绝不进入 FundingTransactionDelivery 以外的任何报文
 }
 
 // PoolOpeningPreparation 是 PreparePoolOpening 的复合结果。
@@ -64,9 +64,9 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.Ope
 // wire 输入：0202 响应。本地输入：保存的 BuyerOpeningState。
 func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, state *BuyerOpeningState, response *pool.RefundPresignResponse) (*RefundPresignAcceptance, error)
 
-// BuildFundingTxDelivery 把已验证 proof 携带的资金交易打包为 0204 wire 交付。
+// BuildFundingTransactionDelivery 把已验证 proof 携带的资金交易打包为 0204 wire 交付。
 // 调用方显式传入 proof；SDK 不按哈希加载任何东西。
-func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTxDelivery, error)
+func (workflow *Workflow) BuildFundingTransactionDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTransactionDelivery, error)
 
 // BuildContentRequest 验证报价/开池归属/上一状态的绑定、批次成员上下文、
 // 聚合价格与余额，然后用本 workflow 的私钥签名 003 请求。
@@ -74,16 +74,17 @@ func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *p
 // 内容类型完全由证据推导，批量价格逐项 checked-add。
 func (workflow *Workflow) BuildContentRequest(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, input ContentRequestInput) (*bitfs.SignedContentRequest, error)
 
-// AcceptDelivery 按授权哈希路由到原始 003 后验证整个 004：重算并比较授权哈希、
-// 从 OpeningProof 重derive 池绑定、验证卖方对裸 32 字节哈希的签名，
+// AcceptDelivery 按授权 ID 路由到原始 003 后验证整个 004：严格解码并比较
+// content_delivery_cbor 绑定的 PaymentAuthorizationID、从 OpeningProof 重derive 池绑定、
+// 验证卖方通过 SignWireDocument(1, 6, ...) 对精确 content_delivery_cbor 的统一签名，
 // 再逐项校验 payload 数量/顺序/哈希/归属/长度并重算聚合价格与目标序号，
-// 最后本地构造并签署状态交易，但只发送最小 005 凭证（授权哈希 + 买方签名）。
+// 最后本地构造并签署状态交易，但只发送最小 005 凭证（payment_authorization_id + 买方交易签名）。
 func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, delivery *bitfs.SignedContentDelivery, input ContentDeliveryInput) (*VerifiedDelivery, error)
 
 // BuildImmediateClose 从调用方选定的基准状态和调用方选择的目标卖方金额构造
 // 未签名最终关闭候选和买方分离签名。SDK 不声称 base 是业务最新状态。
 // 把两个值都发送给卖方。
-func (workflow *Workflow) BuildImmediateClose(ctx context.Context, opening *pool.OpeningProof, base *pool.PaymentState, targetSellerAmountSat uint64, blockHeight uint32) (*pool.UnsignedPayment, []byte, error)
+func (workflow *Workflow) BuildImmediateClose(ctx context.Context, opening *pool.OpeningProof, base *pool.PaymentState, targetSellerAmountSatoshis uint64, blockHeight uint32) (*pool.UnsignedPayment, []byte, error)
 
 // CompleteImmediateClose 只验证完整签名的关闭交易对开池证据协议合法；
 // 是否匹配业务预期、何时广播都是应用的决定。
@@ -95,13 +96,13 @@ func (workflow *Workflow) CompleteImmediateClose(ctx context.Context, opening *p
 func (workflow *Workflow) BuildRefundAfterExpiry(ctx context.Context, opening *pool.OpeningProof, blockHeight uint32) ([]byte, *pool.PaymentState, error)
 
 // BuildArbitrationContentRequest 通过共享 Claim builder 从买方自己的 opening
-// 加精确签名 003 独立重建 Claim ID，用固定消息路径签署 [4, 10, claim_id, nonce]
+// 加精确签名 003 独立重建 Claim ID，通过统一 SignWireDocument(1, 10, ...) 签署 content_retrieval_request_cbor
 // 并立即自验，返回深拷贝 Kind 10。nonce 是应用生成的 32 字节随机值；取件是
 // 事后恢复，不重新应用任何报价/截止/退款时间门禁。
 func (workflow *Workflow) BuildArbitrationContentRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, nonce []byte) (*arbitration.ContentRetrievalRequest, error)
 
 // AcceptArbitratedContent 在完全不读时钟的前提下端到端验收 Kind 11 响应：
-// 时间无关的 quote/003/opening 证据验证、exact Kind 10 校验、内嵌 ClaimCBOR
+// 时间无关的 quote/003/opening 证据验证、exact Kind 10 校验、本地重建 ArbitrationClaimID
 // 与本地重建逐字节比较、完整托管证据链（Seller Claim、Receipt Claim ID、
 // 回执签名、交易签名）、payload membership/长度/定价与 previous 连续性。
 type ArbitratedContentInput struct {
@@ -109,9 +110,9 @@ type ArbitratedContentInput struct {
 }
 
 type VerifiedArbitratedContent struct {
-    ClaimID  []byte                          // 已验证的仲裁 Claim 身份
-    Payloads [][]byte                        // 按授权顺序排列的已验证内容
-    Receipt  *arbitration.ArbitrationReceipt // Kind 9 审计数据
+    ContentRetrievalRequestID protocol.ContentRetrievalRequestID // SHA-256(exact Kind 10 请求文档)
+    ArbitrationClaimID        protocol.ArbitrationClaimID        // 已验证的仲裁 Claim 身份
+    Payloads                  [][]byte                           // 按授权顺序排列的已验证内容
 }
 
 // 返回值刻意没有 PaymentUpdate：008 验收绝不产生 005、绝不签买方交易、
@@ -161,13 +162,13 @@ type PoolFundingAcceptance struct {
 }
 
 // ContentDeliveryState 记录验证该交付批次的买方 005 凭证所需的协议上下文：
-// 费用池 ID、授权哈希、目标序号和绝对累计卖方金额。
+// 费用池关联 ID、授权 ID、目标序号和绝对累计卖方金额。
 // 它不携带 owner/lease/acquire/held/release/expiry 语义——串行化由调用方负责。
 type ContentDeliveryState struct {
-    RefundTemplateTxID       pool.RefundTemplateTxID
-    PaymentAuthorizationHash pool.Hash32
-    PaymentSequence          uint32
-    SellerAmountAfterSat     uint64
+    RefundTemplateTxID        pool.RefundTemplateTxID
+    PaymentAuthorizationID    protocol.PaymentAuthorizationID
+    PaymentSequence           uint32
+    SellerAmountAfterSatoshis uint64
 }
 
 // CreateQuote 在入口处读取一次系统 UTC 并以此签名确定性 001 条款。
@@ -180,10 +181,10 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 
 // AcceptPoolFunding 用显式提供的预签证据检查 FundingTx 并计算初始退款状态。
 // SDK 不提交任何东西：自己广播返回的 FundingTx，再持久化 Opening 与 InitialPayment。
-func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTxDelivery) (*PoolFundingAcceptance, error)
+func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTransactionDelivery) (*PoolFundingAcceptance, error)
 
 // BuildContentDelivery 用显式报价/开池/上一状态验证整批 003 授权，
-// 逐项校验 payload 后对裸授权哈希签名并编码四元 004。
+// 逐项校验 payload 后通过 SignWireDocument(1, 6, ...) 签署精确 content_delivery_cbor 并编码五元 Kind 6。
 // 发送交付前先保存返回的 ContentDeliveryState。
 func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error)
 
@@ -222,24 +223,22 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 // ArbitrationReceipt 是内层三元 Kind 9 文档：Claim ID、正仲裁费和对独立重建
 // candidate 的 ForkID|All 交易签名。
 type ArbitrationReceipt struct {
-    ClaimID                     []byte
-    ArbiterAmountSat            uint64
-    ArbiterTransactionSignature []byte
+    ArbitrationClaimID                 protocol.ArbitrationClaimID
+    ArbiterAmountSatoshis              uint64
+    ArbiterPaymentTransactionSignature []byte
 }
 
 // ArbitrationResponse 是精确四元 Kind 9 报文。
 type ArbitrationResponse struct {
-    Version                 uint64
-    ReceiptCBOR             []byte
-    ArbiterReceiptSignature []byte
+    ArbitrationReceiptCBOR             []byte
+    ArbiterArbitrationReceiptSignature []byte // SignWireDocument(1, 9, ...)
 }
 
-// ArbitrationClaimID 返回 SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor]))。
-func ArbitrationClaimID(claimCBOR []byte) ([]byte, error)
+// ArbitrationClaimID 返回 typed ID SHA-256(exact_claim_cbor)。
+func ArbitrationClaimID(claimCBOR []byte) (protocol.ArbitrationClaimID, error)
 func ValidateReceipt(receipt *ArbitrationReceipt) error
 func MarshalReceipt(receipt *ArbitrationReceipt) ([]byte, error)
 func UnmarshalReceipt(raw []byte) (*ArbitrationReceipt, error)
-func ArbiterReceiptSigningCBOR(receiptCBOR []byte) ([]byte, error)
 
 // PreparePayment 验证 Claim、Buyer 授权、Seller Claim 签名、payload 托管与
 // 按调用方明确正费用重建的 candidate（零费用按 invalid evidence 拒绝；费用
@@ -249,41 +248,44 @@ func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, reques
 
 // SignPreparedPayment 从冻结的 exact request 和冻结费用重新校验 opaque 证据，
 // 独立重建 candidate：先产生并自验交易签名，再编码回执，最后生成并自验对
-// [4, 9, exact_receipt_cbor] 的回执普通消息签名。
+// exact_receipt_cbor ）的回执普通消息签名（SignWireDocument(1, 9, ...)）。
 func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
 
-// PreparedPayment 深复制 getter：Request()、ContentPayloadsCBOR()、
-// ContentPayloads()、ClaimID()、ArbiterAmountSat()、PaymentAuthorizationHash()、
-// UnsignedPayment()、DeadlineUnix()、PreparedAt()。
+// PreparedPayment 深复制 getter：Request()、Claim()、ContentPayloadsCBOR()、
+// ContentPayloads()、ArbitrationClaimID()、PaymentAuthorizationID()、
+// ArbiterAmountSatoshis()、UnsignedPayment()、RefundTemplateTxID()、
+// DeadlineUnixSeconds()、PreparedAt()。
 
-// ContentRetrievalRequest 是精确五元 Kind 10 报文。
+// ContentRetrievalRequest 是精确四元 Kind 10 报文。买方通过统一
+// SignWireDocument(1, 10, ...) 签署 content_retrieval_request_cbor =
+// [arbitration_claim_id, retrieval_nonce]。
 type ContentRetrievalRequest struct {
-    Version        uint64
-    ClaimID        []byte // 32 字节
-    Nonce          []byte // 32 字节且非全零
-    BuyerSignature []byte
+    ContentRetrievalRequestCBOR           []byte
+    BuyerContentRetrievalRequestSignature []byte
 }
 
-// ContentRetrievalResponse 是精确四元 Kind 11 报文，原样内嵌已持久化的
-// exact Kind 8/9 字节；payload 只在内嵌 Kind 8 中出现一次。
-// Kind 11 不存在第三条外层签名。
+// ContentRetrievalResponse 是 Arbiter 签名的两分支 union（Kind 11）：
+// unavailable [1, 11, result_cbor, signature] 携带结构化原因且无附件；
+// available [1, 11, result_cbor, signature, content_payloads_cbor] 经
+// content_payloads_id 绑定 exact payload bundle。Kind 11 不内嵌任何 Kind 8/9。
 type ContentRetrievalResponse struct {
-    Version                 uint64
-    ArbitrationRequestCBOR  []byte
-    ArbitrationResponseCBOR []byte
+    ContentRetrievalResultCBOR             []byte
+    ArbiterContentRetrievalResultSignature []byte // SignWireDocument(1, 11, ...)
+    ContentPayloadsCBOR                    []byte // 仅 available 分支携带
 }
 
-// VerifiedCustodiedContent 是完整托管证据验证后的深拷贝结果。
+// VerifiedCustodiedContent 是完整托管证据验证后的深拷贝结果：typed Claim ID、
+// 从 exact Kind 8 证据字节派生的 payload bundle、Receipt 与两条存储消息。
 type VerifiedCustodiedContent struct {
-    ClaimID      []byte
-    PayloadsCBOR []byte
-    Payloads     [][]byte
-    Receipt      *ArbitrationReceipt
-    Request      *ArbitrationRequest
-    Response     *ArbitrationResponse
+    ArbitrationClaimID protocol.ArbitrationClaimID
+    PayloadsCBOR       []byte
+    Payloads           [][]byte
+    Receipt            *ArbitrationReceipt
+    Request            *ArbitrationRequest
+    Response           *ArbitrationResponse
 }
 
-func BuyerRetrievalSigningCBOR(claimID, nonce []byte) ([]byte, error)
+func EncodeContentRetrievalRequestDocument(claimID protocol.ArbitrationClaimID, nonce []byte) ([]byte, error)
 func MarshalContentRetrievalRequest(request *ContentRetrievalRequest) ([]byte, error)
 func UnmarshalContentRetrievalRequest(raw []byte) (*ContentRetrievalRequest, error)
 func ValidateContentRetrievalResponse(response *ContentRetrievalResponse) error
@@ -297,13 +299,16 @@ func UnmarshalContentRetrievalResponse(raw []byte) (*ContentRetrievalResponse, e
 func VerifyCustodiedContent(arbitrationRequest *ArbitrationRequest, arbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error)
 
 // VerifyContentRetrievalRequest 用存储记录鉴权一个 Kind 10：先完整托管验证，
-// 再检查仲裁方 key，最后用从存储 Claim 恢复的买方公钥验证 [4, 10, claim_id,
-// nonce] 签名。查找、nonce 原子性、retention 与传输仍由应用负责。
+// 再检查仲裁方 key，最后用从存储 Claim 恢复的买方公钥验证 exact
+// content_retrieval_request_cbor 上的统一签名。查找、nonce 原子性、retention
+// 与传输仍由应用负责。
 func (workflow *Workflow) VerifyContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest, storedArbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error)
 
-// BuildContentRetrievalResponse 先 strict decode 并完整验证两份精确持久化
-// 托管文档，再把原文逐字节嵌入 Kind 11，绝不重编码。
-func BuildContentRetrievalResponse(exactKind8, exactKind9 []byte) (*ContentRetrievalResponse, error)
+// BuildContentRetrievalUnavailable 对结构合法的 request ID 签署负面 Kind 11
+// 分支；BuildContentRetrievalAvailableRaw 对 exact canonical payload bundle
+// 签署正面分支，并经 content_payloads_id 绑定。
+func BuildContentRetrievalUnavailable(requestID protocol.ContentRetrievalRequestID, reason ContentRetrievalUnavailableReason, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error)
+func BuildContentRetrievalAvailableRaw(requestID protocol.ContentRetrievalRequestID, payloadsCBOR []byte, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error)
 ```
 
 pool 包还刻意公开一个供 007 证据路径使用的纯函数：
@@ -358,7 +363,7 @@ journal.SaveOpening("buyer", acceptance.Opening)
 journal.SaveLatestPayment("buyer", acceptance.InitialPayment)
 
 // 0204：打包已验证 proof 的资金交易。
-delivery, err := buyerWorkflow.BuildFundingTxDelivery(ctx, acceptance.Opening)
+delivery, err := buyerWorkflow.BuildFundingTransactionDelivery(ctx, acceptance.Opening)
 send(delivery)
 
 // 0205：用保存的预签证据验证资金交付。
@@ -388,10 +393,10 @@ verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, reque
     delivery, buyer.ContentDeliveryInput{Seed: seedBytes})
 for _, payload := range verified.Payloads { save(payload) } // 保存是应用的职责
 // 最小 005 凭证只携带哈希 + 买方签名；发送前先把原始 003 按授权哈希建立索引。
-journal.IndexAuthorization(verified.Update.PaymentAuthorizationHash, request)
+journal.IndexAuthorization(verified.Update.PaymentAuthorizationID, request)
 send(verified.Update)
 
-authorization := journal.LoadAuthorizationByHash(verified.Update.PaymentAuthorizationHash)
+authorization := journal.LoadAuthorizationByID(verified.Update.PaymentAuthorizationID)
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,
     authorization, savedDeliveryState, verified.Update, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
@@ -410,7 +415,7 @@ arbiterAmountSat := arbiterFeePolicy(len(arbitrationRequest.ContentPayloadsCBOR)
 prepared, err := arbiterWorkflow.PreparePayment(ctx, arbitrationRequest, blockHeight, arbiterAmountSat)
 journal.SaveArbitrationCustody(
     prepared.Request(), prepared.ContentPayloadsCBOR(),
-    prepared.ClaimID(), prepared.ArbiterAmountSat())
+    prepared.ArbitrationClaimID(), prepared.ArbiterAmountSatoshis())
 response, err := arbiterWorkflow.SignPreparedPayment(ctx, prepared)
 signed, err := sellerWorkflow.CompleteArbitratedPayment(ctx,
     arbitrationRequest, response, blockHeight)
@@ -421,7 +426,7 @@ broadcast(signed.RawTx)
 ### 7. 另外两种结局：协商关池与到期退款
 
 ```go
-unsigned, buyerSig, _ := buyerWorkflow.BuildImmediateClose(ctx, opening, latest, targetSellerAmountSat, blockHeight)
+unsigned, buyerSig, _ := buyerWorkflow.BuildImmediateClose(ctx, opening, latest, targetSellerAmountSatoshis, blockHeight)
 closed, _ := sellerWorkflow.SignImmediateClose(ctx, opening, unsigned, buyerSig, blockHeight)
 final, _ := buyerWorkflow.CompleteImmediateClose(ctx, opening, closed)
 broadcast(final.RawTx)
@@ -447,7 +452,6 @@ sendToArbiter(rawKind10)
 
 // 仲裁方应用：strict decode -> 查找 -> Retrievable 判定 ->
 // VerifyContentRetrievalRequest（先验签）-> nonce 原子 CAS ->
-// BuildContentRetrievalResponse 内嵌 exact Kind 8/9 原文。
 rawKind11 := handleContentRetrieval(rawKind10)
 sendToBuyer(rawKind11)
 

@@ -45,32 +45,31 @@ go run ./demo/01_quote/01_build_quote > quote.hex
 
 - 文件大小、随机 `MasterSeed`、`SeedHash`；
 - 从私钥推导出的卖家、买家、仲裁人公钥；
-- `FileQuoteTerms` 的字段、CBOR 和 `TermsHash`；
+- `FileQuoteTerms` 的字段、CBOR 和 `FileQuoteTermsID`；
 - 报价有效期、单 seed 价格、完整文件价格；
 - 卖家签名、最终 `SignedFileQuote` 的 CBOR 大小和 hex 长度。
 
 核心调用可以理解为：
 
-```text
-masterSeed = RandomBytes(...)
-terms = FileQuoteTerms{
-    FileSize:       stat(FILE_PATH).Size,
-    SeedHash:       SHA256(masterSeed),
-    PricePerSeed:   SEED_PRICE_SAT,
-    PriceFullBlock: FULL_BLOCK_PRICE_SAT,
-    ExpiresAt:      now + QUOTE_VALID_FOR,
-    BuyerPubKey:    pub(BUYER_PRIVATE_KEY_HEX),
-    ArbiterPubKeys: [pub(ARBITER_PRIVATE_KEY_HEX)],
-}
-signedQuote = NewSignedFileQuote(terms, sellerPrivateKey)
-quoteHex = EncodeSignedFileQuote(signedQuote)
-```
-
-`quote.hex` 是 `bitfs.EncodeSignedFileQuote` 产生的规范 hex。应用真正通过 wire 层传输时，可以再把它包装成：
-
 ```go
-payload := wire.Marshal(wire.Quote, signedQuote)
+masterSeed := /* 应用生成或从内容仓库读取 */
+terms := bitfs.FileQuoteTerms{
+    FileSizeBytes:                  uint64(fileStat.Size()),
+    SeedHash:                       masterseed.Sum256(masterSeed).Bytes(),
+    SeedPriceSatoshis:              SEED_PRICE_SAT,
+    FullBlockPriceSatoshis:         FULL_BLOCK_PRICE_SAT,
+    QuoteExpiresAtUnixSeconds:      time.Now().UTC().Add(QUOTE_VALID_FOR).Unix(),
+    BuyerPublicKey:                 buyerPubKey,     // 压缩 33 字节
+    SupportedArbiterPublicKeysCBOR: arbiterKeysCBOR, // bitfs.EncodeSupportedArbiterPublicKeys(...)
+}
+// 统一签名域：SignWireDocument(1, 1, file_quote_terms_cbor)；
+// recommendedFilename 先 sanitize 再纳入被签条款。
+signedQuote, err := sellerWorkflow.CreateQuote(ctx, terms, "bigfile.bin")
+rawQuote, err := wire.MarshalFileQuote(signedQuote) // [1, 1, terms_cbor, seller_public_key, signature]
+quoteID, err := bitfs.FileQuoteTermsID(signedQuote.FileQuoteTermsCBOR)
 ```
+
+`SIGNED_FILE_QUOTE_HEX` 输出的就是 `wire.MarshalFileQuote` 的规范字节；应用真正通过 wire 层传输时直接发送它，接收方用 `wire.UnmarshalFileQuote` 解码后再走买方验收。
 
 ## 买家解析报价单
 
@@ -91,13 +90,15 @@ go run ./demo/01_quote/01_build_quote | go run ./demo/01_quote/02_parse_quote
 
 伪代码如下：
 
-```text
-signedQuote = DecodeSignedFileQuote(inputHex)
-VerifySellerSignature(signedQuote)
-CheckExpiresAt(signedQuote.Terms.ExpiresAt, now)
-expectedBuyer = pub(BUYER_PRIVATE_KEY_HEX)
-require(signedQuote.Terms.BuyerPubKey == expectedBuyer)
-print(signedQuote.Terms)
+```go
+signedQuote, err := bitfs.DecodeSignedFileQuote(rawQuote) // 严格解码，绝不重编码
+terms, err := bitfs.VerifyFileQuoteEvidence(signedQuote)  // 统一签名 + 字段校验（不读时钟）
+if time.Now().UTC().After(time.Unix(terms.QuoteExpiresAtUnixSeconds, 0)) {
+    // 过期判断由应用用自己读取的一次时间完成
+}
+expectedBuyer := buyerPubKey // 压缩 33 字节
+if !bytes.Equal(terms.BuyerPublicKey, expectedBuyer) { /* 拒绝 */ }
+print(terms)
 ```
 
 这个 demo 直接调用 `bitfs.NewSignedFileQuote`，没有强行创建完整的 `seller.Workflow`。因为仅生成报价只需要纯函数式的签名与编码能力；后面的 demo 再用只持有官方 BSV 私钥的无状态 workflow 和 fixture 把这些步骤串起来。

@@ -82,16 +82,19 @@ CBOR packing and unpacking belong to the SDK, not to HTTP, WebSocket, queue, or 
 ```go
 // package wire
 // Kind is known to the transport and selects a decoder; it never identifies a
-// pool instance. Kind is distinct from signed body type numbers: the legacy
-// 001–006 CBOR bodies carry no kind element, while the Kind 8/9/10/11 bodies
-// embed their own body type as the second array element and sign it — Seller
-// signs exactly [4, 8, arbitration_claim_cbor], the Arbiter signs exactly
-// [4, 9, arbitration_receipt_cbor], and the Buyer retrieval request signs
-// exactly deterministic-CBOR([4, 10, claim_id, nonce]) while Kind 11 adds no
-// new outer signature over its embedded exact Kind 8/9 children. Messages
-// that define RefundTemplateTxID carry it in the CBOR document. The 0201
-// presign request derives it from RefundTx and has no separate correlation
-// ID field.
+// pool instance. Authentication documents carry no version or kind element of
+// their own: the unified signature domain folds the outer version, the kind,
+// and the exact document bytes into one signing input — Seller signs exactly
+// arbitration_claim_cbor via SignWireDocument(1, 8, ...), the Arbiter signs
+// exactly arbitration_receipt_cbor via SignWireDocument(1, 9, ...), the Buyer
+// retrieval request signs exactly content_retrieval_request_cbor =
+// [arbitration_claim_id, retrieval_nonce] via SignWireDocument(1, 10, ...),
+// and Kind 11 carries the Arbiter's own unified signature over
+// content_retrieval_result_cbor; its available branch binds the payload
+// bundle through content_payloads_id and never embeds Kind 8/9 bytes.
+// Messages that define RefundTemplateTxID carry it in the CBOR document. The
+// 0201 presign request derives it from RefundTx and has no separate
+// correlation ID field.
 type Kind uint16
 
 const (
@@ -107,9 +110,9 @@ const (
     // Direction: seller -> buyer.
     PoolRefundPresignResponse Kind = 3
 
-    // PoolFundingTxDelivery carries the signed funding transaction.
+    // FundingTransactionDelivery carries the signed funding transaction.
     // Direction: buyer -> seller.
-    PoolFundingTxDelivery Kind = 4
+    FundingTransactionDelivery Kind = 4
 
     // ContentRequest carries the signed content request and payment authorization.
     // Direction: buyer -> seller.
@@ -152,12 +155,12 @@ func Unmarshal(kind Kind, rawCBOR []byte) (any, error)
 // Typed helpers avoid any and type assertions in normal applications.
 func MarshalQuote(message *bitfs.SignedFileQuote) ([]byte, error)
 func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error)
-func MarshalPoolRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error)
-func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error)
-func MarshalPoolRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error)
-func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error)
-func MarshalPoolFundingTxDelivery(message *pool.FundingTxDelivery) ([]byte, error)
-func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, error)
+func MarshalRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error)
+func UnmarshalRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error)
+func MarshalRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error)
+func UnmarshalRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error)
+func MarshalFundingTransactionDelivery(message *pool.FundingTransactionDelivery) ([]byte, error)
+func UnmarshalFundingTransactionDelivery(rawCBOR []byte) (*pool.FundingTransactionDelivery, error)
 func MarshalContentRequest(message *bitfs.SignedContentRequest) ([]byte, error)
 func UnmarshalContentRequest(rawCBOR []byte) (*bitfs.SignedContentRequest, error)
 func MarshalContentDelivery(message *bitfs.SignedContentDelivery) ([]byte, error)
@@ -182,29 +185,29 @@ before they can enter signed 001/003/004 terms or 002 pool evidence.
 
 These functions have no storage or network effects and are suitable for wallets, servers, CLIs, and tests. Signing takes the caller-parsed official BSV private key directly (`ec.PrivateKey` from `github.com/bsv-blockchain/go-sdk/primitives/ec`). There are no signer or verifier callbacks.
 
-The signature path is fixed and identical for every credential: the signed bytes (canonical terms CBOR, or for 004 the bare 32-byte authorization hash) are hashed once with SHA-256, the official private key signs that pre-computed digest, the low-S DER result is re-checked by a fixed internal verifier against the role's derived public key before anything is returned. Go's `(*ec.PrivateKey).Sign` receives the already-computed digest, so callers must not hash a second time before signing; message helpers such as `bitfs.SignMessage` perform exactly this single hashing step internally. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
+Every ordinary message signature goes through one unified path: `protocol.SignWireDocument(key, protocol.WireVersion, kind, documentCBOR)` builds the typed signing input `["bitfs/wire-signature", version, kind, exact_document_cbor]`, hashes it once with SHA-256, signs that pre-computed digest, enforces low-S DER, and re-checks the result against the role's derived public key through a fixed internal verifier before anything is returned. Callers never hash, wrap, or verify manually; Kind 6 for example signs exactly `content_delivery_cbor = [payment_authorization_id]`, never a bare hash. Transaction signatures use the fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second time.
 
 ```go
 // package bitfs
-// NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
+// NewSignedFileQuote validates quote terms, encodes the canonical file_quote_terms_cbor,
 // signs those exact bytes with the seller's official BSV private key through
-// the fixed single-SHA-256 message path, and fixedly re-verifies the
-// signature with the derived public key before returning a 001 credential.
+// SignWireDocument(1, 1, ...), and fixedly re-verifies the signature with the
+// derived public key before returning a 001 credential.
 func NewSignedFileQuote(
     terms *FileQuoteTerms,
     sellerKey *ec.PrivateKey,
     recommendedFilename string,
 ) (*SignedFileQuote, error)
 
-// VerifySignedFileQuote checks the seller signature, field constraints, and
-// expiry using system UTC read once at entry and the fixed SDK verifier.
-// There is no now parameter and no verifier argument to supply.
-func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
+// VerifyFileQuoteEvidence checks the unified seller signature and field
+// constraints without reading any clock; expiry decisions stay with the
+// caller, which reads system UTC once.
+func VerifyFileQuoteEvidence(quote *SignedFileQuote) (*FileQuoteTerms, error)
 
-// NewSignedContentRequest deterministically encodes 003 terms and signs those
-// exact bytes with the buyer's official BSV private key through the same
-// fixed single-SHA-256 message path.
-func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
+// NewSignedContentRequest deterministically encodes the payment authorization
+// and signs those exact bytes with the buyer's official BSV private key
+// through SignWireDocument(1, 5, ...).
+func NewSignedContentRequest(authorization *PaymentAuthorization, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
 // VerifySignedContentRequest checks quote binding, pool participants, the
 // buyer signature over the exact terms bytes, quote expiry, and the delivery
@@ -218,14 +221,15 @@ func VerifySignedContentRequest(
     request *SignedContentRequest,
     quote *SignedFileQuote,
     opening PoolOpeningEvidence,
-) (*ContentRequestTerms, error)
+) (*PaymentAuthorization, error)
 
-// NewSignedContentDelivery signs the exact 32-byte payment authorization hash
-// with the seller's official BSV private key through the fixed message path
-// and attaches the canonically encoded ordered payload batch. Payloads are
-// bound indirectly via the hashes committed in the referenced 003.
+// NewSignedContentDelivery builds content_delivery_cbor =
+// deterministic-CBOR([payment_authorization_id]), signs exactly that document
+// through SignWireDocument(1, 6, ...) with the seller's official BSV private
+// key, and attaches the canonically encoded ordered payload batch. Payloads
+// are bound indirectly via the hashes committed in the referenced 003.
 func NewSignedContentDelivery(
-    paymentAuthorizationHash []byte,
+    paymentAuthorizationID protocol.PaymentAuthorizationID,
     payloads [][]byte,
     sellerKey *ec.PrivateKey,
 ) (*SignedContentDelivery, error)

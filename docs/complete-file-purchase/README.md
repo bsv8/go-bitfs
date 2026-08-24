@@ -35,14 +35,14 @@ sequenceDiagram
     S->>B: 001 SignedFileQuote
     B->>S: 002 RefundPresignRequest（FundingTx 原文仍保存在买方本地）
     S->>B: 002 RefundPresignResponse
-    B->>S: 002 FundingTxDelivery（退款证据已持久化）
+    B->>S: 002 FundingTransactionDelivery（退款证据已持久化）
     S->>N: 广播 FundingTx
     N-->>S: 返回规范 txid
 
     loop Seed + Seed 中列出的每个文件块
         B->>S: 003 SignedContentRequest
         S->>B: 004 SignedContentDelivery
-        B->>S: 005 PaymentUpdate（授权哈希+买方签名）
+        B->>S: 005 PaymentUpdate（payment_authorization_id + 买方交易签名）
         S->>N: 广播双方签名的最新累计状态
         N-->>S: 返回规范 txid
     end
@@ -101,7 +101,7 @@ SDK 没有 signer 接口或注入点：私钥是 workflow 的构造参数，而�
 buyerWorkflow, _ := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: buyerKey})
 ```
 
-所有签名走 SDK 固定路径：被签字节（001/003 的 canonical 条款 CBOR，或 004 的精确 32 字节授权哈希）用 SHA-256 哈希一次，
+所有普通消息签名走 SDK 固定路径：`SignWireDocument(key, protocol.WireVersion, kind, exact_document_cbor)` 构造类型化签名输入 `["bitfs/wire-signature", version, kind, document]`（001 是 file_quote_terms_cbor，003 是 payment_authorization_cbor，004 是 content_delivery_cbor = [payment_authorization_id]），做一次 SHA-256 哈希，
 `(*ec.PrivateKey).Sign` 对这份已算好的摘要签名（Go 侧接收预计算 digest，调用方
 不得在签名前再做一次哈希），返回 low-S DER
 并由固定验证器按派生角色公钥复验。资金池交易签名使用固定的 MultisigPool sighash
@@ -159,7 +159,7 @@ func (b *NodeBroadcaster) CurrentBlockHeight(ctx context.Context) (uint32, error
 ### 3.4 原始协议流水
 
 应用需要按 `RefundTemplateTxID` 保存每一步返回值，用于崩溃恢复、审计和 007 仲裁；
-自 005 最小付款凭证切换起，还必须按 `PaymentAuthorizationHash` 建立唯一索引保存精确的原始签名 003——
+自 005 最小付款凭证切换起，还必须按 `PaymentAuthorizationID` 建立唯一索引保存精确的原始签名 003——
 哈希是内容寻址键，不可逆解码，找不到原始 003 就不能验收对应的最小 005：
 
 ```go
@@ -169,7 +169,7 @@ func (b *NodeBroadcaster) CurrentBlockHeight(ctx context.Context) (uint32, error
 //   buyer_openings(refund_template_txid PRIMARY KEY, request_cbor, funding_tx)
 //   delivery_states(refund_template_txid PRIMARY KEY, auth_hash,
 //                   target_sequence, seller_amount_after_sat)
-//   authorizations(payment_authorization_hash PRIMARY KEY, request_cbor,
+//   authorizations(payment_authorization_id PRIMARY KEY, request_cbor,
 //                  refund_template_txid, processing_status) // 005 最小凭证的哈希索引
 //   journal(id, refund_template_txid, kind, cbor/raw, created_at)
 type PurchaseJournal struct{ /* ... */ }
@@ -182,8 +182,8 @@ func (j *PurchaseJournal) SaveLatestPayment(role string, state *pool.PaymentStat
 func (j *PurchaseJournal) SavePendingPayment(payment *pool.SignedPayment) error          // 广播前先持久化完整双签候选（raw/txid/sequence/auth hash）
 func (j *PurchaseJournal) SaveDeliveryState(state *seller.ContentDeliveryState) error    // 每次生成 004 后
 func (j *PurchaseJournal) LoadDeliveryState(refundTemplateTxID [32]byte) (*seller.ContentDeliveryState, error)
-func (j *PurchaseJournal) SaveAuthorization(authHash [32]byte, request *bitfs.SignedContentRequest) error // 生成 004 时保存原始 003
-func (j *PurchaseJournal) LoadAuthorizationByHash(authHash []byte) (*bitfs.SignedContentRequest, error)   // 收到最小 005 后取回原始 003
+func (j *PurchaseJournal) SaveAuthorization(authID protocol.PaymentAuthorizationID, request *bitfs.SignedContentRequest) error // 生成 004 时保存原始 003
+func (j *PurchaseJournal) LoadAuthorizationByID(authID protocol.PaymentAuthorizationID) (*bitfs.SignedContentRequest, error)   // 收到最小 005 后取回原始 003
 func (j *PurchaseJournal) RecordOutbox(kind string, payload []byte) error                // 发送前的 wire 报文留痕
 ```
 
@@ -198,19 +198,19 @@ ctx := context.Background()
 seed, fileBytes := contentRepo.PrepareMasterSeedAndBlocks("bigfile.bin")
 
 // 报价有效期由应用计算；SDK 在 CreateQuote 入口内部读取一次系统 UTC 校验未过期。
-arbiters, _ := bitfs.EncodeSupportedArbiterPubkeys([][]byte{arbiterPubKey})
+arbiters, _ := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{arbiterPubKey})
 quote, err := sellerWorkflow.CreateQuote(ctx, bitfs.FileQuoteTerms{
-    SeedHash:                     masterseed.Sum256(seed).Bytes(),
-    BuyerPubkey:                  buyerPubKey,
-    SeedPriceSat:                 100,
-    FullBlockPriceSat:            1000,
-    FileSize:                     uint64(len(fileBytes)),
-    QuoteExpiresAtUnix:           time.Now().UTC().Add(24 * time.Hour).Unix(),
-    SupportedArbiterPubkeysCBOR:  arbiters,
+    SeedHash:                       masterseed.Sum256(seed).Bytes(),
+    BuyerPublicKey:                 buyerPubKey,
+    SeedPriceSatoshis:              100,
+    FullBlockPriceSatoshis:         1000,
+    FileSizeBytes:                  uint64(len(fileBytes)),
+    QuoteExpiresAtUnixSeconds:      time.Now().UTC().Add(24 * time.Hour).Unix(),
+    SupportedArbiterPublicKeysCBOR: arbiters,
 }, "bigfile.bin")
 if err != nil { /* ... */ }
 
-journal.RecordOutbox("quote", must(bitfs.EncodeSignedFileQuote(quote)))
+journal.RecordOutbox("quote", must(wire.MarshalFileQuote(quote)))
 ```
 
 `CreateQuote` 在入口处读取一次系统 UTC 并以此签名条款、校验未过期，返回完整凭证；保存它是应用的职责。
@@ -239,27 +239,27 @@ fundingTx := wallet.BuildSignedFundingTransaction(buyerPubKey, sellerPubKey, arb
 
 // 0201：SDK 返回 wire 报文与买方私有状态。应用先保存 State，再发送 Request。
 preparation, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{
-    FundingTx:            fundingTx,
-    ExpiryLockTime:       uint32(time.Now().Add(time.Hour).Unix()),
-    MinerFeeRateSatPerKB: feeRate,
-    SellerPubKey:         sellerPubKey,
-    ArbiterPubKey:        arbiterPubKey,
+    FundingTransactionRaw:           fundingTx,
+    ExpiryLockTime:                  uint32(time.Now().Add(time.Hour).Unix()),
+    MinerFeeRateSatoshisPerKilobyte: feeRate,
+    SellerPublicKey:                 sellerPubKey,
+    ArbiterPublicKey:                arbiterPubKey,
 })
 if err != nil { /* ... */ }
 journal.SaveBuyerOpeningState(preparation.State) // 先保存，再发送
-rawRequest, err := wire.MarshalPoolRefundPresignRequest(preparation.Request)
+rawRequest, err := wire.MarshalRefundPresignRequest(preparation.Request)
 if err != nil { return err }
 sendToSeller(rawRequest)
 
 // 卖方收到字节后先解码再验证。
-decodedRequest, err := wire.UnmarshalPoolRefundPresignRequest(recvRaw())
+decodedRequest, err := wire.UnmarshalRefundPresignRequest(recvRaw())
 if err != nil { return err }
 
 // 0202：卖方验证请求并预签。应用先保存 Opening，再发送 Response。
 presignResult, err := sellerWorkflow.PresignPoolOpening(ctx, decodedRequest)
 if err != nil { /* ... */ }
 journal.SaveSellerPresignProof(presignResult.Opening) // 先保存，再回应
-rawResponse, err := wire.MarshalPoolRefundPresignResponse(presignResult.Response)
+rawResponse, err := wire.MarshalRefundPresignResponse(presignResult.Response)
 if err != nil { return err }
 sendToBuyer(rawResponse)
 
@@ -273,15 +273,15 @@ journal.SaveOpening("buyer", acceptance.Opening)          // 含 FundingTx 的�
 journal.SaveLatestPayment("buyer", acceptance.InitialPayment)
 
 // 0204：用已验证 proof 构造交付报文。
-delivery, err := buyerWorkflow.BuildFundingTxDelivery(ctx, acceptance.Opening)
+delivery, err := buyerWorkflow.BuildFundingTransactionDelivery(ctx, acceptance.Opening)
 if err != nil { /* ... */ }
-rawDelivery, err := wire.MarshalPoolFundingTxDelivery(delivery)
+rawDelivery, err := wire.MarshalFundingTransactionDelivery(delivery)
 if err != nil { return err }
 journal.RecordOutbox("funding_delivery", rawDelivery)
 sendToSeller(rawDelivery)
 
 // 0205：卖方用自己保存的预签证据验证资金交付。
-decodedDelivery, err := wire.UnmarshalPoolFundingTxDelivery(recvRaw())
+decodedDelivery, err := wire.UnmarshalFundingTransactionDelivery(recvRaw())
 if err != nil { return err }
 presignProof, err := journal.LoadSellerPresignProof(decodedDelivery.RefundTemplateTxID)
 if err != nil { /* ... */ }
@@ -320,11 +320,12 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
 
     rawRequest, err := wire.MarshalContentRequest(request)
     if err != nil { return err }
-    authHash := must(bitfs.PaymentAuthorizationHash(request.TermsCBOR))
+    authID := must(bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR))
     journal.RecordOutbox("content_request", rawRequest) // 发送前留痕：007 需要
     sendToSeller(rawRequest)
 
-    // 004：卖方验证整批授权，逐项校验 payload 后对裸授权哈希签名，原子交付。
+    // 004：卖方验证整批授权，逐项校验 payload 后通过 SignWireDocument(1, 6, ...)
+    // 对精确 content_delivery_cbor = [payment_authorization_id] 签名，原子交付。
     delivery, deliveryState, err := sellerWorkflow.BuildContentDelivery(ctx,
         sellerQuote, sellerOpening, sellerPrevious, decodedRequest,
         seller.ContentDeliveryInput{
@@ -335,12 +336,12 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     )
     if err != nil { return err }
     journal.SaveDeliveryState(deliveryState) // 先保存交付上下文，再发送 004
-    journal.SaveAuthorization(authHash, request)             // 应用按授权哈希索引原始 003（Seller 收到最小 005 后要查回）
+    journal.SaveAuthorization(authID, request)               // 应用按授权 ID 索引原始 003（Seller 收到最小 005 后要查回）
     rawDelivery, err := wire.MarshalContentDelivery(delivery)
     if err != nil { return err }
     sendToBuyer(rawDelivery)
 
-    // 买家按 PaymentAuthorizationHash 路由 004 到本地保存的原始 003 后全量
+    // 买家按 PaymentAuthorizationID 路由 004 到本地保存的原始 003 后全量
     // 验收；payload 批次是数据，落盘由应用完成。
     verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, previous,
         decodedRequest, decodedDelivery,
@@ -357,12 +358,12 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
         }
     }
 
-    // 005：最小凭证只携带授权哈希 + 买方签名。应用先按哈希查回保存的原始
+    // 005：最小凭证只携带 payment_authorization_id + 买方签名。应用先按 ID 查回保存的原始
     // 签名 003；卖方验证原始授权、交叉核对 ContentDeliveryState，本地重建
     // 未签名状态交易并验过买方签名后补签合并。
     update := verified.Update
-    authorization, err := journal.LoadAuthorizationByHash(update.PaymentAuthorizationHash)
-    if err != nil { return err } // 哈希不可解码：找不到原始 003 就不能验收
+    authorization, err := journal.LoadAuthorizationByID(update.PaymentAuthorizationID)
+    if err != nil { return err } // 授权 ID 不可解码：找不到原始 003 就不能验收
     signedPayment, err := sellerWorkflow.AcceptPayment(ctx, sellerOpening,
         sellerPrevious, authorization, loadedDeliveryState, update, blockHeight)
     if err != nil { return err }
@@ -380,9 +381,9 @@ func purchaseOneRound(journal *PurchaseJournal, blockHeight uint32) error {
     // 必须以这份共享确认状态为 previous，累计付款循环才能真实滚动。
     confirmed := &signedPayment.State
     engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{
-        BuyerPubKey:   sellerOpening.BuyerPubKey,
-        SellerPubKey:  sellerOpening.SellerPubKey,
-        ArbiterPubKey: sellerOpening.ArbiterPubKey,
+        BuyerPublicKey:   sellerOpening.BuyerPublicKey,
+        SellerPublicKey:  sellerOpening.SellerPublicKey,
+        ArbiterPublicKey: sellerOpening.ArbiterPublicKey,
     })
     if err != nil { return err }
     if err := engine.VerifyAcceptedPayment(confirmed, sellerOpening); err != nil {
@@ -404,7 +405,7 @@ base := journal.LoadLatestPayment("buyer")
 
 // 买家构造最终未签名交易和自己的分离签名。
 // base 与目标金额都是调用方的业务决定；SDK 只验证协议边界。
-unsigned, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, opening, base, targetSellerAmountSat, blockHeight)
+unsigned, buyerSig, err := buyerWorkflow.BuildImmediateClose(ctx, opening, base, targetSellerAmountSatoshis, blockHeight)
 if err != nil { /* ... */ }
 
 // 卖家验证买家签名、补充卖方签名并合并；不广播。
@@ -445,8 +446,8 @@ if err != nil { /* ... */ }
 // 不确定时拒绝签名，不得降级继续。SDK 不查节点。
 // 应用先按自己的收费策略对 exact payload CBOR 长度计价（整数公式，无浮点），
 // 再把明确金额交给 SDK；SDK 只验证正数与余额，不注入任何费率策略。
-arbiterAmountSat := arbiterFeePolicy(len(decodedArbitrationRequest.ContentPayloadsCBOR))
-prepared, err := arbiterWorkflow.PreparePayment(arbiterCtx, decodedArbitrationRequest, blockHeight, arbiterAmountSat)
+arbiterFee := arbiterFeePolicy(len(decodedArbitrationRequest.ContentPayloadsCBOR))
+prepared, err := arbiterWorkflow.PreparePayment(arbiterCtx, decodedArbitrationRequest, blockHeight, arbiterFee)
 if err != nil { /* ... */ }
 // 应用在这里原子持久化 exact request、payload bundle、Claim ID 与冻结费用。
 if err := journal.PersistArbitrationCustody(prepared); err != nil { /* ... */ }
@@ -478,49 +479,85 @@ if err != nil { return err }
 journal.RecordOutbox("content_retrieval_request", rawKind10) // 发送前持久化 exact Kind 10
 sendToArbiter(rawKind10)
 
-// Arbiter 应用：固定顺序处理。
+// Arbiter 应用：固定顺序处理。所有分支的首次响应都经状态感知原子事务提交：
+// "custody 状态复核 + (Claim ID, Nonce) 唯一键 + exact 响应插入"在同一临界区
+// 内完成；候选可以在事务外提前签署，未提交的签名直接丢弃。
 func handleContentRetrieval(rawKind10 []byte) ([]byte, error) {
     request, err := arbitration.UnmarshalContentRetrievalRequest(rawKind10)
     if err != nil { return nil, err }                          // strict decode 失败 → 拒绝
-    record, ok := custodyStore.Lookup(hex(request.ClaimID))
-    if !ok { return nil, ErrNotFound }                         // 不泄露其他信息
-    if !record.Retrievable() { return nil, ErrNotReady }       // 缺 exact Kind 9 → 不提前释放 payload
-    stored8, err := arbitration.UnmarshalRequest(record.RequestBytes)
-    if err != nil { return nil, ErrCustodyCorrupt }            // 存储损坏：失败关闭并报警
-    stored9, err := arbitration.UnmarshalResponse(record.ResponseBytes)
-    if err != nil { return nil, ErrCustodyCorrupt }
-    if _, err := arbiterWorkflow.VerifyContentRetrievalRequest(request, stored8, stored9); err != nil {
-        return nil, ErrUnauthorized                            // 统一语义，不说明哪个字段失败
+    claimID, nonce, err := arbitration.DecodeContentRetrievalRequestDocument(request.ContentRetrievalRequestCBOR)
+    if err != nil { return nil, err }
+    record, ok := custodyStore.Lookup(hex(claimID))
+    switch {
+    case !ok:
+        // not_received：没有 Claim 就无法鉴权 Buyer——签名的四元 Kind 11，
+        // 不占用任何状态；生产实现必须限流且不泄露记录元数据。
+        return custodyStore.SignAndAnswer(requestID, arbitration.RetrievalSellerArbitrationNotReceived)
+    case !record.Retrievable():
+        // 只有 exact Kind 8：鉴权后锁外构造 NotReady 与 Gone 两个候选，再进入
+        // 状态感知原子提交——提交临界区复核 custody 状态。
+        if authErr := arbiter.AuthenticateContentRetrievalRequest(request, record.StoredRequest()); authErr != nil {
+            return nil, ErrUnauthorized                        // 统一语义，不说明哪个字段失败
+        }
+        rawNotReady := marshalUnavailable(requestID, NotReady)
+        rawGone := marshalUnavailable(requestID, Gone)
+        outcome, raw, fresh := custodyStore.CommitStateAwareAnswer(claimID, nonce,
+            record.StoredRequestBytes(), rawNotReady, rawGone)
+        if outcome == BecameComplete {
+            // Kind 9 在窗口内落地：NotReady 作废，基于新快照重建 Available。
+            verified, err := arbiterWorkflow.VerifyContentRetrievalRequest(request,
+                fresh.StoredRequest(), fresh.StoredResponse())
+            if err != nil { return nil, ErrUnauthorized }
+            rawAvailable := marshalAvailable(requestID, verified.PayloadsCBOR)
+            raw = custodyStore.CommitAvailableAnswer(claimID, nonce, fresh, rawAvailable, rawGone)
+        }
+        return raw, nil
     }
-    if !custodyStore.OccupyNonce(request.ClaimID, request.Nonce) { // 先验签后原子占用
-        return nil, ErrNonceReused                             // 并发由数据库唯一键裁决唯一胜者
-    }
-    response, err := arbitration.BuildContentRetrievalResponse(record.RequestBytes, record.ResponseBytes)
-    if err != nil { return nil, err }                          // 内嵌原文，不重编码
-    return arbitration.MarshalContentRetrievalResponse(response)
+
+    verified, err := arbiterWorkflow.VerifyContentRetrievalRequest(request,
+        record.StoredRequest(), record.StoredResponse())
+    if err != nil { return nil, ErrUnauthorized }              // 统一语义，不说明哪个字段失败
+
+    // 锁外构造候选应答：available 绑定验证过的证据链 payload；gone 兜底用于
+    // retention 竞争窗口。
+    rawAvailable := marshalAvailable(requestID, verified.PayloadsCBOR)
+    rawGone := marshalUnavailable(requestID, Gone)
+
+    // 状态感知原子事务：retention/版本复核 + (Claim ID, Nonce) 唯一键 +
+    // exact 首次响应插入在同一临界区完成；并发产生的未提交签名直接丢弃，
+    // 重放已提交胜者的字节。
+    return custodyStore.CommitAvailableAnswer(claimID, nonce, record, rawAvailable, rawGone)
 }
 
 // Buyer：完整验收（时间无关）并保存。
 rawKind11 := recvFromArbiter()
-kind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+kind11, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
 if err != nil { return err }
 verified, err := buyerWorkflow.AcceptArbitratedContent(ctx, quote, buyerOpening,
     previous, sent003Authorization, retrievalRequest, kind11, buyer.ArbitratedContentInput{})
-if err != nil { return err } // 本地 expected ClaimCBOR 与内嵌 ClaimCBOR 必须逐字节相等
+if err != nil { return err } // Kind 10 必须绑定本地重建的 ArbitrationClaimID 且带本买方统一签名
 journal.SaveExactKind11AndPayloads(rawKind11, verified.Payloads)
-_ = verified.ClaimID; _ = verified.Receipt // 审计数据按应用策略落盘
+_ = verified.ArbitrationClaimID; _ = verified.ContentRetrievalRequestID // 审计数据按应用策略落盘
 ```
 
-验收错误对照：
+验收与重放对照（三条取件语义）：
+
+```text
+网络超时 / 响应未收完   -> 重发相同 exact Kind 10（幂等，Arbiter 原样返回首次 Kind 11）
+明确收到 not_ready      -> 新 nonce、新 Kind 10 重试
+相同请求重放            -> 逐字节原样重发第一次持久化的 Kind 11
+```
 
 | 场景 | 正确做法 |
 |---|---|
-| Claim ID 查不到 | `NotFound`；不泄露 Claim 是否存在或其他字段信息。 |
-| 只有 Kind 8，Kind 9 未签署 | `NotReady`；Buyer 稍后用新 nonce 重试。 |
-| Buyer 签名不属于 Claim 的 Buyer key | 统一 `Unauthorized`。 |
-| `(ClaimID, Nonce)` 已占用 | `NonceReused`；换新 nonce 重签重试。 |
-| retention 结束且已安全删除 | `Gone`；不代理、不返回空 payload、不触发关池。 |
-| 发送超时 / 未收完 | 不复用旧 nonce；新 nonce 新签名重发，Arbiter 重返同一份 exact Kind 8/9。 |
+| Claim ID 查不到 | 返回**签名的** `seller_arbitration_not_received` 四元 Kind 11；不泄露 Claim 是否存在之外的信息，并对随机查询限流。 |
+| 只有 Kind 8，Kind 9 未签署 | 鉴权后返回**签名的** `not_ready` 四元 Kind 11 并持久化为该请求唯一答案；Buyer 明确收到 not_ready 后用新 nonce 新签名重试。 |
+| NotReady 构造后 Kind 9 才落地 | 提交临界区复核状态：放弃 NotReady，按最新完整快照重建 Available 应答。 |
+| NotReady 构造后 retention 删除 | 提交临界区复核状态：改答并持久化签名的 `custody_gone`——删除后绝不回答 not_ready 或 available。 |
+| Buyer 签名不属于 Claim 的 Buyer key | 统一 `Unauthorized`；不污染 nonce 占用表。 |
+| 相同 exact Kind 10 重放 | 原样重发第一次持久化的 Kind 11（任何分支），绝不重新评估或升级。 |
+| retention 结束且已安全删除 | **签名的** `custody_gone`；已持久化首次响应随内容一起删除，重复执行 retention 不得再删除 tombstone 状态下已提交的 Gone 应答。 |
+| 发送超时 / 未收完 | 优先**重发相同 exact Kind 10**（幂等重放）；只有明确收到 not_ready 才换新 nonce。 |
 | 取件时 Quote/deadline/refund 已过期 | 只要记录仍在 retention 内就正常验收——事后取件不重新执行时间门禁。 |
 
 ## 7. 错误分类与重试策略

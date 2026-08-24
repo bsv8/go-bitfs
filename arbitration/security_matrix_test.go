@@ -19,6 +19,7 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 func mustArbiterWorkflow(t *testing.T) *Workflow {
@@ -30,10 +31,10 @@ func mustArbiterWorkflow(t *testing.T) *Workflow {
 	return workflow
 }
 
-func TestPrepareRejectsTamperedSellerClaimSignature(t *testing.T) {
+func TestPrepareRejectsTamperedSellerArbitrationClaimSignature(t *testing.T) {
 	evidence := makeArbitrationEvidence(t)
 	rejected := cloneRequest(evidence.request)
-	rejected.SellerClaimSignature[len(rejected.SellerClaimSignature)-1] ^= 1
+	rejected.SellerArbitrationClaimSignature[len(rejected.SellerArbitrationClaimSignature)-1] ^= 1
 	if _, err := mustArbiterWorkflow(t).PreparePayment(context.Background(), rejected, 900000, testArbitrationFeeSat); !errors.Is(err, pool.ErrInvalidEvidence) {
 		t.Fatalf("tampered Seller Claim signature was not rejected as invalid evidence: %v", err)
 	}
@@ -74,19 +75,19 @@ func TestSignPreparedRejectsTamperedCustodyEvidence(t *testing.T) {
 		name   string
 		mutate func(prepared *PreparedPayment)
 	}{
-		{"frozen claim id", func(p *PreparedPayment) { p.claimID[0] ^= 0xff }},
-		{"frozen fee", func(p *PreparedPayment) { p.arbiterAmountSat += 1 }},
-		{"third output amount", func(p *PreparedPayment) { p.unsigned.ArbiterAmountSat += 1 }},
-		{"authorization hash", func(p *PreparedPayment) { p.authorizationHash[0] ^= 0xff }},
+		{"frozen claim id", func(p *PreparedPayment) { p.arbitrationClaimID[0] ^= 0xff }},
+		{"frozen fee", func(p *PreparedPayment) { p.arbiterAmountSatoshis += 1 }},
+		{"third output amount", func(p *PreparedPayment) { p.unsigned.ArbiterAmountSatoshis += 1 }},
+		{"authorization ID", func(p *PreparedPayment) { p.paymentAuthorizationID[0] ^= 0xff }},
 		{"evidence commitment", func(p *PreparedPayment) { p.evidenceCommitment[0] ^= 0xff }},
 		{"request payload bundle", func(p *PreparedPayment) {
 			p.request.ContentPayloadsCBOR[len(p.request.ContentPayloadsCBOR)-1] ^= 1
 		}},
 		{"request claim bytes", func(p *PreparedPayment) {
-			p.request.ClaimCBOR[len(p.request.ClaimCBOR)-1] ^= 1
+			p.request.ArbitrationClaimCBOR[len(p.request.ArbitrationClaimCBOR)-1] ^= 1
 		}},
 		{"request seller signature", func(p *PreparedPayment) {
-			p.request.SellerClaimSignature[0] ^= 1
+			p.request.SellerArbitrationClaimSignature[0] ^= 1
 		}},
 		{"unsigned candidate raw tx", func(p *PreparedPayment) {
 			p.unsigned.RawTx[len(p.unsigned.RawTx)-1] ^= 1
@@ -112,7 +113,7 @@ func TestReceiptBindingRejectsAnyByteChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +125,11 @@ func TestReceiptBindingRejectsAnyByteChange(t *testing.T) {
 	arbiterPubKey := evidence.keys[2].PubKey().Compressed()
 
 	receiptMutations := map[string]func(receipt *ArbitrationReceipt){
-		"claim id":        func(r *ArbitrationReceipt) { r.ClaimID[0] ^= 1 },
-		"arbiter amount":  func(r *ArbitrationReceipt) { r.ArbiterAmountSat += 1 },
-		"transaction sig": func(r *ArbitrationReceipt) { r.ArbiterTransactionSignature[len(r.ArbiterTransactionSignature)-1] ^= 1 },
+		"claim id":       func(r *ArbitrationReceipt) { r.ArbitrationClaimID[0] ^= 1 },
+		"arbiter amount": func(r *ArbitrationReceipt) { r.ArbiterAmountSatoshis += 1 },
+		"transaction sig": func(r *ArbitrationReceipt) {
+			r.ArbiterPaymentTransactionSignature[len(r.ArbiterPaymentTransactionSignature)-1] ^= 1
+		},
 	}
 	for name, mutate := range receiptMutations {
 		tampered := cloneReceipt(receipt)
@@ -135,25 +138,25 @@ func TestReceiptBindingRejectsAnyByteChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: marshal tampered receipt: %v", name, err)
 		}
-		domain, err := ArbiterReceiptSigningCBOR(tamperedCBOR)
+		domain, err := protocol.WireSignatureInput(protocol.WireVersion, 9, tamperedCBOR)
 		if err != nil {
 			t.Fatalf("%s: tampered child rejected by signing domain: %v", name, err)
 		}
-		if err := bitfs.VerifySignature(arbiterPubKey, domain, response.ArbiterReceiptSignature); err == nil {
+		if err := bitfs.VerifySignature(arbiterPubKey, domain, response.ArbiterArbitrationReceiptSignature); err == nil {
 			t.Fatalf("tampered %s still verified against the frozen Arbiter receipt signature", name)
 		}
 	}
 
-	domain, err := ArbiterReceiptSigningCBOR(response.ReceiptCBOR)
+	domain, err := protocol.WireSignatureInput(protocol.WireVersion, 9, response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	flippedReceiptSig := append([]byte(nil), response.ArbiterReceiptSignature...)
+	flippedReceiptSig := append([]byte(nil), response.ArbiterArbitrationReceiptSignature...)
 	flippedReceiptSig[len(flippedReceiptSig)-1] ^= 1
 	if err := bitfs.VerifySignature(arbiterPubKey, domain, flippedReceiptSig); err == nil {
 		t.Fatal("flipped Arbiter receipt signature verified")
 	}
-	flippedTxSig := append([]byte(nil), receipt.ArbiterTransactionSignature...)
+	flippedTxSig := append([]byte(nil), receipt.ArbiterPaymentTransactionSignature...)
 	flippedTxSig[len(flippedTxSig)-1] ^= 1
 	if err := engine.VerifyArbitrationArbiterPayment(unsigned, flippedTxSig); err == nil {
 		t.Fatal("flipped Arbiter transaction signature verified against the candidate")
@@ -182,15 +185,15 @@ func TestReceiptSignatureCannotBeReusedAcrossClaims(t *testing.T) {
 		[][]byte{mustDigest(t, "payload-two")}, [][]byte{[]byte("payload-two")},
 		expiry, deadline)
 
-	firstID, err := ArbitrationClaimID(first.request.ClaimCBOR)
+	firstID, err := ArbitrationClaimID(first.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondID, err := ArbitrationClaimID(second.request.ClaimCBOR)
+	secondID, err := ArbitrationClaimID(second.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(firstID, secondID) {
+	if firstID == secondID {
 		t.Fatal("two Claims with different content hashes produced one Claim ID")
 	}
 
@@ -212,24 +215,27 @@ func TestReceiptSignatureCannotBeReusedAcrossClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The same candidate bytes plus the other Claim's ID cannot carry the
-	// first Claim's receipt: the message signature covers only the exact
-	// [4,9,receipt_cbor], so any Claim ID swap breaks it.
+	// first Claim's receipt: the unified message signature covers only
+	// WireSignatureInput(1, 9, arbitration_receipt_cbor), so any Claim ID
+	// swap breaks it.
 	transplanted := cloneReceipt(receipt)
-	transplanted.ClaimID = append([]byte(nil), secondID...)
+	var typedSecondID protocol.ArbitrationClaimID
+	copy(typedSecondID[:], secondID[:])
+	transplanted.ArbitrationClaimID = typedSecondID
 	transplantedCBOR, err := MarshalReceipt(transplanted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	domain, err := ArbiterReceiptSigningCBOR(transplantedCBOR)
+	domain, err := protocol.WireSignatureInput(protocol.WireVersion, 9, transplantedCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bitfs.VerifySignature(second.keys[2].PubKey().Compressed(), domain, response.ArbiterReceiptSignature); err == nil {
+	if err := bitfs.VerifySignature(second.keys[2].PubKey().Compressed(), domain, response.ArbiterArbitrationReceiptSignature); err == nil {
 		t.Fatal("receipt signature was reused across two different Claim IDs")
 	}
 }
@@ -372,34 +378,34 @@ func makeArbitrationEvidenceWithDeadline(t *testing.T, deadlineUnix int64) arbit
 	payload := []byte("deadline-payload")
 	digest := sha256.Sum256(payload)
 	evidence := makeArbitrationEvidenceWithPayloads(t, [][]byte{digest[:]}, [][]byte{payload})
-	claim, err := UnmarshalClaim(evidence.request.ClaimCBOR)
+	claim, err := UnmarshalClaim(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms, err := bitfs.DecodeContentRequestTerms(claim.TermsCBOR)
+	authorization, err := bitfs.DecodePaymentAuthorization(claim.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms.DeliveryDeadlineUnix = deadlineUnix
-	termsCBOR, err := bitfs.EncodeContentRequestTerms(terms)
+	authorization.DeliveryDeadlineUnixSeconds = deadlineUnix
+	authorizationCBOR, err := bitfs.EncodePaymentAuthorization(authorization)
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyerSignature, err := bitfs.SignMessage(evidence.keys[0], termsCBOR)
+	buyerSignature, err := protocol.SignWireDocument(evidence.keys[0], protocol.WireVersion, 5, authorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	claimCBOR, err := MarshalClaim(&ArbitrationClaim{
-		PoolOutputSatoshis:      claim.PoolOutputSatoshis,
-		PoolOutputLockingScript: claim.PoolOutputLockingScript,
-		RefundTemplateRaw:       claim.RefundTemplateRaw,
-		TermsCBOR:               termsCBOR,
-		BuyerSignature:          buyerSignature,
+		PoolOutputSatoshis:                 claim.PoolOutputSatoshis,
+		PoolOutputLockingScript:            claim.PoolOutputLockingScript,
+		RefundTemplateRaw:                  claim.RefundTemplateRaw,
+		PaymentAuthorizationCBOR:           authorizationCBOR,
+		BuyerPaymentAuthorizationSignature: buyerSignature,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	domain, err := SellerClaimSigningCBOR(claimCBOR)
+	domain, err := protocol.WireSignatureInput(protocol.WireVersion, 8, claimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,8 +413,8 @@ func makeArbitrationEvidenceWithDeadline(t *testing.T, deadlineUnix int64) arbit
 	if err != nil {
 		t.Fatal(err)
 	}
-	evidence.request.ClaimCBOR = claimCBOR
-	evidence.request.SellerClaimSignature = sellerClaimSig
+	evidence.request.ArbitrationClaimCBOR = claimCBOR
+	evidence.request.SellerArbitrationClaimSignature = sellerClaimSig
 	return evidence
 }
 
@@ -429,8 +435,8 @@ func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.DeadlineUnix() != now.Add(30*time.Second).Unix() {
-		t.Fatalf("prepared deadline drifted: %d", prepared.DeadlineUnix())
+	if prepared.DeadlineUnixSeconds() != now.Add(30*time.Second).Unix() {
+		t.Fatalf("prepared deadline drifted: %d", prepared.DeadlineUnixSeconds())
 	}
 
 	// Sign must refuse once the delivery deadline passes inside the
@@ -454,7 +460,7 @@ func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
 	if expiring == prepared {
 		t.Fatal("could not prepare custody evidence inside its delivery deadline")
 	}
-	for time.Now().UTC().Before(time.Unix(expiring.deadlineUnix, 0)) {
+	for time.Now().UTC().Before(time.Unix(expiring.deadlineUnixSeconds, 0)) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if _, err := workflow.SignPreparedPayment(context.Background(), expiring); !errors.Is(err, pool.ErrInvalidEvidence) {
@@ -525,13 +531,13 @@ func TestArbitrationDecodersRejectHostileCBOR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalSignature := append([]byte(nil), decoded.SellerClaimSignature...)
-	decoded.SellerClaimSignature[0] ^= 1
+	originalSignature := append([]byte(nil), decoded.SellerArbitrationClaimSignature...)
+	decoded.SellerArbitrationClaimSignature[0] ^= 1
 	fresh, err := UnmarshalRequest(valid)
 	if err != nil {
 		t.Fatalf("source bytes were corrupted by a prior decode and mutation: %v", err)
 	}
-	if !bytes.Equal(fresh.SellerClaimSignature, originalSignature) || bytes.Equal(fresh.SellerClaimSignature, decoded.SellerClaimSignature) {
+	if !bytes.Equal(fresh.SellerArbitrationClaimSignature, originalSignature) || bytes.Equal(fresh.SellerArbitrationClaimSignature, decoded.SellerArbitrationClaimSignature) {
 		t.Fatal("a fresh decode observed a previous decode's mutation")
 	}
 	canonical, err := MarshalRequest(fresh)
@@ -551,12 +557,12 @@ func TestArbitrationDecodersRejectHostileCBOR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedResponse.ArbiterReceiptSignature[0] ^= 1
+	decodedResponse.ArbiterArbitrationReceiptSignature[0] ^= 1
 	freshResponse, err := UnmarshalResponse(receiptRaw)
 	if err != nil {
 		t.Fatalf("response source bytes were corrupted by a prior decode and mutation: %v", err)
 	}
-	if bytes.Equal(freshResponse.ArbiterReceiptSignature, decodedResponse.ArbiterReceiptSignature) {
+	if bytes.Equal(freshResponse.ArbiterArbitrationReceiptSignature, decodedResponse.ArbiterArbitrationReceiptSignature) {
 		t.Fatal("a fresh response decode observed a previous decode's mutation")
 	}
 }
@@ -586,8 +592,7 @@ func TestPreparedPaymentGettersReturnDeepCopies(t *testing.T) {
 		}
 	}
 	assertDeepCopy("RefundTemplateTxID", prepared.RefundTemplateTxID)
-	assertDeepCopy("ClaimID", prepared.ClaimID)
-	assertDeepCopy("PaymentAuthorizationHash", prepared.PaymentAuthorizationHash)
+	// ClaimID / PaymentAuthorizationID 现在是值类型数组，天然按值返回。
 	assertDeepCopy("ContentPayloadsCBOR", prepared.ContentPayloadsCBOR)
 
 	claim := prepared.Claim()
@@ -623,7 +628,7 @@ func TestPreparedPaymentGettersReturnDeepCopies(t *testing.T) {
 }
 
 // TestContentRetrievalSignatureReplayMatrix pins the Kind 10 authorization
-// boundary: a buyer signature over [4,10,claim_id,nonce] authorizes exactly
+// boundary: a buyer signature over the exact Kind 10 request document authorizes exactly
 // one Claim ID with exactly one nonce under kind 10 — the same bytes signed
 // for a different Claim, a different nonce, or any other signing domain are
 // all rejected by the fixed verifier.
@@ -636,15 +641,15 @@ func TestContentRetrievalSignatureReplayMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	storedRequest := prepared.Request()
-	claimID, err := ArbitrationClaimID(storedRequest.ClaimCBOR)
+	claimID, err := ArbitrationClaimID(storedRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signing, err := BuyerRetrievalSigningCBOR(claimID, testRetrievalNonce)
+	requestDoc, err := EncodeContentRetrievalRequestDocument(claimID, testRetrievalNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyerSig, err := bitfs.SignMessage(evidence.keys[0], signing)
+	buyerSignature, err := protocol.SignWireDocument(evidence.keys[0], protocol.WireVersion, 10, requestDoc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,12 +662,16 @@ func TestContentRetrievalSignatureReplayMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	storedOther := preparedOther.Request()
-	otherID, err := ArbitrationClaimID(storedOther.ClaimCBOR)
+	otherID, err := ArbitrationClaimID(storedOther.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	reusedForOther := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), otherID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	otherDoc, err := EncodeContentRetrievalRequestDocument(otherID, testRetrievalNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusedForOther := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: otherDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), buyerSignature...)}
 	if _, err := workflow.VerifyContentRetrievalRequest(reusedForOther, storedRequest, response); err == nil {
 		t.Fatal("Kind 10 signature authorized a different Claim ID")
 	}
@@ -672,39 +681,39 @@ func TestContentRetrievalSignatureReplayMatrix(t *testing.T) {
 
 	// 同一签名贴到不同 nonce。
 	freshNonce := bytes.Repeat([]byte{0x5a}, RetrievalNonceBytes)
-	reusedNonce := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), freshNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	reusedNonceDoc, err := EncodeContentRetrievalRequestDocument(claimID, freshNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusedNonce := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: reusedNonceDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), buyerSignature...)}
 	if _, err := workflow.VerifyContentRetrievalRequest(reusedNonce, storedRequest, response); err == nil {
 		t.Fatal("Kind 10 signature authorized a different nonce")
 	}
 
 	// Kind 混淆：把 Kind 9 的回执签名当作 Kind 10 签名、反之亦然，都必须失败。
-	wrongKindDomain, err := SellerClaimSigningCBOR(storedRequest.ClaimCBOR)
+	kind8Signed, err := bitfs.SignMessage(evidence.keys[0], storedRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kind8Signed, err := bitfs.SignMessage(evidence.keys[0], wrongKindDomain)
+	crossKindDoc, err := EncodeContentRetrievalRequestDocument(claimID, testRetrievalNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	crossKind := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: kind8Signed}
+	crossKind := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossKindDoc, BuyerContentRetrievalRequestSignature: kind8Signed}
 	if _, err := workflow.VerifyContentRetrievalRequest(crossKind, storedRequest, response); err == nil {
-		t.Fatal("a [4,8,...]-domain signature authorized retrieval")
+		t.Fatal("a Kind 8-domain signature authorized retrieval")
 	}
-	receiptDomain, err := ArbiterReceiptSigningCBOR(response.ReceiptCBOR)
+	kind9Signed, err := bitfs.SignMessage(evidence.keys[0], response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kind9Signed, err := bitfs.SignMessage(evidence.keys[0], receiptDomain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	crossKind2 := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: kind9Signed}
+	crossKind2 := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossKindDoc, BuyerContentRetrievalRequestSignature: kind9Signed}
 	if _, err := workflow.VerifyContentRetrievalRequest(crossKind2, storedRequest, response); err == nil {
-		t.Fatal("a [4,9,...]-domain signature authorized retrieval")
+		t.Fatal("a Kind 9-domain signature authorized retrieval")
 	}
 
 	// 正向基线：精确 (ClaimID, nonce) 组合通过。
-	validRequest := &ContentRetrievalRequest{Version: MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: append([]byte(nil), testRetrievalNonce...), BuyerSignature: append([]byte(nil), buyerSig...)}
+	validRequest := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: requestDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), buyerSignature...)}
 	if _, err := workflow.VerifyContentRetrievalRequest(validRequest, storedRequest, response); err != nil {
 		t.Fatalf("exact replay-key request was rejected: %v", err)
 	}
@@ -734,11 +743,11 @@ func TestStoredCustodyPairCrossSplicingIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	splicedA := &ArbitrationResponse{Version: MajorVersion, ReceiptCBOR: responseSecond.ReceiptCBOR, ArbiterReceiptSignature: responseSecond.ArbiterReceiptSignature}
+	splicedA := &ArbitrationResponse{ArbitrationReceiptCBOR: responseSecond.ArbitrationReceiptCBOR, ArbiterArbitrationReceiptSignature: responseSecond.ArbiterArbitrationReceiptSignature}
 	if _, err := VerifyCustodiedContent(first.request, splicedA); err == nil {
 		t.Fatal("record A accepted record B's receipt response")
 	}
-	splicedB := &ArbitrationResponse{Version: MajorVersion, ReceiptCBOR: responseFirst.ReceiptCBOR, ArbiterReceiptSignature: responseFirst.ArbiterReceiptSignature}
+	splicedB := &ArbitrationResponse{ArbitrationReceiptCBOR: responseFirst.ArbitrationReceiptCBOR, ArbiterArbitrationReceiptSignature: responseFirst.ArbiterArbitrationReceiptSignature}
 	if _, err := VerifyCustodiedContent(second.request, splicedB); err == nil {
 		t.Fatal("record B accepted record A's receipt response")
 	}
@@ -748,30 +757,30 @@ func TestStoredCustodyPairCrossSplicingIsRejected(t *testing.T) {
 // property that makes Claim-ID routing work offline: from only the
 // OpeningProof plus the exact signed 003 — no Seller Claim signature, no
 // payload bundle, no Kind 9 — the shared builder produces byte-identical
-// ClaimCBOR and therefore the identical ArbitrationClaimID.
+// ArbitrationClaimCBOR and therefore the identical ArbitrationClaimID.
 func TestBuyerDerivesSameClaimIDWithoutSellerEvidence(t *testing.T) {
 	evidence := makeArbitrationEvidence(t)
-	sellerClaimID, err := ArbitrationClaimID(evidence.request.ClaimCBOR)
+	sellerClaimID, err := ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := UnmarshalClaim(evidence.request.ClaimCBOR)
+	claim, err := UnmarshalClaim(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization := &bitfs.SignedContentRequest{TermsCBOR: append([]byte(nil), claim.TermsCBOR...), BuyerSignature: append([]byte(nil), claim.BuyerSignature...)}
+	authorization := &bitfs.SignedContentRequest{PaymentAuthorizationCBOR: append([]byte(nil), claim.PaymentAuthorizationCBOR...), BuyerPaymentAuthorizationSignature: append([]byte(nil), claim.BuyerPaymentAuthorizationSignature...)}
 	built, err := BuildClaimFromAuthorization(evidence.proof, authorization)
 	if err != nil {
 		t.Fatalf("buyer-side shared builder failed without seller evidence: %v", err)
 	}
-	if !bytes.Equal(built.ClaimCBOR, evidence.request.ClaimCBOR) {
-		t.Fatal("shared builder produced different ClaimCBOR than the seller path")
+	if !bytes.Equal(built.ArbitrationClaimCBOR, evidence.request.ArbitrationClaimCBOR) {
+		t.Fatal("shared builder produced different ArbitrationClaimCBOR than the seller path")
 	}
-	if !bytes.Equal(built.ClaimID, sellerClaimID) {
+	if built.ArbitrationClaimID != sellerClaimID {
 		t.Fatal("buyer-derived Claim ID differs from the seller/arbiter Claim ID")
 	}
 	// 输入克隆证明：调用方缓冲区被篡改后再次构建仍得到原始结果。
-	authorization.TermsCBOR[len(authorization.TermsCBOR)-1] ^= 1
+	authorization.PaymentAuthorizationCBOR[len(authorization.PaymentAuthorizationCBOR)-1] ^= 1
 	if _, err := BuildClaimFromAuthorization(evidence.proof, authorization); err == nil {
 		t.Fatal("tampered authorization was accepted by the shared builder")
 	}

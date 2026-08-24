@@ -6,12 +6,12 @@ import './home.css';
 
 export default function Home() {
   return (
-    <Layout title="go-bitfs" description={translate({id: 'home.description', message: 'Source-driven BitFS v4 SDK documentation'})}>
+    <Layout title="go-bitfs" description={translate({id: 'home.description', message: 'Source-driven BitFS v1 SDK documentation'})}>
       <main>
         <section className="hero hero--protocol">
           <div className="hero__grain" aria-hidden="true" />
           <div className="container hero__inner">
-            <p className="eyebrow"><Translate id="home.eyebrow">BITFS V3 · GO SDK</Translate></p>
+            <p className="eyebrow"><Translate id="home.eyebrow">BITFS V1 · GO SDK</Translate></p>
             <h1><Translate id="home.heroTitleTop">Protocol truth,</Translate><br /><span><Translate id="home.heroTitleBottom">kept executable.</Translate></span></h1>
             <p className="hero__lede"><Translate id="home.heroLede">Build interoperable file exchange and 2-of-3 settlement workflows from deterministic CBOR, signed credentials, and source-generated APIs.</Translate></p>
             <div className="hero__actions">

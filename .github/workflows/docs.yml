@@ -44,6 +44,41 @@ jobs:
           fi
           go test ./...
 
+      - name: Run offline protocol demos (03–08)
+        run: |
+          set -euo pipefail
+          cp demo/.env.example demo/.env
+          # Process env wins over the .env file (demoenv is first-value-wins),
+          # so exported keys override the empty placeholders in .env.example.
+          # Fixed throwaway keys; never real funds.
+          export SELLER_PRIVATE_KEY_HEX="1111111111111111111111111111111111111111111111111111111111111111"
+          export BUYER_PRIVATE_KEY_HEX="2222222222222222222222222222222222222222222222222222222222222222"
+          export ARBITER_PRIVATE_KEY_HEX="3333333333333333333333333333333333333333333333333333333333333333"
+          # demo/file.bin is a tracked fixture; never overwrite it in CI. Point
+          # FILE_PATH at a generated file under $RUNNER_TEMP instead.
+          export FILE_PATH="$RUNNER_TEMP/bitfs-demo-file.bin"
+          head -c $((10*1024*1024)) /dev/urandom > "$FILE_PATH"
+          for step in 03_content_request 04_content_delivery 05_cumulative_payment 06_pool_close 07_arbitration 08_arbitration_content_retrieval; do
+            echo "::group::go run ./demo/${step}/..."
+            go run ./demo/${step}/...
+            echo "::endgroup::"
+          done
+
+      - name: Reject retired protocol wording in current documents
+        run: |
+          set -euo pipefail
+          hits=$(grep -RInE 'spec/v4|\[4,|BitFS v4' \
+            --include='*.md' --include='*.mdx' --include='*.js' --include='*.json' \
+            --exclude-dir=legacy --exclude-dir=build --exclude-dir=node_modules \
+            --exclude-dir=vendor --exclude-dir=.git --exclude-dir=.docusaurus \
+            --exclude='package-lock.json' \
+            . | grep -v '/施工单/' || true)
+          if [ -n "$hits" ]; then
+            echo "Retired protocol wording found in current documents:"
+            echo "$hits"
+            exit 1
+          fi
+
       - name: Build source-driven documentation
         run: npm run build
         working-directory: website

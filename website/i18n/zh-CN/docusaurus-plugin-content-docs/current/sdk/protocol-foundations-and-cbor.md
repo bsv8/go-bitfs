@@ -83,10 +83,12 @@ CBOR 的打包与解包属于 SDK，不属于 HTTP、WebSocket、队列或应用
 // package wire
 // Kind 是传输层已知的报文类别，用于统一分派；它绝不标识费用池实例。Kind 与签名
 // 本体中的报文类型编号是两个概念：001–006 的 CBOR 本体不含 kind 元素，而 Kind 8/9
-// 的本体在数组第二项显式携带自己的报文类型并进入签名域——Seller 签署的正是
-// [4, 8, arbitration_claim_cbor]，Arbiter 签署的正是 [4, 9, arbitration_receipt_cbor]，
-// 买方取件请求签署的正是 deterministic-CBOR([4, 10, claim_id, nonce])，
-// 而 Kind 11 不新增外层签名、只原样内嵌 exact Kind 8/9 子文档。
+// 统一签名域把外层版本、Kind 与 exact 认证文档一起纳入——Seller 通过
+// SignWireDocument(1, 8, ...) 签署 arbitration_claim_cbor，Arbiter 通过
+// SignWireDocument(1, 9, ...) 签署 arbitration_receipt_cbor，买方取件请求
+// 通过 SignWireDocument(1, 10, ...) 签署 content_retrieval_request_cbor =
+// [arbitration_claim_id, retrieval_nonce]；Kind 11 由 Arbiter 统一签名，
+// available 分支经 content_payloads_id 绑定 payload，不内嵌 Kind 8/9。
 // 定义 RefundTemplateTxID 的报文会在 CBOR 文档中携带它；0201 预签请求从 RefundTx
 // 推导该值，不包含单独的 hash 字段。
 type Kind uint16
@@ -104,9 +106,9 @@ const (
     // Direction: 卖方 -> 买方。
     PoolRefundPresignResponse Kind = 3
 
-    // PoolFundingTxDelivery 携带已签名的资金交易。
+    // FundingTransactionDelivery 携带已签名的资金交易。
     // Direction: 买方 -> 卖方。
-    PoolFundingTxDelivery Kind = 4
+    FundingTransactionDelivery Kind = 4
 
     // ContentRequest 携带签名内容请求和付款授权。
     // Direction: 买方 -> 卖方。
@@ -149,12 +151,12 @@ func Unmarshal(kind Kind, rawCBOR []byte) (any, error)
 // Typed helpers 是多数应用应使用的 API；它们避免 any 和类型断言。
 func MarshalQuote(message *bitfs.SignedFileQuote) ([]byte, error)
 func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error)
-func MarshalPoolRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error)
-func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error)
-func MarshalPoolRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error)
-func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error)
-func MarshalPoolFundingTxDelivery(message *pool.FundingTxDelivery) ([]byte, error)
-func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, error)
+func MarshalRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error)
+func UnmarshalRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error)
+func MarshalRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error)
+func UnmarshalRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error)
+func MarshalFundingTransactionDelivery(message *pool.FundingTransactionDelivery) ([]byte, error)
+func UnmarshalFundingTransactionDelivery(rawCBOR []byte) (*pool.FundingTransactionDelivery, error)
 func MarshalContentRequest(message *bitfs.SignedContentRequest) ([]byte, error)
 func UnmarshalContentRequest(rawCBOR []byte) (*bitfs.SignedContentRequest, error)
 func MarshalContentDelivery(message *bitfs.SignedContentDelivery) ([]byte, error)
@@ -178,11 +180,11 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 
 这些函数没有存储或网络副作用，适合钱包、服务端、CLI 和测试直接使用。签名直接使用调用方解析的官方 BSV 私钥（`github.com/bsv-blockchain/go-sdk/primitives/ec` 的 `ec.PrivateKey`）。不存在 signer 或 verifier 回调。
 
-所有凭证的签名路径固定且一致：被签字节（规范条款 CBOR，或 004 的裸 32 字节授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定内部验证器对照该角色派生公钥复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，调用方不得在签名前再做一次哈希；`bitfs.SignMessage` 等消息辅助函数内部恰好完成这一次哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+每条普通消息签名都走唯一的统一路径：`protocol.SignWireDocument(key, protocol.WireVersion, kind, documentCBOR)` 构造类型化签名输入 `["bitfs/wire-signature", version, kind, exact_document_cbor]`，做一次 SHA-256，对该摘要签名，强制 low-S DER，并在返回前由固定内部验证器对照该角色派生公钥复验。调用方绝不手工哈希、包装或验签；例如 Kind 6 签署的正是 `content_delivery_cbor = [payment_authorization_id]`，绝不是裸哈希。交易签名使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 ```go
 // package bitfs
-// NewSignedFileQuote 验证报价条款，编码规范 TermsCBOR，通过固定的一次
+// NewSignedFileQuote 验证报价条款，编码规范 file_quote_terms_cbor，通过固定的一次
 // SHA-256 消息签名路径用卖方官方 BSV 私钥为这些精确字节签名，并在返回
 // 001 凭证前用派生公钥固定复验签名。
 func NewSignedFileQuote(
@@ -198,7 +200,7 @@ func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error)
 
 // NewSignedContentRequest 确定性编码 003 条款，并通过同一条固定的一次
 // SHA-256 消息签名路径用买方官方 BSV 私钥为这些精确字节签名。
-func NewSignedContentRequest(terms *ContentRequestTerms, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
+func NewSignedContentRequest(authorization *PaymentAuthorization, buyerKey *ec.PrivateKey) (*SignedContentRequest, error)
 
 // VerifySignedContentRequest 在入口处读取一次系统 UTC 并使用 SDK 固定验证器，
 // 验证报价绑定、资金池参与方、买方对精确条款字节的签名、报价过期和交付期限。
@@ -210,13 +212,13 @@ func VerifySignedContentRequest(
     request *SignedContentRequest,
     quote *SignedFileQuote,
     opening PoolOpeningEvidence,
-) (*ContentRequestTerms, error)
+) (*PaymentAuthorization, error)
 
 // NewSignedContentDelivery 通过固定消息路径用卖方官方 BSV 私钥对精确 32 字节
 // 的付款授权哈希签名，并附上规范编码的有序 payload 批次。payload 通过所引用
 // 003 提交的哈希间接绑定。
 func NewSignedContentDelivery(
-    paymentAuthorizationHash []byte,
+    paymentAuthorizationID protocol.PaymentAuthorizationID,
     payloads [][]byte,
     sellerKey *ec.PrivateKey,
 ) (*SignedContentDelivery, error)

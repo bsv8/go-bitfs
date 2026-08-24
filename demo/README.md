@@ -4,7 +4,7 @@
 
 ## 责任边界：SDK 无状态
 
-go-bitfs SDK 是无状态的 BitFS v4 协议库：workflow 对象只持有官方 BSV 私钥，每个方法都是「显式输入 → 计算结果」，不加载、不保存、不发送、不广播任何状态；SDK 在每次操作入口读取一次 UTC，区块高度由调用方显式传入。数据库/文件存储、事务与锁、并发串行化、重试/幂等、节点广播与链上对账全部属于调用方应用。
+go-bitfs SDK 是无状态的 BitFS Wire Protocol v1 协议库：workflow 对象只持有官方 BSV 私钥，每个方法都是「显式输入 → 计算结果」，不加载、不保存、不发送、不广播任何状态；SDK 在每次操作入口读取一次 UTC，区块高度由调用方显式传入。数据库/文件存储、事务与锁、并发串行化、重试/幂等、节点广播与链上对账全部属于调用方应用。
 
 为了让多个独立命令能够衔接运行，demo 自己实现了一些最简持久化：002 使用 `DEMO_02_STATE_DIR` 下的 JSON checkpoint，其余步骤使用进程内的内存 fixture。这些只是示例应用行为，不是 SDK 能力，也不构成生产建议。checkpoint 是直接整文件写入的简单示例：没有原子性保证，不承诺并发、事务或崩溃安全；真实应用应使用自己的数据库与一致性策略。
 
@@ -15,8 +15,8 @@ go-bitfs SDK 是无状态的 BitFS v4 协议库：workflow 对象只持有官方
 | 001 | [`01_quote`](./01_quote/) | 生成并解析 `SignedFileQuote` 报价单 |
 | 002 | [`02_pool_opening`](./02_pool_opening/) | 买卖双方开启费用池 |
 | 003 | [`03_content_request`](./03_content_request/) | 买家构造批量内容授权（一个付款序号授权一组内容 hash） |
-| 004 | [`04_content_delivery`](./04_content_delivery/) | 卖家对裸授权哈希签名并原子交付整批 payload |
-| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款：最小凭证 = 授权哈希 + 买家交易签名，卖家按哈希取回原始 003、本地重建交易并合并（一个批次只生成一个 005） |
+| 004 | [`04_content_delivery`](./04_content_delivery/) | 卖家通过统一 `SignWireDocument(1, 6, ...)` 签署精确 content_delivery_cbor 并原子交付整批 payload |
+| 005 | [`05_cumulative_payment`](./05_cumulative_payment/) | 买家全量验收批次后完成累计付款：最小凭证 = payment_authorization_id + 买家交易签名，卖家按 ID 取回原始 003、本地重建交易并合并（一个批次只生成一个 005） |
 | 006 | [`06_pool_close`](./06_pool_close/) | 双方协商关闭费用池 |
 | 007 | [`07_arbitration`](./07_arbitration/) | 发生争议时由仲裁人签署付款 |
 | 008 | [`08_arbitration_content_retrieval`](./08_arbitration_content_retrieval/) | Seller/Buyer 无法直连时，Buyer 凭 Claim ID + 签名从 Arbiter 取回已托管内容（只读恢复，不产生 005，不关池） |
@@ -33,4 +33,4 @@ cp demo/.env.example demo/.env
 
 除 002 外，每个命令会重新创建一套内存 fixture：fixture 扮演调用方应用，显式持有报价、开池证据、最新付款状态、内容字节等全部状态，并在每次 SDK 调用时逐个显式传入，因此可以从任意一步单独运行；SDK 不保存其中任何一项。002 的细分命令则把跨进程需要的开池证据保存在各自的 JSON checkpoint 中，同样由 demo 而不是 SDK 持有。
 
-建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何用一个付款序号授权一组内容 hash，最后看 004–007 如何原子交付批次、按序号恰好推进一次的累计付款、关闭和仲裁。007 中 Seller 用本地 OpeningProof 验证并形成 Claim；Arbiter 只接收 Claim 与精确 payload bundle，独立重建交易，不接收 OpeningProof 或候选交易原文。008 演示 Seller/Buyer 无法直连时的只读取件：Buyer 凭 OpeningProof + 精确签名 003 独立重建 Claim ID 并对 `[4,10,claim_id,nonce]` 签名，Arbiter 验签并原子占用 nonce 后返回 exact Kind 8/9，Buyer 完整验收；它不是关池或退款 demo。
+建议按编号阅读并运行：先看 001 了解报价报文，再看 003 了解买家如何用一个付款序号授权一组内容 hash，最后看 004–007 如何原子交付批次、按序号恰好推进一次的累计付款、关闭和仲裁。007 中 Seller 用本地 OpeningProof 验证并形成 Claim；Arbiter 只接收 Claim 与精确 payload bundle，独立重建交易，不接收 OpeningProof 或候选交易原文。008 演示 Seller/Buyer 无法直连时的只读取件：Buyer 凭 OpeningProof + 精确签名 003 独立重建 Claim ID，并通过统一 `SignWireDocument(1, 10, ...)` 对 `content_retrieval_request_cbor = [arbitration_claim_id, retrieval_nonce]` 签名；Arbiter 验签后原子占用 nonce 并返回自己签名的 Kind 11——可交付分支经 `content_payloads_id` 绑定 exact payload bundle（不再内嵌 Kind 8/9），不可交付分支携带结构化原因；同一请求重放原样重发第一次持久化的响应，Buyer 收到 not_ready 后必须换新 nonce 重试；它不是关池或退款 demo。

@@ -1,0 +1,255 @@
+; BitFS Wire Protocol v1 — 统一报文 CDDL 真值。
+; 与 docs/protocol/wire-messages.zh.md 一一对应；任何改变 wire shape、签名
+; 对象、ID 算法或验收语义的修改都必须提升 protocol.WireVersion。
+
+wire-version = 1
+wire-kind = 1..11
+
+; ===================== 公共子结构 =====================
+
+pubkey = bstr .size 33            ; 压缩 secp256k1
+signature = bstr .size (1..256)   ; low-S DER
+sha256 = bstr .size 32
+
+; 支持的仲裁人公钥列表：可为空；调用方必须去重。
+arbiter-public-keys = [* pubkey]
+
+; 一条授权 / 一个交付批次允许携带 1..64 个内容条目；每块不超过一个
+; MasterSeed 块长（262144 字节）。整批约 16 MiB 是所有块的总上限，
+; 不是单块上限。
+content-hashes = [1*64 sha256]
+content-payloads = [1*64 payload]
+payload = bstr .size (1..262144)
+
+; 统一普通消息签名域：
+; SignWireDocument(key, v, k, doc) =
+;   SignMessage(key, deterministic-CBOR(["bitfs/wire-signature", v, k, doc]))
+wire-signature-domain = "bitfs/wire-signature"
+
+; ===================== Kind 1 · FileQuote（Seller → Buyer）=====================
+
+file-quote-terms = [
+  seed-hash: sha256,
+  buyer-public-key: pubkey,
+  seed-price-satoshis: uint,
+  full-block-price-satoshis: uint,
+  file-size-bytes: uint,
+  quote-expires-at-unix-seconds: int,
+  supported-arbiter-public-keys-cbor: bstr,
+  recommended-filename: tstr,      ; 必须先过 sanitize 规则再编码与签名
+]
+
+kind-1-file-quote = [
+  wire-version,
+  1,
+  file-quote-terms-cbor: bstr .cbor file-quote-terms,
+  seller-public-key: pubkey,
+  seller-file-quote-terms-signature: signature,
+]
+
+file-quote-terms-id = sha256      ; SHA-256(exact terms cbor)
+
+; ============ Kind 2 · RefundPresignRequest（Buyer → Seller）============
+
+kind-2-refund-presign-request = [
+  wire-version,
+  2,
+  refund-template-raw: bstr,       ; 未嵌入角色签名的规范退款模板交易原文
+  buyer-public-key: pubkey,
+  seller-public-key: pubkey,
+  arbiter-public-key: pubkey,
+  miner-fee-rate-satoshis-per-kilobyte: uint,
+  buyer-refund-transaction-signature: signature,  ; 退款交易 sighash 签名
+]
+
+refund-template-txid = sha256     ; 固定交易 TxID 算法派生，非普通 SHA-256 文档 ID
+
+; ============ Kind 3 · RefundPresignResponse（Seller → Buyer）============
+
+kind-3-refund-presign-response = [
+  wire-version,
+  3,
+  refund-template-txid,
+  seller-refund-transaction-signature: signature, ; 退款交易 sighash 签名
+]
+
+; ============ Kind 4 · FundingTransactionDelivery（Buyer → Seller）============
+
+kind-4-funding-transaction-delivery = [
+  wire-version,
+  4,
+  refund-template-txid,
+  funding-transaction-raw: bstr,   ; 含资金交易自身所需交易签名
+]
+
+; ============ Kind 5 · ContentRequest / PaymentAuthorization（Buyer → Seller）====
+
+payment-authorization = [
+  file-quote-terms-id,
+  refund-template-txid,
+  payment-sequence: uint .le 4294967294,
+  seller-amount-after-satoshis: uint,
+  content-hashes-cbor: bstr .cbor content-hashes,
+  delivery-deadline-unix-seconds: int,
+]
+
+payment-authorization-id = sha256 ; SHA-256(exact payment authorization cbor)
+
+kind-5-content-request = [
+  wire-version,
+  5,
+  payment-authorization-cbor: bstr .cbor payment-authorization,
+  buyer-payment-authorization-signature: signature, ; SignWireDocument(1, 5, ...)
+]
+
+; ============ Kind 6 · ContentDelivery（Seller → Buyer）============
+
+content-delivery = [
+  payment-authorization-id,
+]
+
+kind-6-content-delivery = [
+  wire-version,
+  6,
+  content-delivery-cbor: bstr .cbor content-delivery,
+  seller-content-delivery-signature: signature,    ; SignWireDocument(1, 6, ...)
+  content-payloads-cbor: bstr .cbor content-payloads, ; attachment，不入签
+]
+
+; ============ Kind 7 · PaymentUpdate（Buyer → Seller）============
+
+kind-7-payment-update = [
+  wire-version,
+  7,
+  payment-authorization-id,        ; 内容寻址查找键
+  buyer-payment-transaction-signature: signature, ; 本地重建状态交易 sighash
+]
+
+; ============ Kind 8 · ArbitrationRequest（Seller → Arbiter）============
+
+arbitration-claim = [
+  pool-output-satoshis: uint,
+  pool-output-locking-script: bstr .size 105,
+  refund-template-raw: bstr,
+  payment-authorization-cbor: bstr .cbor payment-authorization,
+  buyer-payment-authorization-signature: signature,
+]
+
+arbitration-claim-id = sha256     ; SHA-256(exact claim cbor)
+
+kind-8-arbitration-request = [
+  wire-version,
+  8,
+  arbitration-claim-cbor: bstr .cbor arbitration-claim,
+  seller-arbitration-claim-signature: signature,   ; SignWireDocument(1, 8, ...)
+  content-payloads-cbor: bstr .cbor content-payloads,
+]
+
+; ============ Kind 9 · ArbitrationResponse（Arbiter → Seller）============
+
+arbitration-receipt = [
+  arbitration-claim-id,
+  arbiter-amount-satoshis: uint .gt 0,
+  arbiter-payment-transaction-signature: signature, ; ForkID|All sighash 签名
+]
+
+kind-9-arbitration-response = [
+  wire-version,
+  9,
+  arbitration-receipt-cbor: bstr .cbor arbitration-receipt,
+  arbiter-arbitration-receipt-signature: signature, ; SignWireDocument(1, 9, ...)
+]
+
+; ============ Kind 10 · ContentRetrievalRequest（Buyer → Arbiter）============
+
+nonce = bstr .size 32
+; nonce 禁止全零（哨兵不得上线）；该约束无法用 CDDL 值语法精确表达，
+; 由严格 decoder 强制。
+
+content-retrieval-request-doc = [
+  arbitration-claim-id,
+  retrieval-nonce: nonce,
+]
+
+content-retrieval-request-id = sha256
+
+kind-10-content-retrieval-request = [
+  wire-version,
+  10,
+  content-retrieval-request-cbor: bstr .cbor content-retrieval-request-doc,
+  buyer-content-retrieval-request-signature: signature, ; SignWireDocument(1, 10, ...)
+]
+
+; ============ Kind 11 · ContentRetrievalResponse（Arbiter → Buyer）============
+; 显式判别的两分支 union：decoder 先读 result 再按该分支固定长度解码，
+; 不允许按字段 presence 或数组长度猜测。
+
+content-retrieval-result = 0 .. 1  ; 0 unavailable / 1 available
+
+seller-arbitration-not-received = 0
+seller-arbitration-not-ready = 1
+custody-gone = 2
+
+content-retrieval-unavailable-reason =
+    seller-arbitration-not-received
+  / seller-arbitration-not-ready
+  / custody-gone
+
+result-unavailable = [
+  content-retrieval-request-id,
+  0,
+  reason: content-retrieval-unavailable-reason,
+]
+
+result-available = [
+  content-retrieval-request-id,
+  1,
+  content-payloads-id: sha256,     ; SHA-256(exact content_payloads_cbor)
+]
+
+content-payloads-id = sha256
+
+kind-11-content-retrieval-response = kind-11-unavailable / kind-11-available
+
+kind-11-unavailable = [           ; 恰好四元，禁止携带 attachment
+  wire-version,
+  11,
+  content-retrieval-result-cbor: bstr .cbor result-unavailable,
+  arbiter-content-retrieval-result-signature: signature, ; SignWireDocument(1, 11, ...)
+]
+
+kind-11-available = [             ; 恰好五元，attachment 必须存在且逐字节绑定
+  wire-version,
+  11,
+  content-retrieval-result-cbor: bstr .cbor result-available,
+  arbiter-content-retrieval-result-signature: signature,
+  content-payloads-cbor: bstr .cbor content-payloads,
+]
+
+; ===================== 顶层 union =====================
+; 完整 wire 报文的唯一入口规则：decoder 先严格读外层 version/kind 对，再按
+; 该 Kind 的唯一分支形状解码；任何未知 Kind 或错误版本都必须拒绝。
+
+bitfs-wire-message =
+    kind-1-file-quote
+  / kind-2-refund-presign-request
+  / kind-3-refund-presign-response
+  / kind-4-funding-transaction-delivery
+  / kind-5-content-request
+  / kind-6-content-delivery
+  / kind-7-payment-update
+  / kind-8-arbitration-request
+  / kind-9-arbitration-response
+  / kind-10-content-retrieval-request
+  / kind-11-content-retrieval-response
+
+; ===================== 编码纪律 =====================
+;
+; 1. RFC 8949 core deterministic CBOR；只允许 definite-length array/bstr；
+; 2. 禁止 tag、float、map、未声明 simple value 与 trailing bytes；
+; 3. 非 union 数组长度固定；Kind 11 必须先读判别值再选唯一分支；
+; 4. 解码后按唯一 encoder 重编码必须逐字节相等；
+; 5. 先检查 wire 最大尺寸，再分配或深度解析；
+; 6. exact byte slice 在 API 边界深拷贝；
+; 7. hash/ID 使用不同的 Go named type，禁止把任意 [32]byte 静默互换；
+; 8. 新版本必须使用新 WireVersion；同一版本内禁止兼容 decoder 或 presence guessing。

@@ -56,9 +56,9 @@ func run(input io.Reader) error {
 		return fmt.Errorf("[decode CBOR] invalid SignedFileQuote: %w", err)
 	}
 	debugf("[decode] canonical quote  : yes")
-	debugf("[decode] terms CBOR bytes  : %d", len(quote.TermsCBOR))
-	debugf("[decode] seller public key : %s", hex.EncodeToString(quote.SellerPubkey))
-	debugf("[decode] signature bytes   : %d", len(quote.TermsSignature))
+	debugf("[decode] terms CBOR bytes  : %d", len(quote.FileQuoteTermsCBOR))
+	debugf("[decode] seller public key : %s", hex.EncodeToString(quote.SellerPublicKey))
+	debugf("[decode] signature bytes   : %d", len(quote.SellerFileQuoteTermsSignature))
 	terms, err := bitfs.VerifySignedFileQuote(quote)
 	if err != nil {
 		return fmt.Errorf("[verify seller signature/expiry] rejected: %w", err)
@@ -70,26 +70,26 @@ func run(input io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("derive expected buyer public key from BUYER_PRIVATE_KEY_HEX: %w", err)
 	}
-	if !bytes.Equal(privateKey.PubKey().Compressed(), terms.BuyerPubkey) {
+	if !bytes.Equal(privateKey.PubKey().Compressed(), terms.BuyerPublicKey) {
 		return errors.New("[verify buyer binding] quote is addressed to a different buyer")
 	}
 	debugf("[verify] buyer binding    : valid")
 
-	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
+	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 	if err != nil {
-		return fmt.Errorf("calculate quote terms hash: %w", err)
+		return fmt.Errorf("calculate FileQuoteTermsID: %w", err)
 	}
-	debugf("[hash] QuoteTermsHash    : %s", hex.EncodeToString(quoteHash[:]))
-	supportedArbiters, err := bitfs.DecodeSupportedArbiterPubkeys(terms.SupportedArbiterPubkeysCBOR)
+	debugf("[id] FileQuoteTermsID       : %s", hex.EncodeToString(quoteID[:]))
+	supportedArbiters, err := bitfs.DecodeSupportedArbiterPublicKeys(terms.SupportedArbiterPublicKeysCBOR)
 	if err != nil {
 		return fmt.Errorf("decode supported arbiters: %w", err)
 	}
 	debugf("[terms] SeedHash         : %s", hex.EncodeToString(terms.SeedHash))
-	debugf("[terms] buyer public key  : %s", hex.EncodeToString(terms.BuyerPubkey))
-	debugf("[terms] seed price        : %d satoshis", terms.SeedPriceSat)
-	debugf("[terms] full block price : %d satoshis", terms.FullBlockPriceSat)
-	debugf("[terms] file size         : %d bytes", terms.FileSize)
-	debugf("[terms] expires at UTC    : %s", time.Unix(terms.QuoteExpiresAtUnix, 0).UTC().Format(time.RFC3339))
+	debugf("[terms] buyer public key  : %s", hex.EncodeToString(terms.BuyerPublicKey))
+	debugf("[terms] seed price        : %d satoshis", terms.SeedPriceSatoshis)
+	debugf("[terms] full block price : %d satoshis", terms.FullBlockPriceSatoshis)
+	debugf("[terms] file size         : %d bytes", terms.FileSizeBytes)
+	debugf("[terms] expires at UTC    : %s", time.Unix(terms.QuoteExpiresAtUnixSeconds, 0).UTC().Format(time.RFC3339))
 	debugf("[terms] supported arbiters: %d", len(supportedArbiters))
 	for index, pubkey := range supportedArbiters {
 		debugf("[terms] arbiter[%d]        : %s", index, hex.EncodeToString(pubkey))
@@ -101,17 +101,21 @@ func run(input io.Reader) error {
 	// program without depending on Go's internal structs.
 	fmt.Println("VALID=true")
 	fmt.Printf("QUOTE_CBOR_HEX=%s\n", hex.EncodeToString(rawQuote))
-	fmt.Printf("QUOTE_TERMS_HASH_HEX=%s\n", hex.EncodeToString(quoteHash[:]))
-	fmt.Printf("TERMS_CBOR_HEX=%s\n", hex.EncodeToString(quote.TermsCBOR))
-	fmt.Printf("SELLER_PUBKEY_HEX=%s\n", hex.EncodeToString(quote.SellerPubkey))
-	fmt.Printf("TERMS_SIGNATURE_HEX=%s\n", hex.EncodeToString(quote.TermsSignature))
-	fmt.Printf("RECOMMENDED_FILENAME=%s\n", quote.RecommendedFilename)
+	fmt.Printf("FILE_QUOTE_TERMS_ID_HEX=%s\n", hex.EncodeToString(quoteID[:]))
+	fmt.Printf("TERMS_CBOR_HEX=%s\n", hex.EncodeToString(quote.FileQuoteTermsCBOR))
+	fmt.Printf("SELLER_PUBKEY_HEX=%s\n", hex.EncodeToString(quote.SellerPublicKey))
+	fmt.Printf("TERMS_SIGNATURE_HEX=%s\n", hex.EncodeToString(quote.SellerFileQuoteTermsSignature))
+	decodedTerms, err := bitfs.DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
+	if err != nil {
+		return fmt.Errorf("decode quote terms: %w", err)
+	}
+	fmt.Printf("RECOMMENDED_FILENAME=%s\n", decodedTerms.RecommendedFilename)
 	fmt.Printf("SEED_HASH_HEX=%s\n", hex.EncodeToString(terms.SeedHash))
-	fmt.Printf("BUYER_PUBKEY_HEX=%s\n", hex.EncodeToString(terms.BuyerPubkey))
-	fmt.Printf("SEED_PRICE_SAT=%d\n", terms.SeedPriceSat)
-	fmt.Printf("FULL_BLOCK_PRICE_SAT=%d\n", terms.FullBlockPriceSat)
-	fmt.Printf("FILE_SIZE=%d\n", terms.FileSize)
-	fmt.Printf("QUOTE_EXPIRES_AT_UNIX=%d\n", terms.QuoteExpiresAtUnix)
+	fmt.Printf("BUYER_PUBKEY_HEX=%s\n", hex.EncodeToString(terms.BuyerPublicKey))
+	fmt.Printf("SEED_PRICE_SAT=%d\n", terms.SeedPriceSatoshis)
+	fmt.Printf("FULL_BLOCK_PRICE_SAT=%d\n", terms.FullBlockPriceSatoshis)
+	fmt.Printf("FILE_SIZE=%d\n", terms.FileSizeBytes)
+	fmt.Printf("QUOTE_EXPIRES_AT_UNIX=%d\n", terms.QuoteExpiresAtUnixSeconds)
 	fmt.Printf("SUPPORTED_ARBITER_COUNT=%d\n", len(supportedArbiters))
 	for index, pubkey := range supportedArbiters {
 		fmt.Printf("ARBITER_%d_PUBKEY_HEX=%s\n", index, hex.EncodeToString(pubkey))

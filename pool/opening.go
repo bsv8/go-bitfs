@@ -21,28 +21,28 @@ func DeriveRefundTemplateTxID(_ context.Context, proof *OpeningProof) (RefundTem
 	if err := ValidateOpeningProof(proof); err != nil {
 		return RefundTemplateTxID{}, err
 	}
-	if err := validateRefundTemplate(proof.RefundTx, proof.BuyerPubKey, proof.SellerPubKey, proof.ArbiterPubKey, proof.MinerFeeRateSatPerKB); err != nil {
+	if err := validateRefundTemplate(proof.RefundTemplateRaw, proof.BuyerPublicKey, proof.SellerPublicKey, proof.ArbiterPublicKey, proof.MinerFeeRateSatoshisPerKilobyte); err != nil {
 		return RefundTemplateTxID{}, err
 	}
 	// 模板字节不直接编码费率；当资金交易已交付时，用资金池输出的实际金额
 	// 与按该费率重建的规范池金额交叉锁定费率。
-	if len(proof.FundingTx) > 0 {
-		engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey})
+	if len(proof.FundingTransactionRaw) > 0 {
+		engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey})
 		if err != nil {
 			return RefundTemplateTxID{}, err
 		}
-		if err := engine.VerifyFundingTx(nil, proof.FundingTx, proof); err != nil {
+		if err := engine.VerifyFundingTx(nil, proof.FundingTransactionRaw, proof); err != nil {
 			return RefundTemplateTxID{}, fmt.Errorf("%w: funding transaction does not pin the template fee: %v", ErrInvalidEvidence, err)
 		}
 	}
-	return refundTemplateTxIDFromBytes(proof.RefundTx)
+	return refundTemplateTxIDFromBytes(proof.RefundTemplateRaw)
 }
 
 // DeriveRefundTemplateTxIDFromRequest derives the same pool correlation ID
 // directly from a 0201 RefundPresignRequest, before any OpeningProof exists. It
 // shares the single canonical parse and TxID calculation with
 // DeriveRefundTemplateTxID, so both entries return byte-identical values for
-// the same RefundTx.
+// the same RefundTemplateRaw.
 func DeriveRefundTemplateTxIDFromRequest(request *RefundPresignRequest) (RefundTemplateTxID, error) {
 	if request == nil {
 		return RefundTemplateTxID{}, fmt.Errorf("%w: refund presign request is required", ErrInvalidEvidence)
@@ -50,26 +50,26 @@ func DeriveRefundTemplateTxIDFromRequest(request *RefundPresignRequest) (RefundT
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return RefundTemplateTxID{}, err
 	}
-	if err := validateRefundTemplate(request.RefundTx, request.BuyerPubKey, request.SellerPubKey, request.ArbiterPubKey, request.MinerFeeRateSatPerKB); err != nil {
+	if err := validateRefundTemplate(request.RefundTemplateRaw, request.BuyerPublicKey, request.SellerPublicKey, request.ArbiterPublicKey, request.MinerFeeRateSatoshisPerKilobyte); err != nil {
 		return RefundTemplateTxID{}, err
 	}
-	return refundTemplateTxIDFromBytes(request.RefundTx)
+	return refundTemplateTxIDFromBytes(request.RefundTemplateRaw)
 }
 
-// validateRefundTemplate 是唯一的协议级退款模板验证：以 RefundTx 原文、三个
+// validateRefundTemplate 是唯一的协议级退款模板验证：以 RefundTemplateRaw 原文、三个
 // 角色压缩公钥和矿工费率为输入，按 MultisigPool v4 规则重建规范开池状态并逐
 // 字节比较。它覆盖规范编码、单输入固定花费资金池输出 0、解锁脚本为空、三输
 // 出的角色脚本与顺序、金额与费率、sequence 与 nLockTime。模板身份验证不要
 // 求 Seller 签名已存在，但不跳过任何结构与角色验证。
 func validateRefundTemplate(refundTx []byte, buyerPubKey, sellerPubKey, arbiterPubKey []byte, minerFeeRateSatPerKB uint64) error {
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyerPubKey, SellerPubKey: sellerPubKey, ArbiterPubKey: arbiterPubKey})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyerPubKey, SellerPublicKey: sellerPubKey, ArbiterPublicKey: arbiterPubKey})
 	if err != nil {
 		return err
 	}
 	request := &RefundPresignRequest{
-		Version: MajorVersion, RefundTx: refundTx,
-		BuyerPubKey: buyerPubKey, SellerPubKey: sellerPubKey, ArbiterPubKey: arbiterPubKey,
-		MinerFeeRateSatPerKB: minerFeeRateSatPerKB,
+		RefundTemplateRaw: refundTx,
+		BuyerPublicKey:    buyerPubKey, SellerPublicKey: sellerPubKey, ArbiterPublicKey: arbiterPubKey,
+		MinerFeeRateSatoshisPerKilobyte: minerFeeRateSatPerKB,
 	}
 	_, err = engine.deriveRefundPresignTerms(request)
 	return err
@@ -101,7 +101,7 @@ func DeriveOpeningDetails(proof *OpeningProof) (*OpeningDetails, error) {
 		return nil, err
 	}
 	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{
-		BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey,
+		BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey,
 	})
 	if err != nil {
 		return nil, err
@@ -113,25 +113,25 @@ func DeriveOpeningDetails(proof *OpeningProof) (*OpeningDetails, error) {
 // 时只需要角色公钥与统一关联 ID 的只读视图，bitfs 不反向依赖本包。
 // OpeningRefundTemplateTxID 在证据无效时返回 nil，由调用方按长度拒绝。
 
-func (proof *OpeningProof) OpeningBuyerPubKey() []byte {
+func (proof *OpeningProof) OpeningBuyerPublicKey() []byte {
 	if proof == nil {
 		return nil
 	}
-	return proof.BuyerPubKey
+	return proof.BuyerPublicKey
 }
 
-func (proof *OpeningProof) OpeningSellerPubKey() []byte {
+func (proof *OpeningProof) OpeningSellerPublicKey() []byte {
 	if proof == nil {
 		return nil
 	}
-	return proof.SellerPubKey
+	return proof.SellerPublicKey
 }
 
-func (proof *OpeningProof) OpeningArbiterPubKey() []byte {
+func (proof *OpeningProof) OpeningArbiterPublicKey() []byte {
 	if proof == nil {
 		return nil
 	}
-	return proof.ArbiterPubKey
+	return proof.ArbiterPublicKey
 }
 
 func (proof *OpeningProof) OpeningRefundTemplateTxID() []byte {

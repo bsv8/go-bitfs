@@ -30,9 +30,9 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("build prerequisite payment: %w", err))
 	}
-	// 005 最小凭证只携带授权哈希与买方签名；应用先按哈希取回原始签名 003
+	// 005 最小凭证只携带 payment_authorization_id 与买方签名；应用先按 ID 取回原始签名 003
 	// 再交给卖方验收。
-	authorization, err := f.LookupPaymentAuthorization(verified.Update.PaymentAuthorizationHash)
+	authorization, err := f.LookupPaymentAuthorization(verified.Update.PaymentAuthorizationID)
 	if err != nil {
 		fail(err)
 	}
@@ -45,7 +45,7 @@ func main() {
 	latest := &signedPayment.State
 	debug("[state] latest non-final payment has been merged and saved by the caller")
 	debug("[buyer] buyer.BuildImmediateClose creates final unsigned transaction and buyer signature from explicit state")
-	unsigned, buyerSignature, err := f.Buyer.BuildImmediateClose(ctx, f.Opening, latest, latest.SellerAmountSat, blockHeight)
+	unsigned, buyerSignature, err := f.Buyer.BuildImmediateClose(ctx, f.Opening, latest, latest.SellerAmountSatoshis, blockHeight)
 	if err != nil {
 		fail(fmt.Errorf("buyer.BuildImmediateClose: %w", err))
 	}

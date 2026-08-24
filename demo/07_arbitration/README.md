@@ -29,7 +29,7 @@ signed = seller.CompleteArbitratedPayment(
 ```text
 ArbitrationRequest{
     ClaimCBOR:              [pool amount, pool script, RefundTx, 003 terms, Buyer sig],
-    SellerClaimSignature:   SignMessage([4, 8, ClaimCBOR]),
+    SellerArbitrationClaimSignature: SignWireDocument(1, 8, ClaimCBOR),
     ContentPayloadsCBOR:    exact validated 004 payload bundle,
 }
 ```
@@ -37,16 +37,16 @@ ArbitrationRequest{
 007 响应是四元结构，内层回执固定为三元：
 
 ```text
-ArbitrationResponse = [4, 9, ReceiptCBOR, ArbiterReceiptSignature]
-ArbitrationReceipt  = [ClaimID, ArbiterAmountSat, ArbiterTransactionSignature]
-ClaimID             = SHA-256(deterministic-CBOR([4, 8, ClaimCBOR]))
+ArbitrationResponse = [1, 9, ReceiptCBOR, ArbiterReceiptSignature]
+ArbitrationReceipt  = [ArbitrationClaimID, ArbiterAmountSatoshis, ArbiterPaymentTransactionSignature]
+ArbitrationClaimID  = SHA-256(exact ClaimCBOR)
 ```
 
 仲裁请求不携带 OpeningProof、FundingTx、费率、previous state、candidate raw 或 Seller transaction signature；响应也不携带任何 raw transaction。仲裁人验证 Buyer 对精确 terms 的签名、严格角色脚本、RefundTx ID 绑定、payload 数量/顺序/hash 与 canonical CBOR，再从 Claim 独立构造按明确费用付费的 unsigned payment：`output[0]` 为 Buyer 余额、`output[1]` 为 Buyer 授权的 Seller 绝对金额、`output[2]` 为正的仲裁费。
 
 计费属于应用策略：demo 用 `baseFeeSat + ceil(payloadCBORBytes / 1024) * satPerKiB` 的整数阶梯公式对 exact `len(ContentPayloadsCBOR)` 计费，再把金额传给 `PreparePayment`。SDK 不读取环境变量、不访问报价服务、也不按 payload 长度自行选择费率。
 
-应用必须在 `PreparePayment` 与 `SignPreparedPayment` 之间原子持久化托管记录（收到的原始 Kind 8 字节、payload、Claim ID、冻结费用）；签名后只更新同一记录的响应字段，绝不整体覆盖——请求字节、payload、Claim ID 与费用必须保持原样，供审计、恢复与幂等重发使用。签名后还要保存 exact canonical Kind 9 bytes。重放以 exact 字节为门槛，不能只看 Claim ID：只有 Claim ID 与 exact Kind 8 字节完全相同才直接重发保存的字节，不重新计价、不重新签名；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层签名或 payload 不同时，先用已冻结费用完整验证（无效变体按证据错误拒绝，完全有效变体才是重复证据冲突）；不同 Claim ID 建立独立记录。仲裁方先签交易签名并自验，再编码回执，最后对 `[4, 9, receipt_cbor]` 做普通消息签名并自验；卖方收到响应后独立重算 Claim ID、验证回执签名与交易签名、本地重建同一笔交易并合并。
+应用必须在 `PreparePayment` 与 `SignPreparedPayment` 之间原子持久化托管记录（收到的原始 Kind 8 字节——它同时是 payload bundle 的唯一真值、Claim ID、冻结费用）；签名后只更新同一记录的响应字段，绝不整体覆盖——请求字节、Claim ID 与费用必须保持原样，供审计、恢复与幂等重发使用。签名后还要保存 exact canonical Kind 9 bytes。重放以 exact 字节为门槛，不能只看 Claim ID：只有 Claim ID 与 exact Kind 8 字节完全相同才直接重发保存的字节，不重新计价、不重新签名；同 ID 不同 exact Claim 属于 hash collision 报警；exact Claim 相同但外层签名或 payload 不同时，先用已冻结费用完整验证（无效变体按证据错误拒绝，完全有效变体才是重复证据冲突）；不同 Claim ID 建立独立记录。仲裁方先签交易签名并自验，再编码回执，最后通过 `SignWireDocument(1, 9, receipt_cbor)` 做普通消息签名并自验；卖方收到响应后独立重算 Claim ID、验证回执签名与交易签名、本地重建同一笔交易并合并。
 
 生产服务必须在计价和 `PreparePayment` 之前完成链上 UTXO 前置检查，SDK 不查节点：
 

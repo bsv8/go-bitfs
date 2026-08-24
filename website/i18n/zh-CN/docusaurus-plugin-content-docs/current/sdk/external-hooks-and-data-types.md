@@ -22,7 +22,7 @@ type WorkflowConfig struct {
 
 `buyer.WorkflowConfig`、`seller.WorkflowConfig` 和 `arbitration.WorkflowConfig` 都只有这一个字段。构造器拒绝 nil 私钥，并由私钥派生压缩 secp256k1 公钥作为 workflow 的角色绑定身份：后续每个方法都会先复核传入的开池证据属于该密钥对应角色，再进行计算。
 
-不存在需要实现的 `pool.Signer` 接口，也不需要提供钱包、HSM 或远程签名服务适配器。SDK 同样绝不接收种子、密钥导出回调或签名验证回调。所有消息签名都走一条固定路径：被签字节（001/003 的规范条款 CBOR，或 004 的精确 32 字节付款授权哈希）用 SHA-256 哈希一次，官方私钥对这份已算好的摘要签名，low-S DER 结果在返回前由固定的内部验证器复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，调用方不得在签名前再做一次哈希；`bitfs.SignMessage` 等消息辅助函数内部恰好完成这一次哈希。交易签名一律使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+不存在需要实现的 `pool.Signer` 接口，也不需要提供钱包、HSM 或远程签名服务适配器。SDK 同样绝不接收种子、密钥导出回调或签名验证回调。所有普通消息签名都走一条固定路径：`SignWireDocument(key, version, kind, exact_document_cbor)` 构造类型化签名输入 `["bitfs/wire-signature", version, kind, document]`，做一次 SHA-256，对这份已算好的摘要签名，强制 low-S DER，并在返回前由固定的内部验证器复验。Go 侧 `(*ec.PrivateKey).Sign` 接收已算好的 digest，调用方不得在签名前再做一次哈希。交易签名一律使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
 
 报价、开池证据、内容请求或付款状态中的公钥都是协议证据。调用方不能替换参与者验证逻辑，也不能重新配置买方/卖方/仲裁方角色：验签固定且不可替换。
 
@@ -43,11 +43,11 @@ SDK 没有时钟注入，也不访问节点，更不接收 `now` 参数。每个
 角色 API 接收协议形态的数据并返回计算结果：
 
 - pool.OpeningInput 包含原始资金交易字节、到期锁定时间、费率以及卖方/仲裁方公钥。
-- pool.RefundPresignRequest 与 pool.RefundPresignResponse 承载 002 开池证据；pool.FundingTxDelivery 在应用持久化退款证明之后才公开资金交易。
+- pool.RefundPresignRequest 与 pool.RefundPresignResponse 承载 002 开池证据；pool.FundingTransactionDelivery 在应用持久化退款证明之后才公开资金交易。
 - buyer.PreparePoolOpening 返回 PoolOpeningPreparation\{Request, *BuyerOpeningState\}：先保存 State 再发送 Request。AcceptRefundPresign 显式接收该保存的状态，返回 RefundPresignAcceptance\{Reference, Opening, InitialPayment\}。
 - seller.PresignPoolOpening 返回 SellerPresignResult\{Response, Opening\}：先保存 Opening 再发送 Response。AcceptPoolFunding 接收保存的 proof 与交付报文，返回 PoolFundingAcceptance\{Opening, InitialPayment, FundingTx\}；广播 FundingTx 是应用节点适配器的职责。
-- seller.BuildContentDelivery 返回 wire 交付以及 ContentDeliveryState——后续 AcceptPayment 所需的无锁协议上下文（退款关联 ID、授权哈希、目标付款序号、绝对累计卖方金额）。它不携带 owner、lease 或 expiry 语义。
-- buyer.AcceptDelivery 返回 VerifiedDelivery\{Payloads, Update\}：按 003 哈希顺序排列的已验证 payload 批次，加上整批唯一的最小 005 付款凭证（授权哈希加买方交易签名）；应用必须在发送前把精确原始签名 003 按该哈希建立索引。
+- seller.BuildContentDelivery 返回 wire 交付以及 ContentDeliveryState——后续 AcceptPayment 所需的无锁协议上下文（退款关联 ID、授权 ID、目标付款序号、绝对累计卖方金额）。它不携带 owner、lease 或 expiry 语义。
+- buyer.AcceptDelivery 返回 VerifiedDelivery\{Payloads, Update\}：按 003 哈希顺序排列的已验证 payload 批次，加上整批唯一的最小 005 付款凭证（payment_authorization_id 加买方交易签名）；应用必须在发送前把精确原始签名 003 按该 ID 建立索引。
 - pool.PaymentUpdate、pool.UnsignedPayment 与 pool.SignedPayment 区分未签名状态、分离签名和完整交易。Build/Verify/Accept 方法返回供应用广播的原始交易；SDK 内部没有任何东西会被命名为"已提交"或"已接受"。
 
 贯穿这些类型的关联字段是 `pool.RefundTemplateTxID`——一个专用 `[32]byte` 类型，承载未嵌入角色签名的规范退款模板交易的 canonical TxID（CDDL 标签 `refund-template-txid`）。它不是原始字节的 SHA-256，不是翻转字节序的哈希，也不是最终广播退款交易的链上 txid。

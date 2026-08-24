@@ -90,7 +90,7 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 	}
 	arbiterPubkeys := [][]byte{arbiterPrivateKey.PubKey().Compressed()}
 	debugf("[key] arbiter public key  : %s", hex.EncodeToString(arbiterPubkeys[0]))
-	arbiterCBOR, err := bitfs.EncodeSupportedArbiterPubkeys(arbiterPubkeys)
+	arbiterCBOR, err := bitfs.EncodeSupportedArbiterPublicKeys(arbiterPubkeys)
 	if err != nil {
 		return fmt.Errorf("encode supported arbiters: %w", err)
 	}
@@ -99,32 +99,32 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 	debugf("[quote] created at UTC    : %s", time.Now().UTC().Format(time.RFC3339))
 	debugf("[quote] expires at UTC    : %s", time.Unix(expiresAt, 0).UTC().Format(time.RFC3339))
 	terms := &bitfs.FileQuoteTerms{
-		SeedHash:                    seedHash.Bytes(),
-		BuyerPubkey:                 buyerPubkey,
-		SeedPriceSat:                seedPrice,
-		FullBlockPriceSat:           blockPrice,
-		FileSize:                    uint64(len(fileBytes)),
-		QuoteExpiresAtUnix:          expiresAt,
-		SupportedArbiterPubkeysCBOR: arbiterCBOR,
+		SeedHash:                       seedHash.Bytes(),
+		BuyerPublicKey:                 buyerPubkey,
+		SeedPriceSatoshis:              seedPrice,
+		FullBlockPriceSatoshis:         blockPrice,
+		FileSizeBytes:                  uint64(len(fileBytes)),
+		QuoteExpiresAtUnixSeconds:      expiresAt,
+		SupportedArbiterPublicKeysCBOR: arbiterCBOR,
 	}
 	// 官方 BSV 私钥直接传入 SDK：SDK 内部做一次 SHA-256 并用固定 verifier 自校验。
 	quote, err := bitfs.NewSignedFileQuote(terms, privateKey, filename)
 	if err != nil {
 		return fmt.Errorf("build signed file quote: %w", err)
 	}
-	debugf("[quote] deterministic terms CBOR (%d bytes): %s", len(quote.TermsCBOR), hex.EncodeToString(quote.TermsCBOR))
-	debugf("[quote] terms signature  : %s", hex.EncodeToString(quote.TermsSignature))
+	debugf("[quote] deterministic terms CBOR (%d bytes): %s", len(quote.FileQuoteTermsCBOR), hex.EncodeToString(quote.FileQuoteTermsCBOR))
+	debugf("[quote] terms signature  : %s", hex.EncodeToString(quote.SellerFileQuoteTermsSignature))
 
 	// This is the canonical SignedFileQuote CBOR, represented as transport-safe hex.
 	rawQuote, err := bitfs.EncodeSignedFileQuote(quote)
 	if err != nil {
 		return fmt.Errorf("encode signed file quote: %w", err)
 	}
-	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
+	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 	if err != nil {
-		return fmt.Errorf("calculate quote terms hash: %w", err)
+		return fmt.Errorf("calculate FileQuoteTermsID: %w", err)
 	}
-	debugf("[quote] terms hash       : %s", hex.EncodeToString(quoteHash[:]))
+	debugf("[quote] FileQuoteTermsID : %s", hex.EncodeToString(quoteID[:]))
 	debugf("[quote] complete CBOR size: %d bytes", len(rawQuote))
 	debugf("[output] canonical quote hex is written to stdout")
 	debugf("[output] debug information is written to stderr")

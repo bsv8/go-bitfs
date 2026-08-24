@@ -10,18 +10,18 @@ import (
 )
 
 func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
-	arbiters, err := EncodeSupportedArbiterPubkeys([][]byte{quoteTestArbiterPubkey(), quoteTestOtherArbiterPubkey()})
+	arbiters, err := EncodeSupportedArbiterPublicKeys([][]byte{quoteTestArbiterPubkey(), quoteTestOtherArbiterPubkey()})
 	if err != nil {
-		t.Fatalf("EncodeSupportedArbiterPubkeys() error = %v", err)
+		t.Fatalf("EncodeSupportedArbiterPublicKeys() error = %v", err)
 	}
 	terms := &FileQuoteTerms{
-		SeedHash:                    bytes.Repeat([]byte{0x11}, sha256.Size),
-		BuyerPubkey:                 quoteTestPubkey(),
-		SeedPriceSat:                5,
-		FullBlockPriceSat:           100,
-		FileSize:                    BlockSize + 7,
-		QuoteExpiresAtUnix:          quoteTestFutureUnix(),
-		SupportedArbiterPubkeysCBOR: arbiters,
+		SeedHash:                       bytes.Repeat([]byte{0x11}, sha256.Size),
+		BuyerPublicKey:                 quoteTestPubkey(),
+		SeedPriceSatoshis:              5,
+		FullBlockPriceSatoshis:         100,
+		FileSizeBytes:                  BlockSize + 7,
+		QuoteExpiresAtUnixSeconds:      quoteTestFutureUnix(),
+		SupportedArbiterPublicKeysCBOR: arbiters,
 	}
 	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "report.bin")
 	if err != nil {
@@ -39,27 +39,52 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifySignedFileQuote() error = %v", err)
 	}
-	if !bytes.Equal(verified.BuyerPubkey, terms.BuyerPubkey) || verified.FileSize != terms.FileSize {
+	if !bytes.Equal(verified.BuyerPublicKey, terms.BuyerPublicKey) || verified.FileSizeBytes != terms.FileSizeBytes {
 		t.Fatalf("verified terms = %#v, want %#v", verified, terms)
 	}
-	hash, err := FileQuoteTermsHash(decoded.TermsCBOR)
+	hash, err := FileQuoteTermsID(decoded.FileQuoteTermsCBOR)
 	if err != nil {
-		t.Fatalf("FileQuoteTermsHash() error = %v", err)
+		t.Fatalf("FileQuoteTermsID() error = %v", err)
 	}
-	if hash != sha256.Sum256(decoded.TermsCBOR) {
+	if hash != sha256.Sum256(decoded.FileQuoteTermsCBOR) {
 		t.Fatal("terms hash is not the canonical terms CBOR hash")
 	}
 }
 
-func TestRecommendedFilenameIsNotSigned(t *testing.T) {
+func TestRecommendedFilenameIsSignedInsideTerms(t *testing.T) {
 	terms := quoteTestTerms(t)
 	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "original.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	quote.RecommendedFilename = "renamed-by-relay.bin"
-	if _, err := VerifySignedFileQuote(quote); err != nil {
-		t.Fatalf("unsigned filename unexpectedly invalidated terms signature: %v", err)
+	decoded, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RecommendedFilename != "original.bin" {
+		t.Fatalf("signed recommended filename = %q", decoded.RecommendedFilename)
+	}
+	// 文件名不同的两份报价必须产生不同的 file_quote_terms_id。
+	otherQuote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "renamed-by-seller.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := FileQuoteTermsID(quote.FileQuoteTermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := FileQuoteTermsID(otherQuote.FileQuoteTermsCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID == secondID {
+		t.Fatal("different filenames must yield different file_quote_terms_id values")
+	}
+	// 未经过 sanitize 规则的文件名不能进入条款：Buyer 只验证不改写。
+	unsanitized := quoteTestTerms(t)
+	unsanitized.RecommendedFilename = "../../escape.bin"
+	if err := ValidateFileQuoteTerms(unsanitized); err == nil {
+		t.Fatal("unsanitized recommended filename accepted")
 	}
 }
 
@@ -80,12 +105,12 @@ func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	terms, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms.FullBlockPriceSat++
-	quote.TermsCBOR, err = EncodeFileQuoteTerms(terms)
+	terms.FullBlockPriceSatoshis++
+	quote.FileQuoteTermsCBOR, err = EncodeFileQuoteTerms(terms)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +121,7 @@ func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
 
 func TestFileQuoteTermsRejectsOversizedFile(t *testing.T) {
 	terms := quoteTestTerms(t)
-	terms.FileSize = MaxQuoteFileSize + 1
+	terms.FileSizeBytes = MaxQuoteFileSize + 1
 	if err := ValidateFileQuoteTerms(terms); err == nil {
 		t.Fatal("ValidateFileQuoteTerms() accepted a file whose seed cannot fit in one payload")
 	}
@@ -104,7 +129,7 @@ func TestFileQuoteTermsRejectsOversizedFile(t *testing.T) {
 
 func TestEmptyFileQuoteRequiresEmptySeedHash(t *testing.T) {
 	terms := quoteTestTerms(t)
-	terms.FileSize = 0
+	terms.FileSizeBytes = 0
 	if err := ValidateFileQuoteTerms(terms); err == nil {
 		t.Fatal("ValidateFileQuoteTerms() accepted a non-empty seed hash for an empty file")
 	}
@@ -117,36 +142,37 @@ func TestEmptyFileQuoteRequiresEmptySeedHash(t *testing.T) {
 
 func TestSupportedArbiterPubkeysRejectDuplicates(t *testing.T) {
 	duplicate := quoteTestArbiterPubkey()
-	if _, err := EncodeSupportedArbiterPubkeys([][]byte{duplicate, duplicate}); err == nil {
-		t.Fatal("EncodeSupportedArbiterPubkeys() accepted duplicate pubkeys")
+	if _, err := EncodeSupportedArbiterPublicKeys([][]byte{duplicate, duplicate}); err == nil {
+		t.Fatal("EncodeSupportedArbiterPublicKeys() accepted duplicate pubkeys")
 	}
 }
 
 func TestProtocolIdentityKeysRequireCompressedEncoding(t *testing.T) {
 	terms := quoteTestTerms(t)
-	terms.BuyerPubkey = quoteTestKey().PubKey().Uncompressed()
+	terms.BuyerPublicKey = quoteTestKey().PubKey().Uncompressed()
 	if _, err := EncodeFileQuoteTerms(terms); err == nil {
 		t.Fatal("uncompressed quote buyer key was accepted")
 	}
-	if _, err := EncodeSupportedArbiterPubkeys([][]byte{quoteTestKey().PubKey().Uncompressed()}); err == nil {
+	if _, err := EncodeSupportedArbiterPublicKeys([][]byte{quoteTestKey().PubKey().Uncompressed()}); err == nil {
 		t.Fatal("uncompressed supported arbiter key was accepted")
 	}
 }
 
 func quoteTestTerms(t *testing.T) *FileQuoteTerms {
 	t.Helper()
-	arbiters, err := EncodeSupportedArbiterPubkeys([][]byte{quoteTestArbiterPubkey()})
+	arbiters, err := EncodeSupportedArbiterPublicKeys([][]byte{quoteTestArbiterPubkey()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &FileQuoteTerms{
-		SeedHash:                    bytes.Repeat([]byte{0x11}, sha256.Size),
-		BuyerPubkey:                 quoteTestPubkey(),
-		SeedPriceSat:                1,
-		FullBlockPriceSat:           2,
-		FileSize:                    1,
-		QuoteExpiresAtUnix:          quoteTestFutureUnix(),
-		SupportedArbiterPubkeysCBOR: arbiters,
+		SeedHash:                       bytes.Repeat([]byte{0x11}, sha256.Size),
+		BuyerPublicKey:                 quoteTestPubkey(),
+		SeedPriceSatoshis:              1,
+		FullBlockPriceSatoshis:         2,
+		FileSizeBytes:                  1,
+		QuoteExpiresAtUnixSeconds:      quoteTestFutureUnix(),
+		SupportedArbiterPublicKeysCBOR: arbiters,
+		RecommendedFilename:            "file.bin",
 	}
 }
 

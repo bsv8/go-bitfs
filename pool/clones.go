@@ -18,9 +18,9 @@ func CloneRefundPresignResponse(response *RefundPresignResponse) *RefundPresignR
 	return cloneRefundPresignResponse(response)
 }
 
-// CloneFundingTxDelivery returns an independent copy of FundingTxDelivery, including copies of mutable byte slices.
-func CloneFundingTxDelivery(delivery *FundingTxDelivery) *FundingTxDelivery {
-	return cloneFundingTxDelivery(delivery)
+// CloneFundingTransactionDelivery returns an independent copy of FundingTransactionDelivery, including copies of mutable byte slices.
+func CloneFundingTransactionDelivery(delivery *FundingTransactionDelivery) *FundingTransactionDelivery {
+	return cloneFundingTransactionDelivery(delivery)
 }
 
 // ClonePaymentUpdate returns an independent copy of PaymentUpdate, including copies of mutable byte slices.
@@ -43,9 +43,9 @@ func CloneSignedPayment(payment *SignedPayment) *SignedPayment {
 
 // CloneOpeningInput returns an independent copy of OpeningInput, including copies of mutable byte slices.
 func CloneOpeningInput(input OpeningInput) OpeningInput {
-	input.FundingTx = append([]byte(nil), input.FundingTx...)
-	input.SellerPubKey = append([]byte(nil), input.SellerPubKey...)
-	input.ArbiterPubKey = append([]byte(nil), input.ArbiterPubKey...)
+	input.FundingTransactionRaw = append([]byte(nil), input.FundingTransactionRaw...)
+	input.SellerPublicKey = append([]byte(nil), input.SellerPublicKey...)
+	input.ArbiterPublicKey = append([]byte(nil), input.ArbiterPublicKey...)
 	return input
 }
 

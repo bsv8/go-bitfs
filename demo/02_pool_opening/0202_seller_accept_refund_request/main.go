@@ -3,7 +3,7 @@
 // 它从标准输入读取 0201 产生的 RefundPresignRequest，交给 seller
 // workflow 做结构、参与方、公钥、退款交易以及买方签名的完整校验；校验
 // 成功后，卖方从收到的 request 重新派生 RefundTemplateTxID 并签署同一笔退款交易，
-// 返回携带该关联 ID 的 RefundPresignResponse。响应不携带 FundingTx 原文。
+// 返回携带该关联 ID 的 RefundPresignResponse。响应不携带 FundingTransactionRaw 原文。
 // 卖方的预签证据由本 demo 的 checkpoint 显式保存——SDK 不做任何持久化。
 package main
 
@@ -37,7 +37,7 @@ func main() {
 	}
 	// wire 解码使用固定的 PoolRefundPresignRequest 类型，并检查编码是否
 	// 符合协议约束；未能严格解码的数据不能进入业务校验层。
-	request, err := wire.UnmarshalPoolRefundPresignRequest(requestRaw)
+	request, err := wire.UnmarshalRefundPresignRequest(requestRaw)
 	if err != nil {
 		fail(fmt.Errorf("decode RefundPresignRequest: %w", err))
 	}
@@ -59,12 +59,12 @@ func main() {
 	debug("[seller] 预签 opening proof 已保存到应用 checkpoint %s", checkpointPath)
 	// 响应是独立的 wire 报文。其核心内容是卖方重新派生的 RefundTemplateTxID 和
 	// 退款签名；0203 只凭该 hash 关联买方自己的本地状态。
-	responseRaw, err := wire.MarshalPoolRefundPresignResponse(result.Response)
+	responseRaw, err := wire.MarshalRefundPresignResponse(result.Response)
 	if err != nil {
 		fail(fmt.Errorf("encode RefundPresignResponse: %w", err))
 	}
 	debug("[seller] refund tx hash (pool correlation ID): %s", hex.EncodeToString(result.Response.RefundTemplateTxID[:]))
-	debug("[seller] seller refund signature: %s", hex.EncodeToString(result.Response.SellerRefundSignature))
+	debug("[seller] seller refund signature: %s", hex.EncodeToString(result.Response.SellerRefundTransactionSignature))
 	debug("[transport] seller -> buyer: PoolRefundPresignResponse (%d bytes)", len(responseRaw))
 	// 与 0201 一样，stdout 保持为可继续传输的单一 hex 字段，调试日志全部
 	// 走 stderr，方便调用方用管道或 tee 连接下一步。

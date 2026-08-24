@@ -5,7 +5,9 @@
 package integration
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
 	"github.com/bsv8/go-bitfs/wire"
 )
@@ -29,20 +32,20 @@ func TestDocumentedPoolOpeningWireCodecsCompileAndRun(t *testing.T) {
 	// 0201 (README §6.1): buyer prepares the presign request; the application
 	// saves State, marshals the Request, and sends the bytes.
 	preparation, err := f.buyer.PreparePoolOpening(ctx, pool.OpeningInput{
-		FundingTx:            f.buildFunding(t, 100000),
-		ExpiryLockTime:       f.expiry,
-		MinerFeeRateSatPerKB: 1,
-		SellerPubKey:         f.sellerKey.PubKey().Compressed(),
-		ArbiterPubKey:        f.arbiterKey.PubKey().Compressed(),
+		FundingTransactionRaw:           f.buildFunding(t, 100000),
+		ExpiryLockTime:                  f.expiry,
+		MinerFeeRateSatoshisPerKilobyte: 1,
+		SellerPublicKey:                 f.sellerKey.PubKey().Compressed(),
+		ArbiterPublicKey:                f.arbiterKey.PubKey().Compressed(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawRequest, err := wire.MarshalPoolRefundPresignRequest(preparation.Request)
+	rawRequest, err := wire.MarshalRefundPresignRequest(preparation.Request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedRequest, err := wire.UnmarshalPoolRefundPresignRequest(rawRequest)
+	decodedRequest, err := wire.UnmarshalRefundPresignRequest(rawRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +56,11 @@ func TestDocumentedPoolOpeningWireCodecsCompileAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawResponse, err := wire.MarshalPoolRefundPresignResponse(presignResult.Response)
+	rawResponse, err := wire.MarshalRefundPresignResponse(presignResult.Response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedResponse, err := wire.UnmarshalPoolRefundPresignResponse(rawResponse)
+	decodedResponse, err := wire.UnmarshalRefundPresignResponse(rawResponse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,18 +73,18 @@ func TestDocumentedPoolOpeningWireCodecsCompileAndRun(t *testing.T) {
 	}
 
 	// 0204 (README §6.1): funding delivery is marshaled before sending.
-	delivery, err := f.buyer.BuildFundingTxDelivery(ctx, acceptance.Opening)
+	delivery, err := f.buyer.BuildFundingTransactionDelivery(ctx, acceptance.Opening)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawDelivery, err := wire.MarshalPoolFundingTxDelivery(delivery)
+	rawDelivery, err := wire.MarshalFundingTransactionDelivery(delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 0205 (README §6.1): seller decodes the received delivery and completes
 	// the opening against its saved presign proof.
-	decodedDelivery, err := wire.UnmarshalPoolFundingTxDelivery(rawDelivery)
+	decodedDelivery, err := wire.UnmarshalFundingTransactionDelivery(rawDelivery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +92,7 @@ func TestDocumentedPoolOpeningWireCodecsCompileAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(opened.FundingTx) == 0 || opened.Opening == nil || opened.InitialPayment == nil {
+	if len(opened.FundingTransactionRaw) == 0 || opened.Opening == nil || opened.InitialPayment == nil {
 		t.Fatal("pool opening completion returned incomplete evidence")
 	}
 }
@@ -178,11 +181,11 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	base := &signedPayment.State
 
 	// 006 (README §6.3): immediate close with base state and height.
-	unsigned, buyerSig, err := f.buyer.BuildImmediateClose(ctx, opening, base, base.SellerAmountSat, blockHeight)
+	unsigned, buyerSignature, err := f.buyer.BuildImmediateClose(ctx, opening, base, base.SellerAmountSatoshis, blockHeight)
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed, err := f.seller.SignImmediateClose(ctx, opening, unsigned, buyerSig, blockHeight)
+	closed, err := f.seller.SignImmediateClose(ctx, opening, unsigned, buyerSignature, blockHeight)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,8 +215,8 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	var arbiterWorkflow *arbitration.Workflow = f.arbiter
 	// README §6.4: the application prices the arbitration fee first, then
 	// hands the explicit amount to PreparePayment; the SDK never quotes.
-	arbiterAmountSat := uint64(500)
-	prepared, err := arbiterWorkflow.PreparePayment(ctx, decodedArbitrationRequest, blockHeight, arbiterAmountSat)
+	arbiterAmountSatoshis := uint64(500)
+	prepared, err := arbiterWorkflow.PreparePayment(ctx, decodedArbitrationRequest, blockHeight, arbiterAmountSatoshis)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,11 +228,11 @@ func TestDocumentedPurchaseAPISignaturesCompileAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.ArbiterAmountSat != arbiterAmountSat || signedArbitrated.State.ArbiterAmountSat != arbiterAmountSat {
+	if receipt.ArbiterAmountSatoshis != arbiterAmountSatoshis || signedArbitrated.State.ArbiterAmountSatoshis != arbiterAmountSatoshis {
 		t.Fatal("documented arbitration flow lost the explicit positive fee")
 	}
 }
@@ -281,15 +284,15 @@ func TestDocumentedArbitrationRetrievalAPISignaturesCompileAndRun(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedKind10, err := wire.UnmarshalArbitrationContentRequest(rawKind10)
+	decodedKind10, err := wire.UnmarshalContentRetrievalRequest(rawKind10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter)
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedKind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+	decodedKind11, err := wire.UnmarshalContentRetrievalResponse(rawKind11)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,8 +300,110 @@ func TestDocumentedArbitrationRetrievalAPISignaturesCompileAndRun(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt := verified.Receipt
-	if receipt == nil || receipt.ArbiterAmountSat == 0 || len(verified.Payloads) == 0 {
+	if len(verified.Payloads) == 0 || verified.ContentRetrievalRequestID.IsZero() {
 		t.Fatal("documented retrieval flow returned incomplete audit data")
+	}
+}
+
+// TestDocumentedQuoteAndRetrievalSemanticsCompileAndRun mirrors README §4
+// (quote creation field names and wire codec) and pins the three Kind 11
+// retry/replay semantics the guide documents: resending the same exact
+// Kind 10 is byte-stable at the request-document level, and an unknown claim
+// surfaces as a SIGNED not_received answer (arbitration.ErrContentUnavailable
+// on the buyer side), never as a transport error.
+func TestDocumentedQuoteAndRetrievalSemanticsCompileAndRun(t *testing.T) {
+	f := newProtocolFixture(t)
+	f.openMainPool(t)
+	ctx := f.ctx
+
+	// README §4: EncodeSupportedArbiterPublicKeys + FileQuoteTerms field names
+	// + three-argument CreateQuote + wire.MarshalFileQuote.
+	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{f.arbiterKey.PubKey().Compressed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, err := f.seller.CreateQuote(ctx, bitfs.FileQuoteTerms{
+		SeedHash:                       masterseed.Sum256(f.seed).Bytes(),
+		BuyerPublicKey:                 f.buyerKey.PubKey().Compressed(),
+		SeedPriceSatoshis:              100,
+		FullBlockPriceSatoshis:         1000,
+		FileSizeBytes:                  uint64(len(f.source)),
+		QuoteExpiresAtUnixSeconds:      time.Now().UTC().Add(time.Hour).Unix(),
+		SupportedArbiterPublicKeysCBOR: arbiters,
+	}, "bigfile.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawQuote, err := wire.MarshalFileQuote(quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.UnmarshalFileQuote(rawQuote); err != nil {
+		t.Fatal(err)
+	}
+
+	// README §6.5 semantics 1 & 3: building the same (Claim ID, nonce) twice
+	// produces the identical request document — resending the same exact
+	// Kind 10 keeps the same content_retrieval_request_id, so the arbiter's
+	// replay path returns the first persisted Kind 11.
+	input := buyer.ContentRequestInput{ContentHashes: [][]byte{masterseed.Sum256(f.seed).Bytes()}, DeliveryDeadline: bitfs.UnixSeconds(time.Now().UTC().Add(30 * time.Minute).Unix())}
+	request003, err := f.buyer.BuildContentRequest(ctx, f.quote, f.completed.Opening, f.completed.InitialPayment, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixedNonce := bytes.Repeat([]byte{0x66}, arbitration.RetrievalNonceBytes)
+	firstRequest, err := f.buyer.BuildArbitrationContentRequest(ctx, f.completed.Opening, request003, fixedNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRequest, err := f.buyer.BuildArbitrationContentRequest(ctx, f.completed.Opening, request003, fixedNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstRequest.ContentRetrievalRequestCBOR, secondRequest.ContentRetrievalRequestCBOR) {
+		t.Fatal("resending the same exact Kind 10 changed the signed request document")
+	}
+
+	// README §6.5 semantics 2: an unknown claim gets a SIGNED not_received
+	// Kind 11; on the buyer side it surfaces as arbitration.ErrContentUnavailable.
+	var unknownClaimID protocol.ArbitrationClaimID
+	copy(unknownClaimID[:], bytes.Repeat([]byte{0x7f}, 32))
+	nonce := bytes.Repeat([]byte{0x77}, arbitration.RetrievalNonceBytes)
+	unknownDoc, err := arbitration.EncodeContentRetrievalRequestDocument(unknownClaimID, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownSignature, err := protocol.SignWireDocument(f.buyerKey, protocol.WireVersion, 10, unknownDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownRequest := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: unknownDoc, BuyerContentRetrievalRequestSignature: unknownSignature}
+	requestID := protocol.ContentRetrievalRequestID(sha256.Sum256(unknownDoc))
+	notReceivedAnswer, err := arbitration.BuildContentRetrievalUnavailable(requestID, arbitration.RetrievalSellerArbitrationNotReceived, f.arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawNotReceived, err := arbitration.MarshalContentRetrievalResponse(notReceivedAnswer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedNotReceived, err := arbitration.UnmarshalContentRetrievalResponse(rawNotReceived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 仲裁方对未知 Claim 的应答是可验证的签名四元 not_received，不是传输错误。
+	verifiedAnswer, err := arbitration.VerifyContentRetrievalResponse(unknownRequest, f.arbiterKey.PubKey().Compressed(), parsedNotReceived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifiedAnswer.Available {
+		t.Fatal("not_received answered as available")
+	}
+	decodedReason, err := arbitration.DecodeContentRetrievalResultDocument(parsedNotReceived.ContentRetrievalResultCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedReason.UnavailableReason != arbitration.RetrievalSellerArbitrationNotReceived {
+		t.Fatalf("unknown claim reason = %d, want seller_arbitration_not_received", decodedReason.UnavailableReason)
 	}
 }

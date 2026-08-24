@@ -10,6 +10,7 @@ import (
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // contentTestOpening 是 PoolOpeningEvidence 的测试实现：模拟应用从本地保存的
@@ -18,18 +19,18 @@ type contentTestOpening struct {
 	buyer, seller, arbiter, txid []byte
 }
 
-func (o *contentTestOpening) OpeningBuyerPubKey() []byte        { return o.buyer }
-func (o *contentTestOpening) OpeningSellerPubKey() []byte       { return o.seller }
-func (o *contentTestOpening) OpeningArbiterPubKey() []byte      { return o.arbiter }
+func (o *contentTestOpening) OpeningBuyerPublicKey() []byte     { return o.buyer }
+func (o *contentTestOpening) OpeningSellerPublicKey() []byte    { return o.seller }
+func (o *contentTestOpening) OpeningArbiterPublicKey() []byte   { return o.arbiter }
 func (o *contentTestOpening) OpeningRefundTemplateTxID() []byte { return o.txid }
 
 func contentBatchOpening(quote *SignedFileQuote, refundTxID []byte) *contentTestOpening {
-	return &contentTestOpening{buyer: quoteTestPubkey(), seller: quote.SellerPubkey, arbiter: quoteTestArbiterPubkey(), txid: refundTxID}
+	return &contentTestOpening{buyer: quoteTestPubkey(), seller: quote.SellerPublicKey, arbiter: quoteTestArbiterPubkey(), txid: refundTxID}
 }
 
-func contentBatchRequestTerms(t *testing.T, quote *SignedFileQuote, hashes [][]byte, sequence uint32, amount uint64) *ContentRequestTerms {
+func contentBatchRequestTerms(t *testing.T, quote *SignedFileQuote, hashes [][]byte, sequence uint32, amount uint64) *PaymentAuthorization {
 	t.Helper()
-	quoteHash, err := FileQuoteTermsHash(quote.TermsCBOR)
+	quoteID, err := FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,13 +38,13 @@ func contentBatchRequestTerms(t *testing.T, quote *SignedFileQuote, hashes [][]b
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &ContentRequestTerms{
-		QuoteTermsHash:       quoteHash[:],
-		RefundTemplateTxID:   bytes.Repeat([]byte{0x09}, sha256.Size),
-		PaymentSequence:      sequence,
-		SellerAmountAfterSat: amount,
-		ContentHashesCBOR:    hashesCBOR,
-		DeliveryDeadlineUnix: quoteDeadline(t),
+	return &PaymentAuthorization{
+		FileQuoteTermsID:            quoteID,
+		RefundTemplateTxID:          bytes.Repeat([]byte{0x09}, sha256.Size),
+		PaymentSequence:             sequence,
+		SellerAmountAfterSatoshis:   amount,
+		ContentHashesCBOR:           hashesCBOR,
+		DeliveryDeadlineUnixSeconds: quoteDeadline(t),
 	}
 }
 
@@ -59,7 +60,7 @@ func mustSeededQuote(t *testing.T, source []byte) (*SignedFileQuote, []byte, *Fi
 	t.Helper()
 	seed := createTestSeed(t, source)
 	terms := quoteTestTerms(t)
-	terms.FileSize = uint64(len(source))
+	terms.FileSizeBytes = uint64(len(source))
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
 	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "file.bin")
 	if err != nil {
@@ -84,29 +85,29 @@ func TestContentRequestAndDeliveryBatchRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decodedRequest.TermsCBOR, request.TermsCBOR) || !bytes.Equal(decodedRequest.BuyerSignature, request.BuyerSignature) {
+	if !bytes.Equal(decodedRequest.PaymentAuthorizationCBOR, request.PaymentAuthorizationCBOR) || !bytes.Equal(decodedRequest.BuyerPaymentAuthorizationSignature, request.BuyerPaymentAuthorizationSignature) {
 		t.Fatal("request changed after round trip")
 	}
 	opening := contentBatchOpening(quote, bytes.Repeat([]byte{0x09}, sha256.Size))
 	if _, err := VerifySignedContentRequest(decodedRequest, quote, opening); err != nil {
 		t.Fatalf("VerifySignedContentRequest() error = %v", err)
 	}
-	authHash, err := PaymentAuthorizationHash(request.TermsCBOR)
+	authID, err := PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authHash != Hash32(sha256.Sum256(request.TermsCBOR)) {
+	if authID != protocol.PaymentAuthorizationID(sha256.Sum256(request.PaymentAuthorizationCBOR)) {
 		t.Fatal("authorization hash is not the SHA-256 of the exact terms CBOR")
 	}
 
-	delivery, err := NewSignedContentDelivery(authHash[:], [][]byte{createTestSeed(t, source)}, mustSellerDeliveryKey(t))
+	delivery, err := NewSignedContentDelivery(authID, [][]byte{createTestSeed(t, source)}, mustSellerDeliveryKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 卖方签名必须只覆盖精确 32 字节哈希；验证由调用方用 OpeningProof 的
-	// SellerPubKey 完成。
-	if err := VerifySignature(mustSellerDeliveryKey(t).PubKey().Compressed(), authHash[:], delivery.SellerPaymentAuthorizationHashSignature); err != nil {
-		t.Fatalf("bare-hash signature verification failed: %v", err)
+	// 卖方签名通过统一 helper 覆盖精确 content_delivery_cbor；验证由调用方用
+	// OpeningProof 的 SellerPublicKey 完成。
+	if err := protocol.VerifyWireDocument(mustSellerDeliveryKey(t).PubKey().Compressed(), protocol.WireVersion, 6, delivery.ContentDeliveryCBOR, delivery.SellerContentDeliverySignature); err != nil {
+		t.Fatalf("content delivery signature verification failed: %v", err)
 	}
 	deliveryCBOR, err := EncodeSignedContentDelivery(delivery)
 	if err != nil {
@@ -116,8 +117,12 @@ func TestContentRequestAndDeliveryBatchRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decodedDelivery.PaymentAuthorizationHash, authHash[:]) {
-		t.Fatal("delivery authorization hash changed after round trip")
+	boundID, err := DecodeContentDeliveryDocument(decodedDelivery.ContentDeliveryCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundID != authID {
+		t.Fatal("delivery authorization ID changed after round trip")
 	}
 	payloads, err := DecodeContentPayloads(decodedDelivery.ContentPayloadsCBOR)
 	if err != nil || len(payloads) != 1 {
@@ -136,61 +141,62 @@ func mustSellerDeliveryKey(t *testing.T) *ec.PrivateKey {
 
 func TestDecodeContentRequestTermsRejectsLegacyShapes(t *testing.T) {
 	valid := contentBatchRequestTerms(t, mustBatchQuote(t), [][]byte{bytes.Repeat([]byte{1}, sha256.Size)}, 3, 10)
-	canonical, err := EncodeContentRequestTerms(valid)
+	canonical, err := EncodePaymentAuthorization(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeContentRequestTerms(canonical); err != nil {
+	if _, err := DecodePaymentAuthorization(canonical); err != nil {
 		t.Fatalf("canonical six-element terms rejected: %v", err)
 	}
 	legacyThirteen := append([]any{uint64(4)},
 		bstr(bytes.Repeat([]byte{1}, sha256.Size)), bstr(bytes.Repeat([]byte{2}, sha256.Size)),
 		uint64(2), uint64(3), uint64(10), uint64(1),
 		bstr(quoteTestPubkey()), bstr(quoteTestPubkey()), bstr(quoteTestArbiterPubkey()),
-		uint64(0), bstr(bytes.Repeat([]byte{5}, sha256.Size)), int64(valid.DeliveryDeadlineUnix))
+		uint64(0), bstr(bytes.Repeat([]byte{5}, sha256.Size)), int64(valid.DeliveryDeadlineUnixSeconds))
 	legacyRaw, err := canonicalEnc.Marshal(legacyThirteen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeContentRequestTerms(legacyRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(legacyRaw); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("legacy thirteen-element terms decoded: %v", err)
 	}
 	innerVersion := append([]any{uint64(4)},
 		bstr(bytes.Repeat([]byte{1}, sha256.Size)), bstr(bytes.Repeat([]byte{2}, sha256.Size)),
-		uint64(3), uint64(10), bstr(canonical[len(canonical):len(canonical)]), int64(valid.DeliveryDeadlineUnix))
+		uint64(3), uint64(10), bstr(canonical[len(canonical):len(canonical)]), int64(valid.DeliveryDeadlineUnixSeconds))
 	innerVersion[5] = valid.ContentHashesCBOR
 	innerVersionRaw, err := canonicalEnc.Marshal(innerVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeContentRequestTerms(innerVersionRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(innerVersionRaw); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("terms with an inner version decoded: %v", err)
 	}
 	legacySingleHash, err := canonicalEnc.Marshal([]any{
-		bstr(valid.QuoteTermsHash), bstr(valid.RefundTemplateTxID), uint64(3), uint64(10),
-		bstr(bytes.Repeat([]byte{5}, sha256.Size)), int64(valid.DeliveryDeadlineUnix)})
+		bstr(valid.FileQuoteTermsID[:]), bstr(valid.RefundTemplateTxID), uint64(3), uint64(10),
+		bstr(bytes.Repeat([]byte{5}, sha256.Size)), int64(valid.DeliveryDeadlineUnixSeconds)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeContentRequestTerms(legacySingleHash); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(legacySingleHash); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("legacy single-hash terms decoded: %v", err)
 	}
 	sevenRaw, err := canonicalEnc.Marshal([]any{
-		bstr(valid.QuoteTermsHash), bstr(valid.RefundTemplateTxID), uint64(3), uint64(10),
-		bstr(valid.ContentHashesCBOR), int64(valid.DeliveryDeadlineUnix), uint64(0)})
+		bstr(valid.FileQuoteTermsID[:]), bstr(valid.RefundTemplateTxID), uint64(3), uint64(10),
+		bstr(valid.ContentHashesCBOR), int64(valid.DeliveryDeadlineUnixSeconds), uint64(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeContentRequestTerms(sevenRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(sevenRaw); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("seven-element terms decoded: %v", err)
 	}
 }
 
 func TestDecodeSignedContentDeliveryRejectsLegacyShape(t *testing.T) {
 	legacyRaw, err := canonicalEnc.Marshal([]any{
-		contentProtocolVersion,
-		bstr(contentBatchRequestTerms(t, mustBatchQuote(t), [][]byte{bytes.Repeat([]byte{1}, sha256.Size)}, 3, 10).ContentHashesCBOR),
+		uint64(4),
+		bstr(bytes.Repeat([]byte{7}, 32)),
 		bstr(bytes.Repeat([]byte{7}, 70)),
+		bstr(contentBatchRequestTerms(t, mustBatchQuote(t), [][]byte{bytes.Repeat([]byte{1}, sha256.Size)}, 3, 10).ContentHashesCBOR),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +411,7 @@ func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
 
 func batchTerms(t *testing.T, quote *SignedFileQuote) *FileQuoteTerms {
 	t.Helper()
-	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	terms, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +420,7 @@ func batchTerms(t *testing.T, quote *SignedFileQuote) *FileQuoteTerms {
 
 func quoteSeedHash(t *testing.T, quote *SignedFileQuote) []byte {
 	t.Helper()
-	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	terms, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,39 +435,39 @@ func TestContentHashesPriceSatAggregation(t *testing.T) {
 	source := append(append(append([]byte(nil), fullBlock...), secondBlock...), tailBlock...)
 	_, seed, _ := mustSeededQuote(t, source)
 	terms := quoteTestTerms(t)
-	terms.FileSize = uint64(fileSize)
+	terms.FileSizeBytes = uint64(fileSize)
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
-	terms.SeedPriceSat = 100
-	terms.FullBlockPriceSat = 1000
+	terms.SeedPriceSatoshis = 100
+	terms.FullBlockPriceSatoshis = 1000
 
 	seedOnly := [][]byte{masterseed.Sum256(seed).Bytes()}
-	price, err := ContentHashesPriceSat(terms, seedOnly, nil)
+	price, err := ContentHashesPriceSatoshis(terms, seedOnly, nil)
 	if err != nil || price != 100 {
 		t.Fatalf("seed price = %d, %v", price, err)
 	}
 	fullBatch := [][]byte{masterseed.Sum256(fullBlock).Bytes(), masterseed.Sum256(secondBlock).Bytes()}
-	price, err = ContentHashesPriceSat(terms, fullBatch, seed)
+	price, err = ContentHashesPriceSatoshis(terms, fullBatch, seed)
 	if err != nil || price != 2000 {
 		t.Fatalf("full blocks price = %d, %v", price, err)
 	}
 	mixed := append(append([][]byte(nil), seedOnly...), fullBatch...)
-	price, err = ContentHashesPriceSat(terms, mixed, seed)
+	price, err = ContentHashesPriceSatoshis(terms, mixed, seed)
 	if err != nil || price != 2100 {
 		t.Fatalf("mixed batch price = %d, %v", price, err)
 	}
 	tailBatch := [][]byte{masterseed.Sum256(tailBlock).Bytes()}
 	expectedTail := tailPriceSat(1000, 10)
-	price, err = ContentHashesPriceSat(terms, tailBatch, seed)
+	price, err = ContentHashesPriceSatoshis(terms, tailBatch, seed)
 	if err != nil || price != expectedTail {
 		t.Fatalf("tail price = %d, want %d, %v", price, expectedTail, err)
 	}
 	zeroPrice := quoteTestTerms(t)
-	zeroPrice.FullBlockPriceSat = 0
+	zeroPrice.FullBlockPriceSatoshis = 0
 	zeroSource := bytes.Repeat([]byte("x"), int(masterseed.BlockSize))
 	zeroSeed := createTestSeed(t, zeroSource)
-	zeroPrice.FileSize = masterseed.BlockSize
+	zeroPrice.FileSizeBytes = masterseed.BlockSize
 	zeroPrice.SeedHash = masterseed.Sum256(zeroSeed).Bytes()
-	price, err = ContentHashesPriceSat(zeroPrice, [][]byte{masterseed.Sum256(zeroSource).Bytes()}, zeroSeed)
+	price, err = ContentHashesPriceSatoshis(zeroPrice, [][]byte{masterseed.Sum256(zeroSource).Bytes()}, zeroSeed)
 	if err != nil || price != 0 {
 		t.Fatalf("zero-price tail = %d, %v", price, err)
 	}
@@ -472,10 +478,10 @@ func TestContentHashesPriceSatAggregation(t *testing.T) {
 	overflowSource := append(append([]byte(nil), firstOverflowBlock...), secondOverflowBlock...)
 	overflowSeed := createTestSeed(t, overflowSource)
 	overflow := quoteTestTerms(t)
-	overflow.FullBlockPriceSat = ^uint64(0)
-	overflow.FileSize = 2 * masterseed.BlockSize
+	overflow.FullBlockPriceSatoshis = ^uint64(0)
+	overflow.FileSizeBytes = 2 * masterseed.BlockSize
 	overflow.SeedHash = masterseed.Sum256(overflowSeed).Bytes()
-	_, err = ContentHashesPriceSat(overflow, [][]byte{
+	_, err = ContentHashesPriceSatoshis(overflow, [][]byte{
 		masterseed.Sum256(firstOverflowBlock).Bytes(),
 		masterseed.Sum256(secondOverflowBlock).Bytes(),
 	}, overflowSeed)
@@ -503,18 +509,18 @@ func TestExportedBatchEntriesFailClosedOnNonProtocolInput(t *testing.T) {
 	source := bytes.Repeat([]byte{7}, int(masterseed.BlockSize))
 	seed := createTestSeed(t, source)
 	terms := quoteTestTerms(t)
-	terms.FileSize = uint64(len(source))
+	terms.FileSizeBytes = uint64(len(source))
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
 
 	duplicate := masterseed.Sum256(source).Bytes()
-	if _, err := ContentHashesPriceSat(terms, [][]byte{append([]byte(nil), duplicate...), append([]byte(nil), duplicate...)}, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := ContentHashesPriceSatoshis(terms, [][]byte{append([]byte(nil), duplicate...), append([]byte(nil), duplicate...)}, seed); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("pricing accepted duplicate hashes: %v", err)
 	}
 	tooMany := make([][]byte, MaxContentBatchItems+1)
 	for index := range tooMany {
 		tooMany[index] = bytes.Repeat([]byte{byte(index + 1)}, sha256.Size)
 	}
-	if _, err := ContentHashesPriceSat(terms, tooMany, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := ContentHashesPriceSatoshis(terms, tooMany, seed); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("pricing accepted an oversized batch: %v", err)
 	}
 	payloads := [][]byte{source[:10], source[10:20]}
@@ -533,23 +539,23 @@ func TestDuplicateHashPositionsArePricedOnceAndConflictsRejected(t *testing.T) {
 	duplicate := masterseed.Sum256([]byte("duplicate")).Bytes()
 	seed := bytes.Repeat(duplicate, 3)
 	terms := quoteTestTerms(t)
-	terms.FileSize = 2*masterseed.BlockSize + 1
+	terms.FileSizeBytes = 2*masterseed.BlockSize + 1
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
 
 	ambiguous := quoteTestTerms(t)
-	ambiguous.FileSize = 2*masterseed.BlockSize + 1
+	ambiguous.FileSizeBytes = 2*masterseed.BlockSize + 1
 	ambiguousSeed := bytes.Repeat(duplicate, 3)
 	ambiguous.SeedHash = masterseed.Sum256(ambiguousSeed).Bytes()
-	ambiguous.FullBlockPriceSat = 500
-	if _, err := ContentHashesPriceSat(ambiguous, [][]byte{append([]byte(nil), duplicate...)}, ambiguousSeed); err == nil {
+	ambiguous.FullBlockPriceSatoshis = 500
+	if _, err := ContentHashesPriceSatoshis(ambiguous, [][]byte{append([]byte(nil), duplicate...)}, ambiguousSeed); err == nil {
 		t.Fatal("conflicting expected lengths accepted")
 	}
 	consistent := quoteTestTerms(t)
-	consistent.FileSize = 2 * masterseed.BlockSize
+	consistent.FileSizeBytes = 2 * masterseed.BlockSize
 	consistentSeed := bytes.Repeat(duplicate, 2)
 	consistent.SeedHash = masterseed.Sum256(consistentSeed).Bytes()
-	consistent.FullBlockPriceSat = 400
-	price, err := ContentHashesPriceSat(consistent, [][]byte{append([]byte(nil), duplicate...)}, consistentSeed)
+	consistent.FullBlockPriceSatoshis = 400
+	price, err := ContentHashesPriceSatoshis(consistent, [][]byte{append([]byte(nil), duplicate...)}, consistentSeed)
 	if err != nil || price != 400 {
 		t.Fatalf("duplicate positions priced = %d, %v; want single charge of 400", price, err)
 	}
@@ -562,7 +568,7 @@ func TestMasterSeedErrorsMapToBitFSCategories(t *testing.T) {
 	seedHash := masterseed.Sum256(seed)
 
 	hashMismatch := quoteTestTerms(t)
-	hashMismatch.FileSize = uint64(len(source))
+	hashMismatch.FileSizeBytes = uint64(len(source))
 	hashMismatch.SeedHash = bytes.Repeat([]byte{0x99}, masterseed.DigestSize)
 	_, err := findBlockMatches(context.Background(), hashMismatch, masterseed.Sum256(source).Bytes(), seed)
 	assertMasterSeedCode(t, err, masterseed.SeedHashMismatch)
@@ -571,13 +577,13 @@ func TestMasterSeedErrorsMapToBitFSCategories(t *testing.T) {
 	}
 
 	sizeMismatch := quoteTestTerms(t)
-	sizeMismatch.FileSize = masterseed.BlockSize + 1
+	sizeMismatch.FileSizeBytes = masterseed.BlockSize + 1
 	sizeMismatch.SeedHash = seedHash.Bytes()
 	_, err = findBlockMatches(context.Background(), sizeMismatch, masterseed.Sum256(source).Bytes(), seed)
 	assertMasterSeedCode(t, err, masterseed.SeedSizeMismatch)
 
 	blockTerms := quoteTestTerms(t)
-	blockTerms.FileSize = uint64(len(source))
+	blockTerms.FileSizeBytes = uint64(len(source))
 	blockTerms.SeedHash = seedHash.Bytes()
 	other := []byte("uncommitted")
 	_, err = VerifyContentPayloads(blockTerms, [][]byte{masterseed.Sum256(other).Bytes()}, [][]byte{append([]byte(nil), other...)}, seed)
@@ -592,7 +598,7 @@ func TestMasterSeedContextCancellationIsNotInvalidEvidence(t *testing.T) {
 	seed := createTestSeed(t, source)
 	seedHash := masterseed.Sum256(seed)
 	terms := quoteTestTerms(t)
-	terms.FileSize = uint64(len(source))
+	terms.FileSizeBytes = uint64(len(source))
 	terms.SeedHash = seedHash.Bytes()
 	blockHash := masterseed.Sum256(source)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -621,43 +627,43 @@ func assertMasterSeedCode(t *testing.T, err error, want masterseed.ErrorCode) {
 }
 
 func TestContentTermsRejectAllZeroRefundTemplateTxID(t *testing.T) {
-	base := ContentRequestTerms{
-		QuoteTermsHash:       bytes.Repeat([]byte{1}, sha256.Size),
-		RefundTemplateTxID:   bytes.Repeat([]byte{2}, sha256.Size),
-		PaymentSequence:      3,
-		SellerAmountAfterSat: 10,
-		ContentHashesCBOR:    mustEncodeHashesForTest(t, bytes.Repeat([]byte{4}, sha256.Size)),
-		DeliveryDeadlineUnix: 2_000_000_000,
+	base := PaymentAuthorization{
+		FileQuoteTermsID:            protocol.FileQuoteTermsID(bytes.Repeat([]byte{1}, sha256.Size)),
+		RefundTemplateTxID:          bytes.Repeat([]byte{2}, sha256.Size),
+		PaymentSequence:             3,
+		SellerAmountAfterSatoshis:   10,
+		ContentHashesCBOR:           mustEncodeHashesForTest(t, bytes.Repeat([]byte{4}, sha256.Size)),
+		DeliveryDeadlineUnixSeconds: 2_000_000_000,
 	}
-	if err := ValidateContentRequestTerms(&base); err != nil {
+	if err := ValidatePaymentAuthorization(&base); err != nil {
 		t.Fatal(err)
 	}
 	zero := base
 	zero.RefundTemplateTxID = make([]byte, sha256.Size)
-	if err := ValidateContentRequestTerms(&zero); err == nil || !strings.Contains(err.Error(), "must not be all zero") {
+	if err := ValidatePaymentAuthorization(&zero); err == nil || !strings.Contains(err.Error(), "must not be all zero") {
 		t.Fatalf("003 accepted all-zero refund_template_txid: %v", err)
 	}
-	if _, err := EncodeContentRequestTerms(&zero); err == nil {
+	if _, err := EncodePaymentAuthorization(&zero); err == nil {
 		t.Fatal("003 encoder accepted all-zero refund_template_txid")
 	}
 	short := base
 	short.RefundTemplateTxID = bytes.Repeat([]byte{2}, 31)
-	if err := ValidateContentRequestTerms(&short); err == nil {
+	if err := ValidatePaymentAuthorization(&short); err == nil {
 		t.Fatal("003 accepted 31-byte refund_template_txid")
 	}
 	sequenceZero := base
 	sequenceZero.PaymentSequence = 0
-	if err := ValidateContentRequestTerms(&sequenceZero); err == nil {
+	if err := ValidatePaymentAuthorization(&sequenceZero); err == nil {
 		t.Fatal("003 accepted payment sequence zero")
 	}
 	sequenceMax := base
 	sequenceMax.PaymentSequence = ^uint32(0) - 1
-	if err := ValidateContentRequestTerms(&sequenceMax); err != nil {
+	if err := ValidatePaymentAuthorization(&sequenceMax); err != nil {
 		t.Fatalf("003 rejected the last allowed payment sequence: %v", err)
 	}
 	sequenceExhausted := base
 	sequenceExhausted.PaymentSequence = ^uint32(0)
-	if err := ValidateContentRequestTerms(&sequenceExhausted); err == nil {
+	if err := ValidatePaymentAuthorization(&sequenceExhausted); err == nil {
 		t.Fatal("003 accepted the reserved final sequence")
 	}
 }

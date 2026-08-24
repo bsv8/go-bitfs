@@ -7,73 +7,76 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 func TestNewWirePreservesTypedCBOR(t *testing.T) {
 	terms := &bitfs.FileQuoteTerms{
-		SeedHash:                    bytes.Repeat([]byte{1}, 32),
-		BuyerPubkey:                 wireTestPubkey(),
-		SeedPriceSat:                1,
-		FullBlockPriceSat:           2,
-		FileSize:                    1,
-		QuoteExpiresAtUnix:          200,
-		SupportedArbiterPubkeysCBOR: mustArbiterCBOR(t),
+		SeedHash:                       bytes.Repeat([]byte{1}, 32),
+		BuyerPublicKey:                 wireTestPubkey(),
+		SeedPriceSatoshis:              1,
+		FullBlockPriceSatoshis:         2,
+		FileSizeBytes:                  1,
+		QuoteExpiresAtUnixSeconds:      200,
+		SupportedArbiterPublicKeysCBOR: mustArbiterCBOR(t),
 	}
 	quote, err := bitfs.NewSignedFileQuote(terms, wireTestKey(), "file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := MarshalQuote(quote)
+	raw, err := MarshalFileQuote(quote)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := UnmarshalQuote(raw)
+	if len(raw) < 3 || raw[0] != 0x85 || raw[1] != 0x01 || raw[2] != 0x01 {
+		t.Fatalf("Kind 1 must be a five-element [1,1,...] array: %x", raw)
+	}
+	decoded, err := UnmarshalFileQuote(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.TermsCBOR, quote.TermsCBOR) {
+	if !bytes.Equal(decoded.FileQuoteTermsCBOR, quote.FileQuoteTermsCBOR) {
 		t.Fatal("wire round trip changed quote terms")
 	}
-	if _, err := Unmarshal(Quote, append(raw, 0)); err == nil {
+	if _, err := Unmarshal(FileQuote, append(raw, 0)); err == nil {
 		t.Fatal("wire decoder accepted trailing bytes")
 	}
 }
 
 func TestPaymentUpdateUsesNewWireNamespace(t *testing.T) {
 	update := &pool.PaymentUpdate{
-		Version:                   pool.MajorVersion,
-		PaymentAuthorizationHash:  bytes.Repeat([]byte{1}, 32),
-		BuyerTransactionSignature: []byte{4},
+		PaymentAuthorizationID:           protocol.PaymentAuthorizationID(bytes.Repeat([]byte{1}, 32)),
+		BuyerPaymentTransactionSignature: []byte{4},
 	}
 	raw, err := MarshalPaymentUpdate(update)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) == 0 || raw[0] != 0x83 {
-		t.Fatalf("minimal 005 must be a three-element array: %x", raw)
+	if len(raw) == 0 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x07 {
+		t.Fatalf("minimal Kind 7 must be a four-element [1,7,...] array: %x", raw)
 	}
 	decoded, err := UnmarshalPaymentUpdate(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.PaymentAuthorizationHash, update.PaymentAuthorizationHash) || !bytes.Equal(decoded.BuyerTransactionSignature, update.BuyerTransactionSignature) {
+	if decoded.PaymentAuthorizationID != update.PaymentAuthorizationID || !bytes.Equal(decoded.BuyerPaymentTransactionSignature, update.BuyerPaymentTransactionSignature) {
 		t.Fatal("payment update changed during wire round trip")
 	}
 	// The transport adds no pool header or session fallback: decoding the
 	// payload under Kind isolation is already covered by wire_pool_test.
-	mutated := &pool.PaymentUpdate{Version: pool.MajorVersion, PaymentAuthorizationHash: append([]byte(nil), update.PaymentAuthorizationHash...), BuyerTransactionSignature: []byte{5}}
+	mutated := &pool.PaymentUpdate{PaymentAuthorizationID: update.PaymentAuthorizationID, BuyerPaymentTransactionSignature: []byte{5}}
 	if _, err := MarshalPaymentUpdate(mutated); err != nil {
 		t.Fatal(err)
 	}
-	update.PaymentAuthorizationHash[0] = 9
-	if decoded.PaymentAuthorizationHash[0] != 1 {
+	update.PaymentAuthorizationID[0] = 9
+	if decoded.PaymentAuthorizationID[0] != 1 {
 		t.Fatal("decoded payment update aliases input data")
 	}
 }
 
 func mustArbiterCBOR(t *testing.T) []byte {
 	t.Helper()
-	raw, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{wireTestArbiterPubkey()})
+	raw, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{wireTestArbiterPubkey()})
 	if err != nil {
 		t.Fatal(err)
 	}

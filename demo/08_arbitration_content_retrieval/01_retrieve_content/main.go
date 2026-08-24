@@ -1,55 +1,64 @@
 // 008 买方仲裁托管内容取回演示：Seller 与 Buyer 无法直连，但二者均能连接
 // Arbiter。完整顺序为 001–007（Seller 托管、Arbiter 签署 Kind 9）之后，
 // Buyer 用自己可独立计算的 Claim ID 构造 Kind 10，Arbiter 验签并原子占用
-// nonce 后返回内嵌 exact Kind 8/9 的 Kind 11，Buyer 完整验收并保存 payload。
+// nonce 后按结果返回由自己签名的 Kind 11：可交付分支绑定 exact payload，
+// 不可交付分支携带结构化原因（本 demo 存储只会遇到可交付路径）。
 //
 // 本 demo 不产生 005、不关池、不广播任何交易；Claim ID 不是下载密码，
 // nonce 不代替 TLS，Kind 11 不声称 Seller 交易已上链结算。
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/fixture"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
 const blockHeight uint32 = 900000
 
-// retrievalError 是应用层错误通道：Kind 11 只表达成功取回，其余全部走这里。
+// retrievalError 是应用层错误通道：not_received / not_ready / available 三种
+// 正常结果全部是签名的 Kind 11；并发相同请求由原子提交裁决唯一胜者，败者
+// 重放胜者已提交的字节——对 Buyer 与首次响应完全一致。其余走这里。
 var (
-	errNotFound       = fmt.Errorf("NotFound: custody record not found")
-	errNotReady       = fmt.Errorf("NotReady: Kind 9 not persisted yet")
 	errUnauthorized   = fmt.Errorf("Unauthorized")
-	errNonceReused    = fmt.Errorf("NonceReused: (claim id, nonce) already used")
 	errCustodyCorrupt = fmt.Errorf("CustodyCorrupt: stored custody bytes failed verification; isolate and alarm")
 )
 
 // custodyStore 是应用侧托管库 + nonce 占用表。真实实现应使用数据库唯一键
 // (hex(ClaimID), hex(Nonce)) 与事务保证原子性；demo 用互斥锁模拟唯一键的
 // 并发语义。先验签，再占用 nonce——验签失败的请求绝不污染 nonce 表。
+// answers 保存每个请求首次持久化的 Kind 11：同一 content_retrieval_request_id
+// 重放原样重发，状态变化后不升级；not_received 是不写任何状态的明确例外。
 type custodyStore struct {
-	mu     sync.Mutex
-	record *arbitrationCustodyRecord
-	nonces map[string]bool
+	mu      sync.Mutex
+	record  *arbitrationCustodyRecord
+	nonces  map[string]bool
+	answers map[string][]byte
 }
 
 type arbitrationCustodyRecord struct {
 	requestBytes  []byte // exact received raw Kind 8, deep-copied on save
-	responseBytes []byte // exact canonical saved Kind 9, embedded verbatim in Kind 11
+	responseBytes []byte // exact canonical saved Kind 9
+	// payload 不再单独保存第二份真值：响应一律使用
+	// VerifyCustodiedContent 返回并验证过的 PayloadsCBOR。
 }
 
-func newCustodyStore() *custodyStore { return &custodyStore{nonces: make(map[string]bool)} }
+func newCustodyStore() *custodyStore {
+	return &custodyStore{nonces: make(map[string]bool), answers: make(map[string][]byte)}
+}
 
 // handleArbitrationRequest 固定顺序：strict decode -> 派生 Claim ID ->
 // 原子持久化 exact Kind 8/Claim ID/payload/费用 -> 签署 -> 追加 exact Kind 9。
@@ -63,7 +72,8 @@ func (store *custodyStore) handleArbitrationRequest(rawKind8 []byte, arbiter *ar
 	if err != nil {
 		return err
 	}
-	claimID := hex.EncodeToString(prepared.ClaimID())
+	custodyClaimID := prepared.ArbitrationClaimID()
+	claimID := hex.EncodeToString(custodyClaimID[:])
 	store.mu.Lock()
 	if store.record != nil {
 		store.mu.Unlock()
@@ -89,56 +99,102 @@ func (store *custodyStore) handleArbitrationRequest(rawKind8 []byte, arbiter *ar
 	return nil
 }
 
-// handleContentRetrieval 固定顺序：strict decode -> lookup -> 要求 Retrievable
-// -> SDK 完整验证存储证据与 Buyer 签名 -> nonce CAS -> 内嵌 exact bytes 返回。
-func (store *custodyStore) handleContentRetrieval(rawKind10 []byte, arbiter *arbitration.Workflow) ([]byte, error) {
+// handleContentRetrieval 固定顺序：strict decode -> 幂等重放检查 -> lookup ->
+// 分支判定 -> Buyer 鉴权 -> nonce CAS -> 持久化首次响应 -> 返回 Arbiter
+// 签名的 Kind 11。
+//
+// nonce 一次性语义（与主规范 §14.3 一致）：
+//
+//	没有 Kind 8             -> not_received（无法鉴权 Buyer 的明确例外：不占用
+//	                           nonce、不持久化响应；生产实现必须限流）
+//	有 Kind 8、没有 Kind 9  -> not_ready（先凭已验证 Kind 8 完成 Buyer 鉴权，
+//	                           再原子占用并持久化——Buyer 必须换新 nonce 重试，
+//	                           旧 nonce 永远不会再变成下载授权）
+//	完整记录                -> available（payload 经 content_payloads_id 绑定）
+//	同一请求重放            -> 原样返回第一次持久化的 Kind 11，状态变化后
+//	                           不升级为 available
+//
+// Malformed / CustodyCorrupt / Unauthorized 仍走应用错误通道。
+func (store *custodyStore) handleContentRetrieval(rawKind10 []byte, arbiter *arbitration.Workflow, arbiterPrivateKey *ec.PrivateKey) ([]byte, error) {
 	retrievalRequest, err := arbitration.UnmarshalContentRetrievalRequest(rawKind10)
 	if err != nil {
 		return nil, err
 	}
+	requestID := protocol.ContentRetrievalRequestID(sha256.Sum256(retrievalRequest.ContentRetrievalRequestCBOR))
+	buildUnavailable := func(reason arbitration.ContentRetrievalUnavailableReason) ([]byte, error) {
+		signed, buildErr := arbitration.BuildContentRetrievalUnavailable(requestID, reason, arbiterPrivateKey)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return arbitration.MarshalContentRetrievalResponse(signed)
+	}
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	// 错误分类固定顺序：
-	//   没有 Kind 8             -> NotFound
-	//   有 Kind 8、没有 Kind 9  -> NotReady（Buyer 可稍后用新 nonce 重试）
-	//   Kind 8/9 无法解码       -> CustodyCorrupt + 隔离告警
-	//   完整证据验证失败         -> CustodyCorrupt + 隔离告警（持久化冲突/攻击）
-	//   Buyer 验签失败          -> Unauthorized（统一语义，不泄露细节）
+
+	routingClaimID0, retrievalNonce0, err := arbitration.DecodeContentRetrievalRequestDocument(retrievalRequest.ContentRetrievalRequestCBOR)
+	if err != nil {
+		return nil, err
+	}
+	answerKey := hex.EncodeToString(routingClaimID0[:]) + ":" + hex.EncodeToString(retrievalNonce0)
+	if served, ok := store.answers[answerKey]; ok {
+		debug("[arbiter] replay of a persisted request; resending the first signed answer verbatim")
+		return append([]byte(nil), served...), nil
+	}
+
 	if store.record == nil || len(store.record.requestBytes) == 0 {
-		return nil, errNotFound
+		// 不返回任何 Claim、角色公钥、payload 或记录元数据；不占用 nonce。
+		// 生产实现还应限流，防止把 Arbiter 变成签名服务。
+		debug("[arbiter] no custody record; answering signed not_received without buyer authentication")
+		return buildUnavailable(arbitration.RetrievalSellerArbitrationNotReceived)
 	}
 	storedRequest, err := arbitration.UnmarshalRequest(store.record.requestBytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: stored Kind 8 failed strict decode; isolate and alarm: %v", errCustodyCorrupt, err)
 	}
+
+	// occupyAndAnswer 在同一临界区内完成 "(Claim ID, Nonce) 唯一键占用 +
+	// exact 首次响应插入"：数据库里每个请求只有一行首次应答；并发相同请求
+	// 的后来者命中 answers 重放胜者字节——对 Buyer 与首次响应完全一致。
+	occupyAndAnswer := func(raw []byte) ([]byte, error) {
+		store.nonces[answerKey] = true
+		store.answers[answerKey] = append([]byte(nil), raw...)
+		return append([]byte(nil), raw...), nil
+	}
+
 	if len(store.record.responseBytes) == 0 {
-		return nil, errNotReady
+		if authErr := arbiter.AuthenticateContentRetrievalRequest(retrievalRequest, storedRequest); authErr != nil {
+			return nil, fmt.Errorf("%w: %v", errUnauthorized, authErr)
+		}
+		rawNotReady, buildErr := buildUnavailable(arbitration.RetrievalSellerArbitrationNotReady)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		debug("[arbiter] buyer authenticated against the stored Kind 8; nonce occupied atomically")
+		return occupyAndAnswer(rawNotReady)
 	}
 	storedResponse, err := arbitration.UnmarshalResponse(store.record.responseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: stored Kind 9 failed strict decode; isolate and alarm: %v", errCustodyCorrupt, err)
 	}
-	if _, err := arbitration.VerifyCustodiedContent(storedRequest, storedResponse); err != nil {
-		return nil, fmt.Errorf("%w: stored evidence failed verification; isolate and alarm: %v", errCustodyCorrupt, err)
+	verified, evidenceErr := arbitration.VerifyCustodiedContent(storedRequest, storedResponse)
+	if evidenceErr != nil {
+		return nil, fmt.Errorf("%w: stored evidence failed verification; isolate and alarm: %v", errCustodyCorrupt, evidenceErr)
 	}
-	// 先验签（SDK 完整验证托管证据链 + Buyer 对 [4,10,claim_id,nonce] 的签名），
-	// 后原子占用 nonce。
-	verified, verifyErr := arbiter.VerifyContentRetrievalRequest(retrievalRequest, storedRequest, storedResponse)
-	if verifyErr != nil {
-		// 统一 Unauthorized：不泄露 Claim 是否存在或哪个字段失败。
+	if _, verifyErr := arbiter.VerifyContentRetrievalRequest(retrievalRequest, storedRequest, storedResponse); verifyErr != nil {
 		return nil, fmt.Errorf("%w: %v", errUnauthorized, verifyErr)
 	}
-	nonceKey := hex.EncodeToString(retrievalRequest.ClaimID) + ":" + hex.EncodeToString(retrievalRequest.Nonce)
-	if store.nonces[nonceKey] {
-		return nil, errNonceReused
-	}
-	store.nonces[nonceKey] = true
 	debug("[arbiter] buyer signature verified over %d payloads; nonce occupied atomically", len(verified.Payloads))
-	response, err := arbitration.BuildContentRetrievalResponse(store.record.requestBytes, store.record.responseBytes)
+	// 唯一真值：payload 来自 VerifyCustodiedContent 验证过的证据字节。
+	result, err := arbitration.BuildContentRetrievalAvailableRaw(requestID, verified.PayloadsCBOR, arbiterPrivateKey)
 	if err != nil {
 		return nil, err
 	}
-	return arbitration.MarshalContentRetrievalResponse(response)
+	rawAvailable, err := arbitration.MarshalContentRetrievalResponse(result)
+	if err != nil {
+		return nil, err
+	}
+	return occupyAndAnswer(rawAvailable)
 }
 
 // demoFeePolicy 是应用层计费策略示例：按 exact ContentPayloadsCBOR 长度阶梯
@@ -179,7 +235,7 @@ func main() {
 	if err := store.handleArbitrationRequest(rawKind8, f.Arbiter); err != nil {
 		fail(fmt.Errorf("arbiter custody: %w", err))
 	}
-	claimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		fail(err)
 	}
@@ -191,10 +247,10 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	if !bytes.Equal(independentBuilt.ClaimID, claimID) {
+	if independentBuilt.ArbitrationClaimID != claimID {
 		fail(fmt.Errorf("buyer-derived Claim ID differs from the custody record"))
 	}
-	debug("[buyer] independently rebuilt Claim ID %s from opening + signed 003", hex.EncodeToString(claimID))
+	debug("[buyer] independently rebuilt Claim ID %s from opening + signed 003", hex.EncodeToString(claimID[:]))
 	// 应用用密码学安全随机源生成 32 字节 nonce，再显式传入 SDK。
 	nonce := make([]byte, arbitration.RetrievalNonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
@@ -210,7 +266,7 @@ func main() {
 	}
 	debug("[buyer] persisted exact Kind 10 before sending (%d bytes); nonce %s", len(rawKind10), hex.EncodeToString(nonce))
 
-	rawKind11, err := store.handleContentRetrieval(rawKind10, f.Arbiter)
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.Arbiter, f.ArbiterKey)
 	if err != nil {
 		fail(err)
 	}
@@ -218,16 +274,23 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	debug("[arbiter] returned exact Kind 11 (%d bytes) embedding exact Kind 8 (%d bytes) and Kind 9 (%d bytes)",
-		len(rawKind11), len(retrievalResponse.ArbitrationRequestCBOR), len(retrievalResponse.ArbitrationResponseCBOR))
+	decodedResult, err := arbitration.DecodeContentRetrievalResultDocument(retrievalResponse.ContentRetrievalResultCBOR)
+	if err != nil {
+		fail(err)
+	}
+	if decodedResult.Result != arbitration.ContentRetrievalAvailable {
+		fail(fmt.Errorf("arbiter answered unavailable reason %d for a complete custody record", decodedResult.UnavailableReason))
+	}
+	debug("[arbiter] returned signed Kind 11 (%d bytes); content_payloads_id binds the exact attachment (%d bytes)",
+		len(rawKind11), len(retrievalResponse.ContentPayloadsCBOR))
 
 	result, err := f.Buyer.AcceptArbitratedContent(ctx, f.Quote, f.Opening, f.LatestPayment, request003, retrievalRequest, retrievalResponse, buyer.ArbitratedContentInput{})
 	if err != nil {
 		fail(fmt.Errorf("buyer.AcceptArbitratedContent: %w", err))
 	}
 	// 验收只返回 deep-copy payload 与审计数据；不构造、不签名、不发送 005。
-	debug("[buyer] accepted %d payload(s); receipt fee %d satoshis", len(result.Payloads), result.Receipt.ArbiterAmountSat)
-	fmt.Printf("ARBITRATION_CLAIM_ID_HEX=%s\n", hex.EncodeToString(claimID))
+	debug("[buyer] accepted %d payload(s) bound to request ID %s", len(result.Payloads), hex.EncodeToString(result.ContentRetrievalRequestID[:])[:16])
+	fmt.Printf("ARBITRATION_CLAIM_ID_HEX=%s\n", hex.EncodeToString(claimID[:]))
 	fmt.Printf("RETRIEVAL_NONCE_HEX=%s\n", hex.EncodeToString(nonce))
 	fmt.Printf("KIND10_BYTES=%d\n", len(rawKind10))
 	fmt.Printf("KIND11_BYTES=%d\n", len(rawKind11))

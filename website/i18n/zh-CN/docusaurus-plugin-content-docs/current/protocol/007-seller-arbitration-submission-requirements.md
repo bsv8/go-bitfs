@@ -5,7 +5,7 @@ title: 007 · 卖方仲裁提交要求
 
 # 007 · 卖方仲裁提交要求
 
-007 是 Buyer 签名的 003 无法正常完成 004/005 时使用的 v4 托管与结算异常分支。Seller 签署 Claim，Arbiter 验证并托管精确内容，决定一笔正的仲裁费，独立构造付费的付款交易；应用确认持久化后，Arbiter 才能签名。
+007 是 Buyer 签名的 003 无法正常完成 004/005 时使用的托管与结算异常分支。Seller 签署 Claim，Arbiter 验证并托管精确内容，决定一笔正的仲裁费，独立构造付费的付款交易；应用确认持久化后，Arbiter 才能签名。
 
 ## 必须提交的证据
 
@@ -13,9 +13,9 @@ Seller 必须发送五元 Kind 8。Claim 只包含：
 
 - 声明的 pool output satoshis 和固定角色顺序的规范 P2MS locking script；
 - canonical unsigned RefundTx 原文；
-- 精确的 Buyer-signed 003 `TermsCBOR` 和 Buyer signature。
+- 精确的 Buyer 签名 003 payment authorization 文档与 Buyer 签名。
 
-外层 Request 另含对 `[4, 8, exact_claim_cbor]` 的 Seller 消息签名，以及 canonical 的 1–64 项 `content_payloads_cbor`。不得携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复的 `RefundTemplateTxID` 或 Seller transaction signature。不得携带仲裁费用：费用只有在 Arbiter 收到并验证 payload 之后才确定。
+外层 Request 另含 `SignWireDocument(1, 8, exact_claim_cbor)` 的 Seller 消息签名，以及 canonical 的 1–64 项 `content_payloads_cbor`。不得携带 OpeningProof、FundingTx、费率、previous state、candidate raw、重复的 `RefundTemplateTxID` 或 Seller transaction signature。不得携带仲裁费用：费用只有在 Arbiter 收到并验证 payload 之后才确定。
 
 SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、RefundTx 形状、金额算术、payload 数量/顺序/大小/hash 和所有 canonical CBOR。它不声称验证链上 UTXO 存在、确认或未花费；错误 source context 应由应用记录为卖方 source 不可花费的对账失败。
 
@@ -40,7 +40,7 @@ SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、Refu
 
 `PreparePayment` 不产生交易签名副作用，返回带深复制 getter 的 opaque prepared evidence（Claim ID、冻结费用、授权哈希、payload、deadline、unsigned candidate）。应用重启后必须从已保存的精确原始 Kind 8 字节与保存的费用重新 Prepare，不得伪造 opaque 值。托管记录只追加：签名完成后，exact canonical Kind 9 字节附加到同一记录上，不覆盖 request、payload、Claim ID 或费用。
 
-回执通过 `[4, 9, exact_receipt_cbor]` 上的普通消息签名把 Claim ID、绝对仲裁金额和精确 `ForkID|All` 交易签名绑定在一起。回执消息签名与交易签名是两份独立凭证，不能互相替代。
+回执通过 `SignWireDocument(1, 9, exact_receipt_cbor)` 普通消息签名把 Claim ID、绝对仲裁金额和精确 `ForkID|All` 交易签名绑定在一起。回执消息签名与交易签名是两份独立凭证，不能互相替代。
 
 重放以 Claim ID 为索引，但以 exact 字节为门槛。严格解码入站 Kind 8 并派生 Claim ID 之后：
 

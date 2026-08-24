@@ -35,16 +35,16 @@ belongs to this key's role before computing anything.
 
 There is no `pool.Signer` interface to implement and no wallet, HSM, or remote
 signing service adapter to provide. The SDK never accepts a seed,
-key-export callback, or signature-verifier callback either. Every message
-signature follows one fixed path: the signed bytes (canonical 001/003 terms
-CBOR, or for 004 the exact 32-byte payment authorization hash) are hashed once
-with SHA-256, the official private key signs that pre-computed digest, and the
-low-S DER result is re-verified by a fixed internal verifier before it can be
-returned. In Go, `(*ec.PrivateKey).Sign` receives the already-computed digest,
-so callers must not hash a second time before signing; message helpers such as
-`bitfs.SignMessage` perform exactly that single hashing step internally.
-Transaction signatures always use the fixed MultisigPool sighash (`ForkID|All`)
-and are never hashed a second time.
+key-export callback, or signature-verifier callback either. Every ordinary
+message signature follows one fixed path: `SignWireDocument(key, version,
+kind, exact_document_cbor)` builds the typed signing input
+`["bitfs/wire-signature", version, kind, document]`, hashes it once with
+SHA-256, signs that pre-computed digest, enforces low-S DER, and re-verifies
+the result with a fixed internal verifier before returning it. In Go,
+`(*ec.PrivateKey).Sign` receives the already-computed digest, so callers must
+not hash a second time before signing. Transaction signatures always use the
+fixed MultisigPool sighash (`ForkID|All`) and are never hashed a second
+time.
 
 Public keys in a quote, opening proof, content request, or payment state are
 protocol evidence. Callers cannot replace participant verification or
@@ -95,7 +95,7 @@ The role APIs accept protocol-shaped data and return computed results:
 - pool.OpeningInput contains raw funding bytes, expiry locktime, fee rate, and
   seller/arbiter public keys.
 - pool.RefundPresignRequest and pool.RefundPresignResponse carry 002 opening
-  evidence; pool.FundingTxDelivery reveals funding only after the refund proof
+  evidence; pool.FundingTransactionDelivery reveals funding only after the refund proof
   is durably recorded by the application.
 - buyer.PreparePoolOpening returns PoolOpeningPreparation\{Request,
   *BuyerOpeningState\}: save State before sending Request. AcceptRefundPresign

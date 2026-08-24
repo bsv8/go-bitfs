@@ -28,15 +28,16 @@ request, err := buyerWorkflow.BuildContentRequest(ctx,
 ```text
 hashes  = [seedHash]                      // 或 [blockHash0, blockHash1, ...]
 price   = sum(priceOf(h) for h in hashes) // 逐项 checked-add，绝不回绕
-terms   = [
-    quote_terms_hash,                     // 选择报价（费用池由 txid 选择）
-    refund_template_txid,                 // 选择费用池并恢复角色与费率
-    payment_sequence,                     // 本次目标序号 = 当前已接受序号 + 1
-    seller_amount_after_sat,              // 付款后卖方绝对累计金额
-    content_hashes_cbor,                  // 规范子 CBOR bstr：1..64 个有序 hash
-    delivery_deadline_unix,
+payment_authorization_cbor = [
+    file_quote_terms_id,            // 选择报价（费用池由 txid 选择）
+    refund_template_txid,           // 选择费用池并恢复角色与费率
+    payment_sequence,               // 本次目标序号 = 当前已接受序号 + 1
+    seller_amount_after_satoshis,   // 付款后卖方绝对累计金额
+    content_hashes_cbor,            // 规范子 CBOR bstr：1..64 个有序 hash
+    delivery_deadline_unix_seconds,
 ]
-request = [4, terms_cbor, buyer_signature] // Buyer 签名精确覆盖 terms_cbor
+request = [1, 5, payment_authorization_cbor, buyer_signature]
+// buyer_signature = SignWireDocument(1, 5, payment_authorization_cbor)
 ```
 
 标准输出的 `SIGNED_CONTENT_REQUEST_HEX` 就是买家要发送给卖家的授权报文。003 条款不再重复携带公钥或矿工费率——这些值由 `refund_template_txid` 对应且不可修改的 OpeningProof 唯一确定。调试输出会把 quote hash、费用池关联 ID、有序 hash 批次、目标序号、绝对累计金额和截止时间逐项打印出来。

@@ -18,7 +18,7 @@ func TestRefundTemplateTxIDGoldenValueAndByteOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Golden value: TxID().CloneBytes() of the canonical unsigned RefundTx
+	// Golden value: TxID().CloneBytes() of the canonical unsigned RefundTemplateRaw
 	// built by mustRefundExpiryFixture; no display-order reversal applied.
 	const want = "9e81627f5557c355058d437c30b5ed7637a5a83353e5d2e16d9895e6cd759f56"
 	if got := hex.EncodeToString(computed[:]); got != want {
@@ -31,21 +31,21 @@ func TestRefundTemplateTxIDRequestAndProofEntriesAgree(t *testing.T) {
 	buyerKey := mustPoolTestKey(t, "11")
 	sellerKey := mustPoolTestKey(t, "22")
 	arbiterKey := mustPoolTestKey(t, "33")
-	keys := MultisigPoolPublicKeys{BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()}
+	keys := MultisigPoolPublicKeys{BuyerPublicKey: buyerKey.PubKey().Compressed(), SellerPublicKey: sellerKey.PubKey().Compressed(), ArbiterPublicKey: arbiterKey.PubKey().Compressed()}
 	lock, err := Build2of3LockingScript(keys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	funding := txNewFundingForOpeningTest(t, lock)
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: keys.BuyerPubKey, SellerPubKey: keys.SellerPubKey, ArbiterPubKey: keys.ArbiterPubKey})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: keys.BuyerPublicKey, SellerPublicKey: keys.SellerPublicKey, ArbiterPublicKey: keys.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := NewBuyerPoolAdapter(engine, buyerKey).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding, ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: keys.SellerPubKey, ArbiterPubKey: keys.ArbiterPubKey})
+	request, err := NewBuyerPoolAdapter(engine, buyerKey).BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding, ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: keys.SellerPublicKey, ArbiterPublicKey: keys.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := NewSellerPoolAdapter(engine, sellerKey).SignSellerRefund(ctx, request)
+	sellerSignature, err := NewSellerPoolAdapter(engine, sellerKey).SignSellerRefund(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestRefundTemplateTxIDRequestAndProofEntriesAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := engine.BuildOpeningProof(ctx, request, sellerSig, funding)
+	proof, err := engine.BuildOpeningProof(ctx, request, sellerSignature, funding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestMergedOnChainRefundTxidDiffersFromPoolID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestMergedOnChainRefundTxidDiffersFromPoolID(t *testing.T) {
 
 func TestNonCanonicalRefundTxProducesNoID(t *testing.T) {
 	_, proof := mustRefundExpiryFixture(t, 500000100)
-	tampered := append([]byte(nil), proof.RefundTx...)
+	tampered := append([]byte(nil), proof.RefundTemplateRaw...)
 	tampered[4] ^= 0xff
 	if _, err := refundTemplateTxIDFromBytes(tampered); err == nil {
 		t.Fatal("non-canonical refund transaction produced an ID")
@@ -111,19 +111,18 @@ func txNewFundingForOpeningTest(t *testing.T, lock []byte) []byte {
 
 func requestFromProofForTest(proof *OpeningProof) (*RefundPresignRequest, error) {
 	return &RefundPresignRequest{
-		Version:              MajorVersion,
-		RefundTx:             append([]byte(nil), proof.RefundTx...),
-		BuyerPubKey:          append([]byte(nil), proof.BuyerPubKey...),
-		SellerPubKey:         append([]byte(nil), proof.SellerPubKey...),
-		ArbiterPubKey:        append([]byte(nil), proof.ArbiterPubKey...),
-		MinerFeeRateSatPerKB: proof.MinerFeeRateSatPerKB,
-		BuyerRefundSignature: append([]byte(nil), proof.BuyerRefundSignature...),
+		RefundTemplateRaw:               append([]byte(nil), proof.RefundTemplateRaw...),
+		BuyerPublicKey:                  append([]byte(nil), proof.BuyerPublicKey...),
+		SellerPublicKey:                 append([]byte(nil), proof.SellerPublicKey...),
+		ArbiterPublicKey:                append([]byte(nil), proof.ArbiterPublicKey...),
+		MinerFeeRateSatoshisPerKilobyte: proof.MinerFeeRateSatoshisPerKilobyte,
+		BuyerRefundTransactionSignature: append([]byte(nil), proof.BuyerRefundTransactionSignature...),
 	}, nil
 }
 
 func wrongSellerSignatureForRequest(t *testing.T, request *RefundPresignRequest) []byte {
 	t.Helper()
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: request.BuyerPublicKey, SellerPublicKey: request.SellerPublicKey, ArbiterPublicKey: request.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,23 +161,23 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 	}
 	mutateState := func(name string, mutate func(state *tx.Transaction)) {
 		t.Helper()
-		state, err := tx.NewTransactionFromBytes(proof.RefundTx)
+		state, err := tx.NewTransactionFromBytes(proof.RefundTemplateRaw)
 		if err != nil {
 			t.Fatal(err)
 		}
 		mutate(state)
-		mustReject(name, func(p *OpeningProof) { p.RefundTx = state.Bytes() })
+		mustReject(name, func(p *OpeningProof) { p.RefundTemplateRaw = state.Bytes() })
 	}
 
 	// 角色公钥
-	mustReject("arbiter pubkey", func(p *OpeningProof) { p.ArbiterPubKey = bytes2Mutate() })
+	mustReject("arbiter pubkey", func(p *OpeningProof) { p.ArbiterPublicKey = bytes2Mutate() })
 	// 费率
-	mustReject("fee rate", func(p *OpeningProof) { p.MinerFeeRateSatPerKB *= 1024 })
+	mustReject("fee rate", func(p *OpeningProof) { p.MinerFeeRateSatoshisPerKilobyte *= 1024 })
 	// nLockTime 是买方自选字段：篡改不会使模板非法，但必须改变模板身份
 	// （重建比较把 locktime 绑定进 TxID 派生）。
 	{
 		locked := CloneOpeningProof(proof)
-		locked.RefundTx[len(locked.RefundTx)-1] ^= 0x01
+		locked.RefundTemplateRaw[len(locked.RefundTemplateRaw)-1] ^= 0x01
 		altered, err := DeriveRefundTemplateTxID(context.Background(), locked)
 		if err != nil {
 			t.Fatalf("locktime is part of the rebuilt template: %v", err)
@@ -212,7 +211,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed.RefundTx = merged
+	signed.RefundTemplateRaw = merged
 	if _, err := DeriveRefundTemplateTxID(context.Background(), signed); err == nil {
 		t.Fatal("fully signed refund transaction was accepted as a template")
 	}
@@ -228,7 +227,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 		generic.AddOutput(&tx.TransactionOutput{Satoshis: 100, LockingScript: script.NewFromBytes([]byte{0x51})})
 	}
 	fake := CloneOpeningProof(proof)
-	fake.RefundTx = generic.Bytes()
+	fake.RefundTemplateRaw = generic.Bytes()
 	if _, err := DeriveRefundTemplateTxID(context.Background(), fake); err == nil {
 		t.Fatal("generic one-in-three-out transaction was accepted as a refund template")
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
 )
 
@@ -31,30 +32,31 @@ import (
 // 它扮演调用方应用的本地状态存储：后续 003、004、005、006、007 演示把这些
 // 字段逐个显式传回 workflow，而不是依赖任何 SDK 内部加载行为。
 //
-// 自 005 最小付款凭证硬切换起，fixture 同时充当授权哈希索引：按
-// PaymentAuthorizationHash 保存精确的原始签名 003，供 Seller 在收到最小 005
+// 自 005 最小付款凭证硬切换起，fixture 同时充当付款授权索引：按
+// PaymentAuthorizationID 保存精确的原始签名 003，供 Seller 在收到最小 005
 // 后取回原始授权并本地重建状态交易。哈希是内容寻址键，不可解码出池 ID 或
 // 金额；找不到原始 003 就不能验收付款。
 type Fixture struct {
-	Buyer         *buyer.Workflow
-	Seller        *seller.Workflow
-	Arbiter       *arbitration.Workflow
-	BuyerKey      *ec.PrivateKey
-	SellerKey     *ec.PrivateKey
-	ArbiterKey    *ec.PrivateKey
-	Quote         *bitfs.SignedFileQuote
-	QuoteHash     bitfs.Hash32
-	Seed          []byte
-	SeedHash      masterseed.Digest
-	FileBytes     []byte
-	FundingTx     []byte
-	Opening       *pool.OpeningProof
-	Reference     pool.Reference
-	LatestPayment *pool.PaymentState
+	Buyer                 *buyer.Workflow
+	Seller                *seller.Workflow
+	Arbiter               *arbitration.Workflow
+	BuyerKey              *ec.PrivateKey
+	SellerKey             *ec.PrivateKey
+	ArbiterKey            *ec.PrivateKey
+	Quote                 *bitfs.SignedFileQuote
+	FileQuoteTermsID      protocol.FileQuoteTermsID
+	Seed                  []byte
+	SeedHash              masterseed.Digest
+	FileBytes             []byte
+	FundingTransactionRaw []byte
+	Opening               *pool.OpeningProof
+	Reference             pool.Reference
+	LatestPayment         *pool.PaymentState
 
-	// authorizations 是应用侧的授权哈希索引：SHA-256(003 TermsCBOR) -> 精确
+	// authorizations 是应用侧的付款授权索引：
+	// PaymentAuthorizationID = SHA-256(exact payment_authorization_cbor) -> 精确
 	// 原始签名 003。真实应用应使用数据库唯一索引并持久化该映射。
-	authorizations map[bitfs.Hash32]*bitfs.SignedContentRequest
+	authorizations map[protocol.PaymentAuthorizationID]*bitfs.SignedContentRequest
 }
 
 // New 创建一套已经完成 002 开池的显式状态。
@@ -106,18 +108,18 @@ func New(ctx context.Context) (*Fixture, error) {
 	}
 	now := time.Now().UTC()
 	// 001：报价先由卖方创建，再由买方验证接受；买方把返回值保留为本地状态。
-	arbiters, err := bitfs.EncodeSupportedArbiterPubkeys([][]byte{arbiterKey.PubKey().Compressed()})
+	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		return nil, err
 	}
-	quote, err := sellerWorkflow.CreateQuote(ctx, bitfs.FileQuoteTerms{SeedHash: seedHash.Bytes(), BuyerPubkey: buyerKey.PubKey().Compressed(), SeedPriceSat: 100, FullBlockPriceSat: 1000, FileSize: uint64(len(fileBytes)), QuoteExpiresAtUnix: now.Add(time.Hour).Unix(), SupportedArbiterPubkeysCBOR: arbiters}, filepath.Base(filePath))
+	quote, err := sellerWorkflow.CreateQuote(ctx, bitfs.FileQuoteTerms{SeedHash: seedHash.Bytes(), BuyerPublicKey: buyerKey.PubKey().Compressed(), SeedPriceSatoshis: 100, FullBlockPriceSatoshis: 1000, FileSizeBytes: uint64(len(fileBytes)), QuoteExpiresAtUnixSeconds: now.Add(time.Hour).Unix(), SupportedArbiterPublicKeysCBOR: arbiters}, filepath.Base(filePath))
 	if err != nil {
 		return nil, fmt.Errorf("create fixture quote: %w", err)
 	}
 	if _, err := buyerWorkflow.AcceptQuote(ctx, quote); err != nil {
 		return nil, fmt.Errorf("accept fixture quote: %w", err)
 	}
-	quoteHash, err := bitfs.FileQuoteTermsHash(quote.TermsCBOR)
+	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +130,7 @@ func New(ctx context.Context) (*Fixture, error) {
 	if err != nil {
 		return nil, err
 	}
-	preparation, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTx: funding, ExpiryLockTime: uint32(now.Add(time.Hour).Unix()), MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	preparation, err := buyerWorkflow.PreparePoolOpening(ctx, pool.OpeningInput{FundingTransactionRaw: funding, ExpiryLockTime: uint32(now.Add(time.Hour).Unix()), MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: sellerKey.PubKey().Compressed(), ArbiterPublicKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		return nil, fmt.Errorf("prepare fixture opening: %w", err)
 	}
@@ -140,7 +142,7 @@ func New(ctx context.Context) (*Fixture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("accept fixture refund presign: %w", err)
 	}
-	delivery, err := buyerWorkflow.BuildFundingTxDelivery(ctx, acceptance.Opening)
+	delivery, err := buyerWorkflow.BuildFundingTransactionDelivery(ctx, acceptance.Opening)
 	if err != nil {
 		return nil, err
 	}
@@ -149,22 +151,22 @@ func New(ctx context.Context) (*Fixture, error) {
 		return nil, fmt.Errorf("accept fixture funding: %w", err)
 	}
 	return &Fixture{
-		Buyer:          buyerWorkflow,
-		Seller:         sellerWorkflow,
-		Arbiter:        arbiterWorkflow,
-		BuyerKey:       buyerKey,
-		SellerKey:      sellerKey,
-		ArbiterKey:     arbiterKey,
-		Quote:          quote,
-		QuoteHash:      bitfs.Hash32(quoteHash),
-		Seed:           seed,
-		SeedHash:       seedHash,
-		FileBytes:      fileBytes,
-		FundingTx:      funding,
-		Opening:        fundingAcceptance.Opening,
-		Reference:      acceptance.Reference,
-		LatestPayment:  fundingAcceptance.InitialPayment,
-		authorizations: make(map[bitfs.Hash32]*bitfs.SignedContentRequest),
+		Buyer:                 buyerWorkflow,
+		Seller:                sellerWorkflow,
+		Arbiter:               arbiterWorkflow,
+		BuyerKey:              buyerKey,
+		SellerKey:             sellerKey,
+		ArbiterKey:            arbiterKey,
+		Quote:                 quote,
+		FileQuoteTermsID:      quoteID,
+		Seed:                  seed,
+		SeedHash:              seedHash,
+		FileBytes:             fileBytes,
+		FundingTransactionRaw: funding,
+		Opening:               fundingAcceptance.Opening,
+		Reference:             acceptance.Reference,
+		LatestPayment:         fundingAcceptance.InitialPayment,
+		authorizations:        make(map[protocol.PaymentAuthorizationID]*bitfs.SignedContentRequest),
 	}, nil
 }
 
@@ -231,17 +233,17 @@ func (f *Fixture) BuildBlockBatchRequest(ctx context.Context, at time.Time, coun
 
 // deliver 串起一次完整的批量内容交付：卖方构造交付并保存返回的
 // ContentDeliveryState，买方验收并构造整个批次唯一的最小 005 付款凭证。
-// 应用在生成 004 的同时把原始签名 003 存入授权哈希索引。
+// 应用在生成 004 的同时把原始签名 003 存入付款授权索引。
 func (f *Fixture) deliver(ctx context.Context, request *bitfs.SignedContentRequest, payloads [][]byte) (*bitfs.SignedContentDelivery, *seller.ContentDeliveryState, *buyer.VerifiedDelivery, error) {
 	delivery, deliveryState, err := f.Seller.BuildContentDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, seller.ContentDeliveryInput{ContentPayloads: payloads})
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	f.authorizations[authHash] = bitfs.CloneSignedContentRequest(request)
+	f.authorizations[authID] = bitfs.CloneSignedContentRequest(request)
 	verified, err := f.Buyer.AcceptDelivery(ctx, f.Quote, f.Opening, f.LatestPayment, request, delivery, buyer.ContentDeliveryInput{})
 	if err != nil {
 		return nil, nil, nil, err
@@ -249,18 +251,13 @@ func (f *Fixture) deliver(ctx context.Context, request *bitfs.SignedContentReque
 	return delivery, deliveryState, verified, nil
 }
 
-// LookupPaymentAuthorization 演示应用的授权哈希查找：用最小 005 携带的
-// PaymentAuthorizationHash 取回精确的原始签名 003。哈希不可解码，找不到就
+// LookupPaymentAuthorization 演示应用的付款授权查找：用最小 005 携带的
+// PaymentAuthorizationID 取回精确的原始签名 003。哈希不可解码，找不到就
 // 必须拒绝或请求对端重发，不能扫描池或按连接猜池。
-func (f *Fixture) LookupPaymentAuthorization(paymentAuthorizationHash []byte) (*bitfs.SignedContentRequest, error) {
-	var key bitfs.Hash32
-	if len(paymentAuthorizationHash) != len(key) {
-		return nil, fmt.Errorf("authorization hash must be %d bytes", len(key))
-	}
-	copy(key[:], paymentAuthorizationHash)
-	request, ok := f.authorizations[key]
+func (f *Fixture) LookupPaymentAuthorization(paymentAuthorizationID protocol.PaymentAuthorizationID) (*bitfs.SignedContentRequest, error) {
+	request, ok := f.authorizations[paymentAuthorizationID]
 	if !ok || request == nil {
-		return nil, fmt.Errorf("no signed content request indexed under authorization hash %x", paymentAuthorizationHash)
+		return nil, fmt.Errorf("no signed content request indexed under authorization id %x", paymentAuthorizationID[:])
 	}
 	return request, nil
 }
@@ -305,7 +302,7 @@ func (f *Fixture) DeliverBlockBatch(ctx context.Context, at time.Time, count int
 // demo/internal/poolopening 负责构造。
 func buildFundingTx(buyer, seller, arbiter []byte) ([]byte, error) {
 	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
-		BuyerPubKey: buyer, SellerPubKey: seller, ArbiterPubKey: arbiter,
+		BuyerPublicKey: buyer, SellerPublicKey: seller, ArbiterPublicKey: arbiter,
 	})
 	if err != nil {
 		return nil, err

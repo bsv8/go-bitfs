@@ -1,6 +1,7 @@
 package pool
 
-// This file contains the v4 arbitration transaction boundary.  Unlike the
+// This file contains the arbitration transaction boundary of the fee pool.
+// Unlike the
 // normal payment path, arbitration deliberately has no OpeningProof or fee
 // rate input: the refund template is the canonical transaction shape and its
 // retained balance is the only fee evidence available on the wire.
@@ -62,7 +63,7 @@ func ParseArbitratedPoolLockingScript(raw []byte) (MultisigPoolPublicKeys, error
 	if parsed[0].IsEqual(parsed[1]) || parsed[0].IsEqual(parsed[2]) || parsed[1].IsEqual(parsed[2]) {
 		return result, invalid("pool role keys must be distinct")
 	}
-	canonical, err := Build2of3LockingScript(MultisigPoolPublicKeys{BuyerPubKey: keys[0], SellerPubKey: keys[1], ArbiterPubKey: keys[2]})
+	canonical, err := Build2of3LockingScript(MultisigPoolPublicKeys{BuyerPublicKey: keys[0], SellerPublicKey: keys[1], ArbiterPublicKey: keys[2]})
 	if err != nil {
 		return result, err
 	}
@@ -70,9 +71,9 @@ func ParseArbitratedPoolLockingScript(raw []byte) (MultisigPoolPublicKeys, error
 		return result, invalid("pool locking script is not the canonical role-ordered script")
 	}
 	return MultisigPoolPublicKeys{
-		BuyerPubKey:   append([]byte(nil), keys[0]...),
-		SellerPubKey:  append([]byte(nil), keys[1]...),
-		ArbiterPubKey: append([]byte(nil), keys[2]...),
+		BuyerPublicKey:   append([]byte(nil), keys[0]...),
+		SellerPublicKey:  append([]byte(nil), keys[1]...),
+		ArbiterPublicKey: append([]byte(nil), keys[2]...),
 	}, nil
 }
 
@@ -84,7 +85,7 @@ func NewMultisigPoolEngineFromPoolLockingScript(raw []byte) (*MultisigPoolEngine
 		return nil, err
 	}
 	return NewMultisigPoolEngine(MultisigPoolEngineConfig{
-		BuyerPubKey: keys.BuyerPubKey, SellerPubKey: keys.SellerPubKey, ArbiterPubKey: keys.ArbiterPubKey,
+		BuyerPublicKey: keys.BuyerPublicKey, SellerPublicKey: keys.SellerPublicKey, ArbiterPublicKey: keys.ArbiterPublicKey,
 	})
 }
 
@@ -94,8 +95,8 @@ func NewMultisigPoolEngineFromPoolLockingScript(raw []byte) (*MultisigPoolEngine
 // template, sequence, and Seller-balance validation as the success builder,
 // minus the positive-arbiter-amount requirement, so evidence validation never
 // needs a placeholder fee.
-func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error {
-	return validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSat)
+func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSatoshis uint64) error {
+	return validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSatoshis)
 }
 
 // validateArbitrationClaimContext performs the pure Claim-structure checks of
@@ -104,7 +105,7 @@ func ValidateArbitrationClaimStructure(poolOutputSatoshis uint64, poolOutputLock
 // balance boundary. It deliberately does not depend on any arbitration fee so
 // evidence validation never needs a placeholder amount; the public success
 // builder additionally requires a positive fee.
-func validateArbitrationClaimContext(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64) error {
+func validateArbitrationClaimContext(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSatoshis uint64) error {
 	if poolOutputSatoshis == 0 || len(poolOutputLockingScript) == 0 || len(refundTemplateRaw) == 0 {
 		return invalid("arbitration source context and refund template are required")
 	}
@@ -163,22 +164,23 @@ func validateArbitrationClaimContext(poolOutputSatoshis uint64, poolOutputLockin
 	if refundOutputs > poolOutputSatoshis {
 		return invalid("refund template outputs exceed the claimed pool output")
 	}
-	refundFeeSat := poolOutputSatoshis - refundOutputs
-	spendableSat := poolOutputSatoshis - refundFeeSat
-	if sellerAmountAfterSat > spendableSat {
+	refundFeeSatoshis := poolOutputSatoshis - refundOutputs
+	spendableSatoshis := poolOutputSatoshis - refundFeeSatoshis
+	if sellerAmountAfterSatoshis > spendableSatoshis {
 		return ErrInsufficientBalance
 	}
 	return nil
 }
 
-// BuildArbitrationPaymentFromClaim is the sole v4 007 candidate builder.  It
+// BuildArbitrationPaymentFromClaim is the sole 007 candidate builder over
+// the fixed MultisigPool transaction rules.  It
 // accepts only source amount, source locking script, refund template bytes,
 // target sequence, the absolute seller amount, and the explicit absolute
 // arbiter fee.  A successful 007 requires a positive arbiter amount; zero is
 // never accepted here.  Source metadata is added to the in-memory transaction
 // solely for ForkID sighash calculation and is never serialized into RawTx.
-func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSat uint64, arbiterAmountSat uint64) (*UnsignedPayment, error) {
-	if err := validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSat); err != nil {
+func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLockingScript, refundTemplateRaw []byte, paymentSequence uint32, sellerAmountAfterSatoshis uint64, arbiterAmountSatoshis uint64) (*UnsignedPayment, error) {
+	if err := validateArbitrationClaimContext(poolOutputSatoshis, poolOutputLockingScript, refundTemplateRaw, paymentSequence, sellerAmountAfterSatoshis); err != nil {
 		return nil, err
 	}
 	refund, err := parseCanonicalTransaction(refundTemplateRaw)
@@ -186,16 +188,16 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 		return nil, err
 	}
 	refundOutputs := refund.Outputs[0].Satoshis + refund.Outputs[1].Satoshis + refund.Outputs[2].Satoshis
-	refundFeeSat := poolOutputSatoshis - refundOutputs
-	spendableSat := poolOutputSatoshis - refundFeeSat
-	remainingAfterSeller := spendableSat - sellerAmountAfterSat
-	if arbiterAmountSat == 0 {
+	refundFeeSatoshis := poolOutputSatoshis - refundOutputs
+	spendableSatoshis := poolOutputSatoshis - refundFeeSatoshis
+	remainingAfterSellerSatoshis := spendableSatoshis - sellerAmountAfterSatoshis
+	if arbiterAmountSatoshis == 0 {
 		return nil, invalid("arbitration payment requires a positive arbiter amount")
 	}
-	if arbiterAmountSat > remainingAfterSeller {
+	if arbiterAmountSatoshis > remainingAfterSellerSatoshis {
 		return nil, ErrInsufficientBalance
 	}
-	buyerAmountSat := remainingAfterSeller - arbiterAmountSat
+	buyerAmountSatoshis := remainingAfterSellerSatoshis - arbiterAmountSatoshis
 
 	sourceTxID := refund.Inputs[0].SourceTXID.CloneBytes()
 	candidate, err := parseCanonicalTransaction(refundTemplateRaw)
@@ -203,9 +205,9 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 		return nil, err
 	}
 	candidate.Inputs[0].SequenceNumber = paymentSequence
-	candidate.Outputs[0].Satoshis = buyerAmountSat
-	candidate.Outputs[1].Satoshis = sellerAmountAfterSat
-	candidate.Outputs[2].Satoshis = arbiterAmountSat
+	candidate.Outputs[0].Satoshis = buyerAmountSatoshis
+	candidate.Outputs[1].Satoshis = sellerAmountAfterSatoshis
+	candidate.Outputs[2].Satoshis = arbiterAmountSatoshis
 	setPoolSource(candidate, poolOutputSatoshis, poolOutputLockingScript)
 	unsignedRaw := candidate.Bytes()
 	refundID := RefundTemplateTxID(refund.TxID().CloneBytes())
@@ -213,9 +215,9 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 		RefundTemplateTxID:    refundID,
 		RawTx:                 append([]byte(nil), unsignedRaw...),
 		PaymentSequence:       paymentSequence,
-		BuyerAmountSat:        buyerAmountSat,
-		SellerAmountSat:       sellerAmountAfterSat,
-		ArbiterAmountSat:      arbiterAmountSat,
+		BuyerAmountSatoshis:   buyerAmountSatoshis,
+		SellerAmountSatoshis:  sellerAmountAfterSatoshis,
+		ArbiterAmountSatoshis: arbiterAmountSatoshis,
 		PoolOutputSatoshis:    poolOutputSatoshis,
 		PoolLockingScript:     append([]byte(nil), poolOutputLockingScript...),
 		arbitrationSourceTxID: append([]byte(nil), sourceTxID...),
@@ -226,7 +228,7 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 
 func arbitrationRoleScripts(keys MultisigPoolPublicKeys) ([][]byte, error) {
 	parsed := make([]*ec.PublicKey, 3)
-	for index, raw := range [][]byte{keys.BuyerPubKey, keys.SellerPubKey, keys.ArbiterPubKey} {
+	for index, raw := range [][]byte{keys.BuyerPublicKey, keys.SellerPublicKey, keys.ArbiterPublicKey} {
 		key, err := protocol.ParseCompressedPubKey(raw)
 		if err != nil {
 			return nil, err
@@ -271,10 +273,10 @@ func (engine *MultisigPoolEngine) validateArbitrationUnsignedPayment(unsigned *U
 	if state.Inputs[0].UnlockingScript != nil && len(state.Inputs[0].UnlockingScript.Bytes()) != 0 {
 		return nil, invalid("arbitration payment must be unsigned")
 	}
-	if state.Inputs[0].SequenceNumber != unsigned.PaymentSequence || state.Outputs[0].Satoshis != unsigned.BuyerAmountSat || state.Outputs[1].Satoshis != unsigned.SellerAmountSat || state.Outputs[2].Satoshis != unsigned.ArbiterAmountSat {
+	if state.Inputs[0].SequenceNumber != unsigned.PaymentSequence || state.Outputs[0].Satoshis != unsigned.BuyerAmountSatoshis || state.Outputs[1].Satoshis != unsigned.SellerAmountSatoshis || state.Outputs[2].Satoshis != unsigned.ArbiterAmountSatoshis {
 		return nil, invalid("arbitration payment metadata does not match raw transaction")
 	}
-	if unsigned.ArbiterAmountSat == 0 || unsigned.RefundTemplateTxID == (RefundTemplateTxID{}) {
+	if unsigned.ArbiterAmountSatoshis == 0 || unsigned.RefundTemplateTxID == (RefundTemplateTxID{}) {
 		return nil, invalid("arbitration payment amounts or template ID are invalid")
 	}
 	if !bytes.Equal(unsigned.PoolLockingScript, engine.lockBytes()) {
@@ -294,7 +296,7 @@ func (engine *MultisigPoolEngine) validateArbitrationUnsignedPayment(unsigned *U
 		return nil, invalid("arbitration payment output scripts are required")
 	}
 	roleScripts, err := arbitrationRoleScripts(MultisigPoolPublicKeys{
-		BuyerPubKey: engine.buyer.Compressed(), SellerPubKey: engine.seller.Compressed(), ArbiterPubKey: engine.arbiter.Compressed(),
+		BuyerPublicKey: engine.buyer.Compressed(), SellerPublicKey: engine.seller.Compressed(), ArbiterPublicKey: engine.arbiter.Compressed(),
 	})
 	if err != nil {
 		return nil, err
@@ -312,17 +314,17 @@ func (engine *MultisigPoolEngine) validateArbitrationUnsignedPayment(unsigned *U
 
 func arbitrationCandidateCommitment(unsigned *UnsignedPayment) []byte {
 	hash := sha256.New()
-	hash.Write([]byte("bitfs.v4.arbitration.unsigned-payment\x00"))
+	hash.Write([]byte("bitfs.v1.arbitration.unsigned-payment\x00"))
 	writeCommitmentBytes(hash, unsigned.RefundTemplateTxID[:])
 	writeCommitmentBytes(hash, unsigned.RawTx)
 	var number [8]byte
 	binary.BigEndian.PutUint64(number[:], uint64(unsigned.PaymentSequence))
 	hash.Write(number[:])
-	binary.BigEndian.PutUint64(number[:], unsigned.BuyerAmountSat)
+	binary.BigEndian.PutUint64(number[:], unsigned.BuyerAmountSatoshis)
 	hash.Write(number[:])
-	binary.BigEndian.PutUint64(number[:], unsigned.SellerAmountSat)
+	binary.BigEndian.PutUint64(number[:], unsigned.SellerAmountSatoshis)
 	hash.Write(number[:])
-	binary.BigEndian.PutUint64(number[:], unsigned.ArbiterAmountSat)
+	binary.BigEndian.PutUint64(number[:], unsigned.ArbiterAmountSatoshis)
 	hash.Write(number[:])
 	binary.BigEndian.PutUint64(number[:], unsigned.PoolOutputSatoshis)
 	hash.Write(number[:])

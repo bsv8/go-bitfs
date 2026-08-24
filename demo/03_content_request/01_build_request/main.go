@@ -22,7 +22,7 @@ func main() {
 		fail(err)
 	}
 	debug("=== Step 003: Build Content Request ===")
-	debug("[state] quote terms hash: %s", hex.EncodeToString(f.QuoteHash[:]))
+	debug("[state] FileQuoteTermsID: %s", hex.EncodeToString(f.FileQuoteTermsID[:]))
 	debug("[state] RefundTemplateTxID: %s", hex.EncodeToString(f.Reference.RefundTemplateTxID[:]))
 	debug("[state] current accepted payment sequence: %d", f.Reference.PaymentSequence)
 
@@ -31,7 +31,7 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("buyer.BuildContentRequest: %w", err))
 	}
-	terms, err := bitfs.DecodeContentRequestTerms(request.TermsCBOR)
+	terms, err := bitfs.DecodePaymentAuthorization(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		fail(err)
 	}
@@ -39,7 +39,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	paymentAuthorizationID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		fail(err)
 	}
@@ -52,10 +52,10 @@ func main() {
 		debug("[request] content hash #%d: %s", index+1, hex.EncodeToString(hash))
 	}
 	debug("[request] target payment sequence: %d (current + 1)", terms.PaymentSequence)
-	debug("[request] seller amount after: %d satoshis (absolute cumulative)", terms.SellerAmountAfterSat)
-	debug("[request] delivery deadline: %d", terms.DeliveryDeadlineUnix)
-	debug("[request] buyer signature: %s", hex.EncodeToString(request.BuyerSignature))
-	debug("[request] PaymentAuthorizationHash: %s", hex.EncodeToString(authHash[:]))
+	debug("[request] seller amount after: %d satoshis (absolute cumulative)", terms.SellerAmountAfterSatoshis)
+	debug("[request] delivery deadline: %d", terms.DeliveryDeadlineUnixSeconds)
+	debug("[request] buyer signature: %s", hex.EncodeToString(request.BuyerPaymentAuthorizationSignature))
+	debug("[request] PaymentAuthorizationID: %s", hex.EncodeToString(paymentAuthorizationID[:]))
 	fmt.Printf("SIGNED_CONTENT_REQUEST_HEX=%s\n", hex.EncodeToString(raw))
 	debug("=== Content request build complete ===")
 }

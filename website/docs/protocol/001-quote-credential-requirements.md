@@ -13,7 +13,7 @@ The most critical requirement here is not "being able to look up a quote in a da
 
 ## Aligned Business Rules
 
-- A quote targets exactly one buyer public key; BitFS v4 does not support open multi-buyer quotes.
+- A quote targets exactly one buyer public key; BitFS does not support open multi-buyer quotes.
 - Quotes have no effective time, only an expiration time.
 - Quotes provide only the seed price and the complete-block price; the final partial block is calculated from the actual file size derived from the file seed, and the seller should grant the buyer a 10% margin for calculation tolerance.
 - The recommended filename is only a display suggestion after download; it is not the basis for file identity, pricing, or fulfillment.
@@ -21,12 +21,12 @@ The most critical requirement here is not "being able to look up a quote in a da
 
 ## Why Not Use a Quote ID
 
-A manually assigned quote ID would bind the protocol to a specific server or database. Instead, `QuoteTermsHash = SHA256(FileQuoteTermsCBOR)` is used: it is a fingerprint of the terms content, not a row record created by someone.
+A manually assigned quote ID would bind the protocol to a specific server or database. Instead, `FileQuoteTermsID = SHA256(FileQuoteTermsCBOR)` is used: it is a fingerprint of the terms content, not a row record created by someone.
 
 Routine buy-sell messages carry only this hash to avoid redundant transmission; when migration, auditing, or arbitration is needed, both parties can present the original quote credential for verification. Even if a seller has multiple quotes, this hash allows precise retrieval of the one selected by the buyer.
 
 ## Implications for Subsequent Steps
 
-003 does not repeat the original quote text, file size, buyer/seller public keys, or prices; it references only `QuoteTermsHash`. The seller recovers this information from the verified quote. The complete quote credential must be retained by both parties until the associated payment is settled and the arbitration window has closed.
+003 does not repeat the original quote text, file size, buyer/seller public keys, or prices; it references only `FileQuoteTermsID`. The seller recovers this information from the verified quote. The complete quote credential must be retained by both parties until the associated payment is settled and the arbitration window has closed.
 
 For specific fields, CBOR layout, and the Go API, see the [Quote Credential Specification](001-quote-credential-spec.md).

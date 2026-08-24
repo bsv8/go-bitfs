@@ -44,11 +44,11 @@ const defaultStateDir = "demo/.state"
 // buyerKey 只留在本包内部用于派生地址和签名；公开的三个 PubKey 字段供
 // 开池交易构造使用。跨进程状态由本包的 checkpoint 函数保存，不经过 SDK。
 type BuyerSession struct {
-	Buyer         *buyer.Workflow
-	buyerKey      *ec.PrivateKey
-	BuyerPubKey   []byte
-	SellerPubKey  []byte
-	ArbiterPubKey []byte
+	Buyer            *buyer.Workflow
+	buyerKey         *ec.PrivateKey
+	BuyerPublicKey   []byte
+	SellerPublicKey  []byte
+	ArbiterPublicKey []byte
 }
 
 // SellerSession 是单个 002 命令需要的卖方应用组装结果。卖方的预签证据等
@@ -82,11 +82,11 @@ func NewBuyer(ctx context.Context) (*BuyerSession, error) {
 	}
 	buyerPubKey := buyerKey.PubKey().Compressed()
 	return &BuyerSession{
-		Buyer:         buyerWorkflow,
-		buyerKey:      buyerKey,
-		BuyerPubKey:   append([]byte(nil), buyerPubKey...),
-		SellerPubKey:  append([]byte(nil), sellerKey.PubKey().Compressed()...),
-		ArbiterPubKey: append([]byte(nil), arbiterKey.PubKey().Compressed()...),
+		Buyer:            buyerWorkflow,
+		buyerKey:         buyerKey,
+		BuyerPublicKey:   append([]byte(nil), buyerPubKey...),
+		SellerPublicKey:  append([]byte(nil), sellerKey.PubKey().Compressed()...),
+		ArbiterPublicKey: append([]byte(nil), arbiterKey.PubKey().Compressed()...),
 	}, nil
 }
 
@@ -108,15 +108,15 @@ func NewSeller(ctx context.Context) (*SellerSession, error) {
 }
 
 // OpeningInput 根据买方已经选定的真实 UTXO 资金交易构造 002 开池输入。
-// 退款有效期设置为当前 UTC 时间后一小时；FundingTx 原文只会进入买方自己的
+// 退款有效期设置为当前 UTC 时间后一小时；FundingTransactionRaw 原文只会进入买方自己的
 // 本地 checkpoint，在 0204 之前不会进入发给卖方的报文。
 func (session *BuyerSession) OpeningInput(fundingTx []byte, minerFeeRateSatPerKB uint64) pool.OpeningInput {
 	return pool.OpeningInput{
-		FundingTx:            append([]byte(nil), fundingTx...),
-		ExpiryLockTime:       uint32(time.Now().UTC().Add(time.Hour).Unix()),
-		MinerFeeRateSatPerKB: minerFeeRateSatPerKB,
-		SellerPubKey:         append([]byte(nil), session.SellerPubKey...),
-		ArbiterPubKey:        append([]byte(nil), session.ArbiterPubKey...),
+		FundingTransactionRaw:           append([]byte(nil), fundingTx...),
+		ExpiryLockTime:                  uint32(time.Now().UTC().Add(time.Hour).Unix()),
+		MinerFeeRateSatoshisPerKilobyte: minerFeeRateSatPerKB,
+		SellerPublicKey:                 append([]byte(nil), session.SellerPublicKey...),
+		ArbiterPublicKey:                append([]byte(nil), session.ArbiterPublicKey...),
 	}
 }
 
@@ -163,18 +163,18 @@ func (session *BuyerSession) FundingAddresses() (FundingAddresses, error) {
 // FundingPreparation 是买方本地的 JungleBus 查询和资金交易构造结果。
 // 它包含调试信息和原始交易，不会直接编码成任何 002 网络报文。
 type FundingPreparation struct {
-	Client               *junglebus.Client
-	Network              junglebus.Network
-	MainnetAddress       string
-	TestnetAddress       string
-	SelectedAddress      string
-	UTXOs                []junglebus.UTXO
-	SelectedUTXO         junglebus.UTXO
-	PoolOutputSatoshis   uint64
-	MinerFeeRateSatPerKB uint64
-	FundingFeeSatoshis   uint64
-	MinerFeeRateSource   string
-	RawTx                []byte
+	Client                          *junglebus.Client
+	Network                         junglebus.Network
+	MainnetAddress                  string
+	TestnetAddress                  string
+	SelectedAddress                 string
+	UTXOs                           []junglebus.UTXO
+	SelectedUTXO                    junglebus.UTXO
+	PoolOutputSatoshis              uint64
+	MinerFeeRateSatoshisPerKilobyte uint64
+	FundingFeeSatoshis              uint64
+	MinerFeeRateSource              string
+	RawTx                           []byte
 }
 
 // PrepareFunding 访问 JungleBus，选择真实可用 UTXO，并构造一笔规范、已签名
@@ -223,7 +223,7 @@ func (session *BuyerSession) PrepareFunding(ctx context.Context) (*FundingPrepar
 	}
 	// 选择器会排除已被内存池花费或金额不足的候选，并在构造失败时尝试下一个
 	// UTXO；成功返回的 rawTx 已经包含买方输入签名和找零输出。
-	selected, rawTx, err := selectAndBuildFundingTx(session.buyerKey, session.SellerPubKey, session.ArbiterPubKey, utxos, poolOutputSatoshis, minerFeeRateSatPerKB, addresses.Network == junglebus.Mainnet)
+	selected, rawTx, err := selectAndBuildFundingTx(session.buyerKey, session.SellerPublicKey, session.ArbiterPublicKey, utxos, poolOutputSatoshis, minerFeeRateSatPerKB, addresses.Network == junglebus.Mainnet)
 	if err != nil {
 		return nil, err
 	}
@@ -234,18 +234,18 @@ func (session *BuyerSession) PrepareFunding(ctx context.Context) (*FundingPrepar
 	// 对最终字节重新计算矿工费，而不是使用估算值，便于日志准确反映实际
 	// 输入金额、池输出和找零之间的差额。
 	return &FundingPreparation{
-		Client:               client,
-		Network:              addresses.Network,
-		MainnetAddress:       addresses.MainnetAddress,
-		TestnetAddress:       addresses.TestnetAddress,
-		SelectedAddress:      addresses.SelectedAddress,
-		UTXOs:                append([]junglebus.UTXO(nil), utxos...),
-		SelectedUTXO:         selected,
-		PoolOutputSatoshis:   poolOutputSatoshis,
-		MinerFeeRateSatPerKB: minerFeeRateSatPerKB,
-		FundingFeeSatoshis:   fundingFeeSatoshis,
-		MinerFeeRateSource:   minerFeeRateSource,
-		RawTx:                append([]byte(nil), rawTx...),
+		Client:                          client,
+		Network:                         addresses.Network,
+		MainnetAddress:                  addresses.MainnetAddress,
+		TestnetAddress:                  addresses.TestnetAddress,
+		SelectedAddress:                 addresses.SelectedAddress,
+		UTXOs:                           append([]junglebus.UTXO(nil), utxos...),
+		SelectedUTXO:                    selected,
+		PoolOutputSatoshis:              poolOutputSatoshis,
+		MinerFeeRateSatoshisPerKilobyte: minerFeeRateSatPerKB,
+		FundingFeeSatoshis:              fundingFeeSatoshis,
+		MinerFeeRateSource:              minerFeeRateSource,
+		RawTx:                           append([]byte(nil), rawTx...),
 	}, nil
 }
 
@@ -345,9 +345,9 @@ func buildFundingTx(key *ec.PrivateKey, seller, arbiter []byte, selected jungleb
 		return nil, fmt.Errorf("parse selected UTXO txid: %w", err)
 	}
 	poolLock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
-		BuyerPubKey:   key.PubKey().Compressed(),
-		SellerPubKey:  seller,
-		ArbiterPubKey: arbiter,
+		BuyerPublicKey:   key.PubKey().Compressed(),
+		SellerPublicKey:  seller,
+		ArbiterPublicKey: arbiter,
 	})
 	if err != nil {
 		return nil, err
@@ -505,11 +505,11 @@ func SellerPresignProofCheckpointPath() string {
 }
 
 // buyerOpeningCheckpoint 是 0201 之后买方必须自行保存的私有状态快照。
-// 它包含原 request 和买方私有 FundingTx；两者都不会被放进网络报文。
+// 它包含原 request 和买方私有 FundingTransactionRaw；两者都不会被放进网络报文。
 type buyerOpeningCheckpoint struct {
-	RefundTemplateTxID string `json:"refund_template_txid"`
-	Request            string `json:"request_hex"`
-	FundingTx          string `json:"funding_tx_hex"`
+	RefundTemplateTxID    string `json:"refund_template_txid"`
+	Request               string `json:"request_hex"`
+	FundingTransactionRaw string `json:"funding_tx_hex"`
 }
 
 // SaveBuyerOpeningState 把 0201 的买方本地状态写入演示 checkpoint。
@@ -522,7 +522,7 @@ func SaveBuyerOpeningState(path string, state *buyer.BuyerOpeningState) error {
 	if err != nil {
 		return err
 	}
-	record := buyerOpeningCheckpoint{RefundTemplateTxID: hex.EncodeToString(state.RefundTemplateTxID[:]), Request: hex.EncodeToString(requestRaw), FundingTx: hex.EncodeToString(state.FundingTx)}
+	record := buyerOpeningCheckpoint{RefundTemplateTxID: hex.EncodeToString(state.RefundTemplateTxID[:]), Request: hex.EncodeToString(requestRaw), FundingTransactionRaw: hex.EncodeToString(state.FundingTransactionRaw)}
 	return writeCheckpoint(path, record)
 }
 
@@ -548,14 +548,14 @@ func LoadBuyerOpeningState(path string, refundTemplateTxID pool.RefundTemplateTx
 	if err != nil {
 		return nil, err
 	}
-	fundingTx, err := hex.DecodeString(record.FundingTx)
+	fundingTx, err := hex.DecodeString(record.FundingTransactionRaw)
 	if err != nil {
 		return nil, fmt.Errorf("decode checkpoint funding tx: %w", err)
 	}
-	return &buyer.BuyerOpeningState{RefundTemplateTxID: refundTemplateTxID, Request: request, FundingTx: fundingTx}, nil
+	return &buyer.BuyerOpeningState{RefundTemplateTxID: refundTemplateTxID, Request: request, FundingTransactionRaw: fundingTx}, nil
 }
 
-// buyerProofCheckpoint 保存买方在 0203 得到的完整 opening proof（含 FundingTx），
+// buyerProofCheckpoint 保存买方在 0203 得到的完整 opening proof（含 FundingTransactionRaw），
 // 供独立进程运行的 0204 显式读取。
 type buyerProofCheckpoint struct {
 	RefundTemplateTxID string `json:"refund_template_txid"`
@@ -769,10 +769,10 @@ func loadKey(name string) (*ec.PrivateKey, error) {
 
 // encodeRequestForCheckpoint 把 0201 request 编码为规范 wire 字节保存。
 func encodeRequestForCheckpoint(request *pool.RefundPresignRequest) ([]byte, error) {
-	return wire.MarshalPoolRefundPresignRequest(request)
+	return wire.MarshalRefundPresignRequest(request)
 }
 
 // decodeRequestFromCheckpoint 从 checkpoint 字节恢复 0201 request。
 func decodeRequestFromCheckpoint(raw []byte) (*pool.RefundPresignRequest, error) {
-	return wire.UnmarshalPoolRefundPresignRequest(raw)
+	return wire.UnmarshalRefundPresignRequest(raw)
 }

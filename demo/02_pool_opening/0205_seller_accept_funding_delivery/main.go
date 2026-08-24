@@ -1,6 +1,6 @@
 // 0205 是开池流程的卖方收尾动作。
 //
-// 它接收 0204 首次公开的完整 FundingTx，按 delivery.RefundTemplateTxID 从卖方
+// 它接收 0204 首次公开的完整 FundingTransactionRaw，按 delivery.RefundTemplateTxID 从卖方
 // 自己的 checkpoint 加载 0202 保存的预签证据，显式传给 SDK 验证资金交易
 // 确实匹配退款证据和池输出，并得到完整的 opening proof、初始付款状态和
 // 待广播的资金交易原文。SDK 不提交任何交易；真实应用在此处调用自己的
@@ -30,19 +30,19 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	// 读取并严格解码 0204 的 FundingTxDelivery。报文中的 FundingTx 原文
+	// 读取并严格解码 0204 的 FundingTransactionDelivery。报文中的 FundingTransactionRaw 原文
 	// 可能很大，但它仍然必须经过 wire 层的固定类型和编码校验。
 	deliveryRaw, err := poolopening.ReadHex(os.Stdin, "FUNDING_TX_DELIVERY_HEX")
 	if err != nil {
 		fail(err)
 	}
-	delivery, err := wire.UnmarshalPoolFundingTxDelivery(deliveryRaw)
+	delivery, err := wire.UnmarshalFundingTransactionDelivery(deliveryRaw)
 	if err != nil {
-		fail(fmt.Errorf("decode FundingTxDelivery: %w", err))
+		fail(fmt.Errorf("decode FundingTransactionDelivery: %w", err))
 	}
 
-	debug("=== 0205 卖方：接受并检验 FundingTxDelivery ===")
-	debug("[transport] seller <- buyer: PoolFundingTxDelivery (%d bytes)", len(deliveryRaw))
+	debug("=== 0205 卖方：接受并检验 FundingTransactionDelivery ===")
+	debug("[transport] seller <- buyer: FundingTransactionDelivery (%d bytes)", len(deliveryRaw))
 	debug("[seller] 按 delivery.RefundTemplateTxID 加载 0202 保存的预签证据并交叉验证")
 	checkpointPath := poolopening.SellerPresignProofCheckpointPath()
 	presignProof, err := poolopening.LoadSellerPresignProof(checkpointPath, delivery.RefundTemplateTxID)
@@ -50,7 +50,7 @@ func main() {
 		fail(fmt.Errorf("load seller presign checkpoint (caller state): %w", err))
 	}
 	// AcceptPoolFunding 用显式传入的预签证据复核派生 hash 一致性，验证完整
-	// FundingTx 的规范编码、资金 outpoint、池输出和开池证据，然后返回完整
+	// FundingTransactionRaw 的规范编码、资金 outpoint、池输出和开池证据，然后返回完整
 	// proof、初始付款状态和待调用方广播的资金交易。任一校验失败都不会产生
 	// “已开池”结果；SDK 不执行任何广播或持久化。
 	acceptance, err := session.Seller.AcceptPoolFunding(ctx, presignProof, delivery)
@@ -64,8 +64,8 @@ func main() {
 	if details.RefundTemplateTxID != delivery.RefundTemplateTxID {
 		fail(fmt.Errorf("opening proof does not match delivery correlation ID"))
 	}
-	debug("[seller] FundingTx 已通过验证；广播资金交易是调用方的节点适配器职责")
-	debug("[seller] funding tx to broadcast: %d bytes", len(acceptance.FundingTx))
+	debug("[seller] FundingTransactionRaw 已通过验证；广播资金交易是调用方的节点适配器职责")
+	debug("[seller] funding tx to broadcast: %d bytes", len(acceptance.FundingTransactionRaw))
 	debug("[state] pool opened (locally verified): true")
 	fmt.Printf("POOL_OPENED=true\n")
 	fmt.Printf("FUNDING_TX_ID_HEX=%s\n", hex.EncodeToString(details.FundingTxID[:]))

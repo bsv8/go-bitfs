@@ -12,7 +12,7 @@ sequenceDiagram
     S->>S: 0202 校验并保存预签 proof（先存再回应）
     S->>B: 0202 RefundPresignResponse
     B->>B: 0203 按 RefundTemplateTxID 加载 checkpoint，验签后保存完整 OpeningProof
-    B->>S: 0204 FundingTxDelivery
+    B->>S: 0204 FundingTransactionDelivery
     S->>S: 0205 加载预签证据并验证 FundingTx（广播由调用方负责）
 ```
 
@@ -25,10 +25,10 @@ go-bitfs SDK 在本流程中完全无状态：workflow 只持有官方 BSV 私�
 | `0201_buyer_build_refund_request` | buyer | `PreparePoolOpening` 返回 request + `BuyerOpeningState`；应用先把 state 存入 checkpoint，再发送 request | `RefundPresignRequest` |
 | `0202_seller_accept_refund_request` | seller | `PresignPoolOpening` 返回 response + 卖方预签 proof；应用先把 proof 存入 checkpoint，再回应 response | `RefundPresignResponse` |
 | `0203_buyer_accept_refund_response` | buyer | 应用按响应中的 RefundTemplateTxID 加载 0201 checkpoint 并显式传入 SDK；验签返回完整 opening proof 和初始付款状态，应用保存 proof | `REFUND_TEMPLATE_TXID_HEX` |
-| `0204_buyer_build_funding_delivery` | buyer | 应用按 RefundTemplateTxID 从 checkpoint 加载完整 OpeningProof，显式传入构造资金交易交付报文 | `FundingTxDelivery` |
+| `0204_buyer_build_funding_delivery` | buyer | 应用按 RefundTemplateTxID 从 checkpoint 加载完整 OpeningProof，显式传入构造资金交易交付报文 | `FundingTransactionDelivery` |
 | `0205_seller_accept_funding_delivery` | seller | 应用按 delivery.RefundTemplateTxID 加载 0202 预签证据并显式传入；SDK 返回验证后的 proof、初始付款状态和待广播交易原文，广播是调用方职责 | `POOL_OPENED=true` 等 |
 
-0203 得到的完整 OpeningProof 和 0205 得到的初始付款状态是保存在各自 checkpoint 里的本地结果，不是额外的网络报文。0202 响应显式携带费用池统一关联 ID `RefundTemplateTxID`（未签名规范 RefundTx 的交易 ID）；0201 不单独携带 `FundingTxID`，卖方从 RefundTx 输入推导它。本地 checkpoint 与 wire 报文严格分离：checkpoint 只在各角色的进程内读写，不进入 stdin/stdout 管道。0203 只凭响应中的 `REFUND_TEMPLATE_TXID_HEX` 就能从买方 checkpoint 找回原 request 与私有 FundingTx，完整 OpeningProof 保存在买方自己的 checkpoint；只有 0203 成功落盘后，0204 才把原始 FundingTx 放入 `FundingTxDelivery`。
+0203 得到的完整 OpeningProof 和 0205 得到的初始付款状态是保存在各自 checkpoint 里的本地结果，不是额外的网络报文。0202 响应显式携带费用池统一关联 ID `RefundTemplateTxID`（未签名规范 RefundTx 的交易 ID）；0201 不单独携带 `FundingTxID`，卖方从 RefundTx 输入推导它。本地 checkpoint 与 wire 报文严格分离：checkpoint 只在各角色的进程内读写，不进入 stdin/stdout 管道。0203 只凭响应中的 `REFUND_TEMPLATE_TXID_HEX` 就能从买方 checkpoint 找回原 request 与私有 FundingTx，完整 OpeningProof 保存在买方自己的 checkpoint；只有 0203 成功落盘后，0204 才把原始 FundingTx 放入 `FundingTransactionDelivery`。
 
 ## 按报文顺序运行
 

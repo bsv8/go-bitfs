@@ -2,25 +2,16 @@ package pool
 
 import (
 	"crypto/sha256"
+
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // ProtocolFamily 表示 go-bitfs 资金池工作流协议族的名称。
-const ProtocolFamily = "bitfs.pool.workflow.v4"
+const ProtocolFamily = "bitfs.pool.workflow.v1"
 
-// MajorVersion 是当前资金池工作流协议的主版本号。
-//
-// 主版本号参与协议对象的编码与校验。发生不兼容的字段、语义或验证规则
-// 变化时应递增该值。
-const MajorVersion uint64 = 4
-
-// MultisigProtocol 标识实现使用的底层 MultisigPool 交易协议。
-const MultisigProtocol = "bitfs.pool.v4"
-
-// MultisigVersion 是实现使用的底层 MultisigPool 协议版本号。
-const MultisigVersion uint64 = 4
-
-// PoolOutputIndex 是 FundingTx 中资金池输出的协议固定索引。
-// v4 工作流只接受第 0 个输出作为资金池输出，因此无需在消息中重复传输。
+// PoolOutputIndex 是 FundingTransactionRaw 中资金池输出的协议固定索引。
+// 工作流只接受第 0 个输出作为资金池输出，因此无需在消息中重复传输。
+// 对外协议版本只使用 protocol.WireVersion，本包不再定义任何平行版本常量。
 const PoolOutputIndex uint32 = 0
 
 // Hash32 保存固定长度的 32 字节哈希值。
@@ -48,38 +39,42 @@ type Reference struct {
 // OpeningProof 保存买卖双方相互验证后、用于开立资金池的退款交易和资金交易证据。
 //
 // 该对象通常在卖方签署退款交易后形成，在买方交付资金交易原文后补全。
-// RefundTx、FundingTx 以及各类公钥和签名均为协议要求的原始字节，调用方
+// RefundTemplateRaw、FundingTransactionRaw 以及各类公钥和签名均为协议要求的原始字节，调用方
 // 不应在持久化或传输前擅自重新编码。
 type OpeningProof struct {
-	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
-	Version uint64
-	// RefundTx 是预签名退款交易的原始序列化字节。
+	// RefundTemplateRaw 是预签名退款交易的原始序列化字节。
 	// 该交易构成资金池的关联 ID 源，并由买方和卖方共同提供退款签名。
-	RefundTx []byte
-	// BuyerPubKey 是买方的 33 字节压缩 secp256k1 公钥。
-	BuyerPubKey []byte
-	// SellerPubKey 是卖方的 33 字节压缩 secp256k1 公钥。
-	SellerPubKey []byte
-	// ArbiterPubKey 是仲裁方的 33 字节压缩 secp256k1 公钥。
-	ArbiterPubKey []byte
-	// MinerFeeRateSatPerKB 是构造池内交易时采用的矿工费率，单位为 satoshi/KB。
-	MinerFeeRateSatPerKB uint64
-	// BuyerRefundSignature 是买方对预签名退款交易提供的 DER 签名原始字节。
-	BuyerRefundSignature []byte
-	// SellerRefundSignature 是卖方对同一预签名退款交易提供的 DER 签名原始字节。
-	SellerRefundSignature []byte
-	// FundingTx 是买方资金交易的原始序列化字节。
+	RefundTemplateRaw []byte
+	// BuyerPublicKey 是买方的 33 字节压缩 secp256k1 公钥。
+	BuyerPublicKey []byte
+	// SellerPublicKey 是卖方的 33 字节压缩 secp256k1 公钥。
+	SellerPublicKey []byte
+	// ArbiterPublicKey 是仲裁方的 33 字节压缩 secp256k1 公钥。
+	ArbiterPublicKey []byte
+	// MinerFeeRateSatoshisPerKilobyte 是构造池内交易时采用的矿工费率，单位为 satoshi/KB。
+	MinerFeeRateSatoshisPerKilobyte uint64
+	// BuyerRefundTransactionSignature 是买方对预签名退款交易提供的 DER 签名原始字节。
+	BuyerRefundTransactionSignature []byte
+	// SellerRefundTransactionSignature 是卖方对同一预签名退款交易提供的 DER 签名原始字节。
+	SellerRefundTransactionSignature []byte
+	// FundingTransactionRaw 是买方资金交易的原始序列化字节。
 	// 它通常在退款证据验证完成后单独交付给卖方。
-	FundingTx []byte
+	FundingTransactionRaw []byte
 }
 
 // OpeningDetails 是从 OpeningProof 原始证据即时计算出的只读视图。
 // 它不属于协议消息，也不会被编码或持久化为 OpeningProof 的字段。
 type OpeningDetails struct {
+	// RefundTemplateTxID 是费用池统一关联 ID（按交易 TxID 算法从规范退款模板派生，
+	// 不是普通 SHA-256 文档 ID），路由 002–007 的全部报文。
 	RefundTemplateTxID RefundTemplateTxID
-	FundingTxID        Hash32
+	// FundingTxID 是资金交易的链上交易 ID（Hash32）。
+	FundingTxID Hash32
+	// PoolOutputSatoshis 是资金池输出的聪数；重建 candidate 时作为输入金额。
 	PoolOutputSatoshis uint64
-	PoolLockingScript  []byte
+	// PoolLockingScript 是角色顺序固定 [Buyer, Seller, Arbiter] 的 2-of-3
+	// 锁定脚本字节（105 字节）。
+	PoolLockingScript []byte
 	// RefundLockTime 是从规范退款模板派生的 nLockTime 原始值，供 SDK 内部
 	// 协议操作和调用方审计使用。公开 Workflow 的当前时间判断始终由 SDK 读取
 	// 系统 UTC；调用方只提供区块高度。
@@ -89,66 +84,58 @@ type OpeningDetails struct {
 // RefundPresignRequest 包含买方请求卖方预签退款交易时发送的开池条款和交易材料。
 //
 // 该请求由买方构造，卖方验证退款交易、资金池输出、公钥及费率后，使用
-// SellerPubKey 对退款交易签名并返回 RefundPresignResponse。请求本身不包含
-// FundingTx 原文；资金交易 ID 和固定输出索引直接从 RefundTx 的 input 推导。
+// SellerPublicKey 对退款交易签名并返回 RefundPresignResponse。请求本身不包含
+// FundingTransactionRaw 原文；资金交易 ID 和固定输出索引直接从 RefundTemplateRaw 的 input 推导。
 type RefundPresignRequest struct {
-	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
-	Version uint64
-	// RefundTx 是买方构造的预签名退款交易原始字节。
-	RefundTx []byte
-	// BuyerPubKey 是买方的压缩 secp256k1 公钥原始字节。
-	BuyerPubKey []byte
-	// SellerPubKey 是买方期望用于卖方签名校验的压缩 secp256k1 公钥。
-	SellerPubKey []byte
-	// ArbiterPubKey 是仲裁方的压缩 secp256k1 公钥原始字节。
-	ArbiterPubKey []byte
-	// MinerFeeRateSatPerKB 是池内交易采用的矿工费率，单位为 satoshi/KB。
-	MinerFeeRateSatPerKB uint64
-	// BuyerRefundSignature 是买方已经附加到退款交易上的 DER 签名原始字节。
-	BuyerRefundSignature []byte
+	// RefundTemplateRaw 是买方构造的预签名退款交易原始字节。
+	RefundTemplateRaw []byte
+	// BuyerPublicKey 是买方的压缩 secp256k1 公钥原始字节。
+	BuyerPublicKey []byte
+	// SellerPublicKey 是买方期望用于卖方签名校验的压缩 secp256k1 公钥。
+	SellerPublicKey []byte
+	// ArbiterPublicKey 是仲裁方的压缩 secp256k1 公钥原始字节。
+	ArbiterPublicKey []byte
+	// MinerFeeRateSatoshisPerKilobyte 是池内交易采用的矿工费率，单位为 satoshi/KB。
+	MinerFeeRateSatoshisPerKilobyte uint64
+	// BuyerRefundTransactionSignature 是买方已经附加到退款交易上的 DER 签名原始字节。
+	BuyerRefundTransactionSignature []byte
 }
 
 // RefundPresignResponse 携带卖方对预签名退款交易的 DER 签名以及该请求的
 // 统一关联 ID。
 type RefundPresignResponse struct {
-	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
-	Version uint64
 	// RefundTemplateTxID 是费用池统一关联 ID，由卖方从收到的 request 的
 	// 规范退款模板重新派生，不允许调用方任意填写。
 	RefundTemplateTxID RefundTemplateTxID
-	// SellerRefundSignature 是卖方对 RefundPresignRequest.RefundTx 的签名原始字节。
-	SellerRefundSignature []byte
+	// SellerRefundTransactionSignature 是卖方对 RefundPresignRequest.RefundTemplateRaw 的签名原始字节。
+	SellerRefundTransactionSignature []byte
 }
 
-// FundingTxDelivery 携带买方在退款交易验证完成后公开的、已由买方签名的资金交易，
+// FundingTransactionDelivery 携带买方在退款交易验证完成后公开的、已由买方签名的资金交易，
 // 以及用于路由到对应费用池的统一关联 ID。
-type FundingTxDelivery struct {
-	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
-	Version uint64
+type FundingTransactionDelivery struct {
 	// RefundTemplateTxID 是费用池统一关联 ID，只能从买方已验证的 OpeningProof
 	// 派生，不得由调用方另行拼接。
 	RefundTemplateTxID RefundTemplateTxID
-	// FundingTx 是买方资金交易的原始序列化字节，卖方据此验证交易 ID、输入和池输出。
-	FundingTx []byte
+	// FundingTransactionRaw 是买方资金交易的原始序列化字节，卖方据此验证交易 ID、输入和池输出。
+	FundingTransactionRaw []byte
 }
 
-// PaymentUpdate 是 v4 协议 005 使用的最小付款凭证传输容器。
+// PaymentUpdate 是 Kind 7 PaymentUpdate 使用的最小付款凭证传输容器。
 //
 // 它只携带内容授权哈希和买方对确定性重建状态交易的签名；费用池 ID 与未签名
-// 状态交易不再进入 wire。接收方先用 PaymentAuthorizationHash 取回保存的精确
+// 状态交易不再进入 wire。接收方先用 PaymentAuthorizationID 取回保存的精确
 // 原始 003，再从 003、OpeningProof 和 previous PaymentState 在本地调用唯一的
 // BuildPaymentUpdate 重建同一笔未签名状态交易，验过买方签名后补签并合并。
 // 授权哈希是内容寻址键，不可解码出池 ID、金额或交易字节。
 type PaymentUpdate struct {
-	// Version 是资金池工作流协议主版本号，应等于 MajorVersion。
-	Version uint64
-	// PaymentAuthorizationHash 是内容请求条款规范编码的 SHA-256 哈希，长度固定为 32 字节。
+	// PaymentAuthorizationID 是 payment_authorization_cbor 的 SHA-256 typed ID。
 	// 它是本次付款授权的应用查找键，不携带任何池身份或路由信息。
-	PaymentAuthorizationHash []byte
-	// BuyerTransactionSignature 是买方针对双方本地确定性重建的未签名状态交易的
-	// DER 签名原始字节。该签名与交易原文分离传输，不能把它预先写回重建交易，
-	// 也不是对授权哈希的普通消息签名。
-	BuyerTransactionSignature []byte
+	PaymentAuthorizationID protocol.PaymentAuthorizationID
+	// BuyerPaymentTransactionSignature 是买方针对双方本地确定性重建的未签名
+	// 状态交易的 DER 签名原始字节。该签名与交易原文分离传输，不能把它预先写回
+	// 重建交易，也不是对任何文档的普通消息签名。
+	BuyerPaymentTransactionSignature []byte
 }
 
 // PaymentState 表示角色签名完整合并后的付款状态。
@@ -166,16 +153,16 @@ type PaymentState struct {
 	// PaymentSequence 是该状态在资金池付款链中的序号。
 	// 普通内容交付更新必须相对于上一状态恰好递增 1。
 	PaymentSequence uint32
-	// BuyerAmountSat 是交易向买方分配的金额，单位为 satoshi。
-	BuyerAmountSat uint64
-	// SellerAmountSat 是交易向卖方分配的累计金额，单位为 satoshi。
-	SellerAmountSat uint64
-	// ArbiterAmountSat 是交易向仲裁方分配的绝对金额，单位为 satoshi。
+	// BuyerAmountSatoshis 是交易向买方分配的金额，单位为 satoshi。
+	BuyerAmountSatoshis uint64
+	// SellerAmountSatoshis 是交易向卖方分配的累计金额，单位为 satoshi。
+	SellerAmountSatoshis uint64
+	// ArbiterAmountSatoshis 是交易向仲裁方分配的绝对金额，单位为 satoshi。
 	// 普通 005 付款恒为零；007 仲裁状态交易必须为正数，且等于回执中的
 	// 仲裁费。两种场景下它都是本次交易的绝对分配额，不是增量。
-	ArbiterAmountSat uint64
-	// PaymentAuthorizationHash 是绑定该付款的内容授权哈希，长度固定为 32 字节。
-	PaymentAuthorizationHash Hash32
+	ArbiterAmountSatoshis uint64
+	// PaymentAuthorizationID 是绑定该付款的 Kind 5 文档 typed ID。
+	PaymentAuthorizationID protocol.PaymentAuthorizationID
 	// BuyerTransactionSignature 是买方在该付款交易中的 DER 签名原始字节。
 	BuyerTransactionSignature []byte
 	// SellerTransactionSignature 是卖方在该付款交易中的 DER 签名原始字节。
@@ -208,14 +195,14 @@ type UnsignedPayment struct {
 	RawTx []byte
 	// PaymentSequence 是待签名付款状态的序号。
 	PaymentSequence uint32
-	// BuyerAmountSat 是交易向买方分配的金额，单位为 satoshi。
-	BuyerAmountSat uint64
-	// SellerAmountSat 是交易向卖方分配的累计金额，单位为 satoshi。
-	SellerAmountSat uint64
-	// ArbiterAmountSat 是交易向仲裁方分配的绝对金额，单位为 satoshi。
+	// BuyerAmountSatoshis 是交易向买方分配的金额，单位为 satoshi。
+	BuyerAmountSatoshis uint64
+	// SellerAmountSatoshis 是交易向卖方分配的累计金额，单位为 satoshi。
+	SellerAmountSatoshis uint64
+	// ArbiterAmountSatoshis 是交易向仲裁方分配的绝对金额，单位为 satoshi。
 	// 普通 005 付款恒为零；007 仲裁状态交易必须为正数，且等于调用方传入
 	// builder 的明确仲裁费。两种场景下它都是本次交易的绝对分配额，不是增量。
-	ArbiterAmountSat uint64
+	ArbiterAmountSatoshis uint64
 	// PoolOutputSatoshis 是该付款所引用的资金池输出金额，单位为 satoshi。
 	PoolOutputSatoshis uint64
 	// PoolLockingScript 是该付款所引用的资金池输出锁定脚本原始字节。
@@ -240,8 +227,8 @@ type PaymentUpdateInput struct {
 	// PaymentSequence 是新付款状态的目标序号；普通内容交付更新必须为
 	// 上一序号恰好加 1，且不得使用保留的最终关闭序号。
 	PaymentSequence uint32
-	// SellerAmountAfterSat 是新状态中卖方的累计金额，单位为 satoshi。
-	SellerAmountAfterSat uint64
+	// SellerAmountAfterSatoshis 是新状态中卖方的累计金额，单位为 satoshi。
+	SellerAmountAfterSatoshis uint64
 }
 
 // CloseInput 提供立即关闭资金池、构造最终付款交易所需的开池证据、调用方
@@ -252,8 +239,8 @@ type CloseInput struct {
 	Opening *OpeningProof
 	// Base 是调用方选定的基准付款状态；SDK 不声称它是数据库最新状态。
 	Base *PaymentState
-	// SellerAmountAfterSat 是候选最终关闭状态中卖方的累计金额，单位为 satoshi。
-	SellerAmountAfterSat uint64
+	// SellerAmountAfterSatoshis 是候选最终关闭状态中卖方的累计金额，单位为 satoshi。
+	SellerAmountAfterSatoshis uint64
 }
 
 // OpeningInput 仅包含构造资金池所需的通用输入数据。
@@ -261,14 +248,14 @@ type CloseInput struct {
 // 该对象由买方使用，不携带卖方签名；它用于生成 RefundPresignRequest，
 // 而不是直接表示已经完成的 OpeningProof。
 type OpeningInput struct {
-	// FundingTx 是买方资金交易的原始序列化字节；其第 0 个输出必须是资金池输出。
-	FundingTx []byte
+	// FundingTransactionRaw 是买方资金交易的原始序列化字节；其第 0 个输出必须是资金池输出。
+	FundingTransactionRaw []byte
 	// ExpiryLockTime 是退款交易使用的到期锁定时间，具体解释遵循底层交易协议。
 	ExpiryLockTime uint32
-	// MinerFeeRateSatPerKB 是构造退款和付款交易时采用的矿工费率，单位为 satoshi/KB。
-	MinerFeeRateSatPerKB uint64
-	// SellerPubKey 是卖方的压缩 secp256k1 公钥原始字节。
-	SellerPubKey []byte
-	// ArbiterPubKey 是仲裁方的压缩 secp256k1 公钥原始字节。
-	ArbiterPubKey []byte
+	// MinerFeeRateSatoshisPerKilobyte 是构造退款和付款交易时采用的矿工费率，单位为 satoshi/KB。
+	MinerFeeRateSatoshisPerKilobyte uint64
+	// SellerPublicKey 是卖方的压缩 secp256k1 公钥原始字节。
+	SellerPublicKey []byte
+	// ArbiterPublicKey 是仲裁方的压缩 secp256k1 公钥原始字节。
+	ArbiterPublicKey []byte
 }

@@ -1,6 +1,6 @@
 # go-bitfs
 
-go-bitfs is the source of truth for the BitFS v4 Go protocol: file exchange, arbitration, and MultisigPool v4 2-of-3 settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
+go-bitfs is the source of truth for the BitFS Wire Protocol v1 Go implementation: file exchange, arbitration, and 2-of-3 MultisigPool settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
 
 The protocol is documented in the multilingual [Docusaurus site](website/README.md). English is the normative website language; Simplified Chinese is maintained under `website/i18n/zh-CN/`.
 
@@ -17,13 +17,13 @@ The protocol is documented in the multilingual [Docusaurus site](website/README.
 
 Step 008 is read-only content recovery from arbiter custody. It is **not** a buyer arbitration close: when the seller is unreachable, the buyer either waits or broadcasts its presigned RefundTx after `nLockTime`.
 
-The current CDDL is under `spec/v4/`. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
+The current CDDL is under `spec/v1/`; retired iterations are archived under `spec/legacy/`. Every complete wire message starts with `[protocol.WireVersion, wire_kind, ...]` and ordinary message signatures go through the unified `SignWireDocument` helper. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, and database adapters remain application-owned interfaces.
 
 ## Packages
 
 - `bitfs/`: quote and content credentials, seeds, hashes, and evidence validation.
 - `pool/`: independent 002/005/006 settlement state machine, transaction engine, persistence ports, and memory reference implementation.
-- `buyer/` and `seller/`: role workflows for the v4 protocol.
+- `buyer/` and `seller/`: role workflows for the v1 wire protocol.
 - `arbitration/` and `wire/`: arbitration custody evidence, buyer retrieval signing, and typed protocol message dispatch.
 
 Run the test suite with:

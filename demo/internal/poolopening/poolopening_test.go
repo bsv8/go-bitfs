@@ -174,8 +174,8 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare funding: %v", err)
 	}
-	if funding.MinerFeeRateSatPerKB != 100 || funding.MinerFeeRateSource != "environment override" {
-		t.Fatalf("fee rate = %d from %q, want 100 from environment override", funding.MinerFeeRateSatPerKB, funding.MinerFeeRateSource)
+	if funding.MinerFeeRateSatoshisPerKilobyte != 100 || funding.MinerFeeRateSource != "environment override" {
+		t.Fatalf("fee rate = %d from %q, want 100 from environment override", funding.MinerFeeRateSatoshisPerKilobyte, funding.MinerFeeRateSource)
 	}
 	actualFee, err := fundingTransactionFee(funding.RawTx, funding.SelectedUTXO.Satoshis)
 	if err != nil {
@@ -184,7 +184,7 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 	if actualFee != funding.FundingFeeSatoshis {
 		t.Fatalf("stored funding fee = %d, actual fee = %d", funding.FundingFeeSatoshis, actualFee)
 	}
-	if session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatPerKB).MinerFeeRateSatPerKB != 100 {
+	if session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatoshisPerKilobyte).MinerFeeRateSatoshisPerKilobyte != 100 {
 		t.Fatal("opening input did not use the dynamic miner fee rate")
 	}
 }

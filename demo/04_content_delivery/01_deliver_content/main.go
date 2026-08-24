@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -28,7 +29,7 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("build prerequisite 003 request: %w", err))
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		fail(err)
 	}
@@ -37,9 +38,18 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("seller.BuildContentDelivery: %w", err))
 	}
-	debug("[seller] ContentDeliveryState saved by the demo (caller responsibility): target sequence %d, absolute seller amount %d", deliveryState.PaymentSequence, deliveryState.SellerAmountAfterSat)
-	debug("[delivery] payment authorization hash: %s", hex.EncodeToString(delivery.PaymentAuthorizationHash))
-	debug("[delivery] seller signature over the bare 32-byte hash: %s", hex.EncodeToString(delivery.SellerPaymentAuthorizationHashSignature))
+	debug("[seller] ContentDeliveryState saved by the demo (caller responsibility): target sequence %d, absolute seller amount %d", deliveryState.PaymentSequence, deliveryState.SellerAmountAfterSatoshis)
+
+	// content_delivery_cbor = deterministic-CBOR([payment_authorization_id])，
+	// 卖方统一签名覆盖这份精确文档（SignWireDocument(1, 6, ...)），绝不是裸哈希。
+	debug("[delivery] content_delivery_cbor: %s", hex.EncodeToString(delivery.ContentDeliveryCBOR))
+	boundAuthID, err := bitfs.DecodeContentDeliveryDocument(delivery.ContentDeliveryCBOR)
+	if err != nil {
+		fail(err)
+	}
+	debug("[delivery] PaymentAuthorizationID bound by content_delivery_cbor: %s", hex.EncodeToString(boundAuthID[:]))
+	debug("[delivery] seller signature over content_delivery_cbor (SignWireDocument(1, 6, ...)): %s", hex.EncodeToString(delivery.SellerContentDeliverySignature))
+
 	payloadsCBOR, err := bitfs.DecodeContentPayloads(delivery.ContentPayloadsCBOR)
 	if err != nil {
 		fail(err)
@@ -49,9 +59,9 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	debug("[buyer] 004 routed by PaymentAuthorizationHash to the saved original 003")
-	if !bytesEqual(delivery.PaymentAuthorizationHash, authHash[:]) {
-		fail(fmt.Errorf("delivery authorization hash does not match recomputed 003 hash"))
+	debug("[buyer] 004 routed by PaymentAuthorizationID to the saved original 003")
+	if boundAuthID != authID {
+		fail(errors.New("payment authorization ID mismatch"))
 	}
 	if !bytesEqual(deliveryState.RefundTemplateTxID[:], f.Reference.RefundTemplateTxID[:]) {
 		fail(fmt.Errorf("delivery pool correlation ID mismatch"))

@@ -18,7 +18,12 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-const quoteTermsVersion uint64 = 1
+// fileQuoteWireVersion and fileQuoteWireKind fix the Kind 1 signature context.
+// The encoder injects the same outer pair into the complete wire message.
+const (
+	fileQuoteWireVersion = protocol.WireVersion
+	fileQuoteWireKind    = uint64(1)
+)
 
 // MaxQuoteSeedBlocks is the greatest block count whose seed fits the BitFS
 // payload limit. A seed contains one 32-byte hash for each block.
@@ -28,54 +33,54 @@ const MaxQuoteSeedBlocks uint64 = masterseed.BlockSize / masterseed.DigestSize
 // delivered in one BitFS payload.
 const MaxQuoteFileSize uint64 = MaxQuoteSeedBlocks * BlockSize
 
-// EncodeSupportedArbiterPubkeys returns the sole allowed representation of the
-// supported-arbiter child structure.
-func EncodeSupportedArbiterPubkeys(pubkeys [][]byte) ([]byte, error) {
-	if err := validateSupportedArbiterPubkeys(pubkeys); err != nil {
+// EncodeSupportedArbiterPublicKeys returns the sole allowed representation of
+// the supported-arbiter child structure.
+func EncodeSupportedArbiterPublicKeys(publicKeys [][]byte) ([]byte, error) {
+	if err := validateSupportedArbiterPublicKeys(publicKeys); err != nil {
 		return nil, err
 	}
-	if pubkeys == nil {
-		pubkeys = [][]byte{}
+	if publicKeys == nil {
+		publicKeys = [][]byte{}
 	}
-	return canonicalEnc.Marshal(pubkeys)
+	return canonicalEnc.Marshal(publicKeys)
 }
 
-// DecodeSupportedArbiterPubkeys validates and decodes a canonical
+// DecodeSupportedArbiterPublicKeys validates and decodes a canonical
 // supported-arbiter child structure.
-func DecodeSupportedArbiterPubkeys(data []byte) ([][]byte, error) {
-	var pubkeys [][]byte
-	if err := strictDec.Unmarshal(data, &pubkeys); err != nil {
-		return nil, fmt.Errorf("decode supported arbiter pubkeys: %w", err)
+func DecodeSupportedArbiterPublicKeys(data []byte) ([][]byte, error) {
+	var publicKeys [][]byte
+	if err := strictDec.Unmarshal(data, &publicKeys); err != nil {
+		return nil, fmt.Errorf("decode supported arbiter public keys: %w", err)
 	}
-	if err := validateSupportedArbiterPubkeys(pubkeys); err != nil {
+	if err := validateSupportedArbiterPublicKeys(publicKeys); err != nil {
 		return nil, err
 	}
-	canonical, err := EncodeSupportedArbiterPubkeys(pubkeys)
+	canonical, err := EncodeSupportedArbiterPublicKeys(publicKeys)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, errors.New("supported arbiter pubkeys CBOR is not deterministically encoded")
+		return nil, errors.New("supported arbiter public keys CBOR is not deterministically encoded")
 	}
-	return cloneByteSlices(pubkeys), nil
+	return cloneByteSlices(publicKeys), nil
 }
 
 // EncodeFileQuoteTerms returns the exact canonical CBOR bytes signed by a
-// seller. The terms are an independent child document and therefore carry a
-// version of their own.
+// seller. The authenticated document contains business fields only; version
+// and kind live exclusively in the outer [1, 1, ...] wire message.
 func EncodeFileQuoteTerms(terms *FileQuoteTerms) ([]byte, error) {
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return nil, err
 	}
 	return canonicalEnc.Marshal([]any{
-		quoteTermsVersion,
 		bstr(terms.SeedHash),
-		bstr(terms.BuyerPubkey),
-		terms.SeedPriceSat,
-		terms.FullBlockPriceSat,
-		terms.FileSize,
-		terms.QuoteExpiresAtUnix,
-		bstr(terms.SupportedArbiterPubkeysCBOR),
+		bstr(terms.BuyerPublicKey),
+		terms.SeedPriceSatoshis,
+		terms.FullBlockPriceSatoshis,
+		terms.FileSizeBytes,
+		terms.QuoteExpiresAtUnixSeconds,
+		bstr(terms.SupportedArbiterPublicKeysCBOR),
+		terms.RecommendedFilename,
 	})
 }
 
@@ -85,30 +90,29 @@ func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode file quote terms: %w", err)
 	}
-	var version uint64
 	terms := new(FileQuoteTerms)
-	if err := decode(values[0], &version); err != nil || version != quoteTermsVersion {
-		return nil, errors.New("unsupported file quote terms version")
-	}
-	if err := decode(values[1], &terms.SeedHash); err != nil {
+	if err := decode(values[0], &terms.SeedHash); err != nil {
 		return nil, err
 	}
-	if err := decode(values[2], &terms.BuyerPubkey); err != nil {
+	if err := decode(values[1], &terms.BuyerPublicKey); err != nil {
 		return nil, err
 	}
-	if err := decode(values[3], &terms.SeedPriceSat); err != nil {
+	if err := decode(values[2], &terms.SeedPriceSatoshis); err != nil {
 		return nil, err
 	}
-	if err := decode(values[4], &terms.FullBlockPriceSat); err != nil {
+	if err := decode(values[3], &terms.FullBlockPriceSatoshis); err != nil {
 		return nil, err
 	}
-	if err := decode(values[5], &terms.FileSize); err != nil {
+	if err := decode(values[4], &terms.FileSizeBytes); err != nil {
 		return nil, err
 	}
-	if err := decode(values[6], &terms.QuoteExpiresAtUnix); err != nil {
+	if err := decode(values[5], &terms.QuoteExpiresAtUnixSeconds); err != nil {
 		return nil, err
 	}
-	if err := decode(values[7], &terms.SupportedArbiterPubkeysCBOR); err != nil {
+	if err := decode(values[6], &terms.SupportedArbiterPublicKeysCBOR); err != nil {
+		return nil, err
+	}
+	if err := decode(values[7], &terms.RecommendedFilename); err != nil {
 		return nil, err
 	}
 	if err := ValidateFileQuoteTerms(terms); err != nil {
@@ -124,47 +128,54 @@ func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	return cloneFileQuoteTerms(terms), nil
 }
 
-// FileQuoteTermsHash returns the content-derived reference for canonical quote
-// terms. It is a cache and evidence index, never a database-generated ID.
-func FileQuoteTermsHash(termsCBOR []byte) ([sha256.Size]byte, error) {
+// FileQuoteTermsID returns SHA-256 over the exact canonical quote terms. It
+// lives in the Kind 1 document ID namespace and anchors every later payment
+// authorization to one quote.
+func FileQuoteTermsID(termsCBOR []byte) (protocol.FileQuoteTermsID, error) {
 	if _, err := DecodeFileQuoteTerms(termsCBOR); err != nil {
-		return [sha256.Size]byte{}, err
+		return protocol.FileQuoteTermsID{}, err
 	}
-	return sha256.Sum256(termsCBOR), nil
+	digest := sha256.Sum256(termsCBOR)
+	return protocol.FileQuoteTermsID(digest), nil
 }
 
-// NewSignedFileQuote validates quote terms, encodes the canonical TermsCBOR,
-// signs those exact bytes with the official BSV private key through the fixed
-// single-SHA-256 message path, and fixedly re-verifies the signature with the
-// derived public key before returning a portable 001 credential. The private
-// key never enters any wire message, local result, log, or persisted structure.
+// NewSignedFileQuote validates quote terms, encodes the canonical FileQuoteTermsCBOR,
+// signs those exact bytes through the unified SignWireDocument(1, 1, ...)
+// helper, and fixedly re-verifies the signature with the derived public key
+// before returning a portable Kind 1 credential. The recommended filename is
+// sanitized first, then folded into the signed terms; the private key never
+// enters any wire message, local result, log, or persisted structure.
 func NewSignedFileQuote(terms *FileQuoteTerms, sellerKey *ec.PrivateKey, recommendedFilename string) (*SignedFileQuote, error) {
 	if sellerKey == nil {
 		return nil, errors.New("seller private key is required")
 	}
-	sellerPubkey := sellerKey.PubKey().Compressed()
-	if err := protocol.ValidateCompressedPubKey(sellerPubkey); err != nil {
-		return nil, fmt.Errorf("seller pubkey: %w", err)
+	sellerPublicKey := sellerKey.PubKey().Compressed()
+	if err := protocol.ValidateCompressedPubKey(sellerPublicKey); err != nil {
+		return nil, fmt.Errorf("seller public key: %w", err)
 	}
-	termsCBOR, err := EncodeFileQuoteTerms(terms)
+	signedTerms := cloneFileQuoteTerms(terms)
+	if signedTerms == nil {
+		signedTerms = new(FileQuoteTerms)
+	}
+	signedTerms.RecommendedFilename = SanitizeRecommendedFilename(recommendedFilename)
+	termsCBOR, err := EncodeFileQuoteTerms(signedTerms)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := SignMessage(sellerKey, termsCBOR)
+	signature, err := protocol.SignWireDocument(sellerKey, fileQuoteWireVersion, fileQuoteWireKind, termsCBOR)
 	if err != nil {
-		return nil, fmt.Errorf("sign quote terms: %w", err)
+		return nil, fmt.Errorf("sign file quote terms: %w", err)
 	}
 	if len(signature) == 0 {
-		return nil, errors.New("quote terms signature is required")
+		return nil, errors.New("file quote terms signature is required")
 	}
-	if err := VerifySignature(sellerPubkey, termsCBOR, signature); err != nil {
-		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
+	if err := protocol.VerifyWireDocument(sellerPublicKey, fileQuoteWireVersion, fileQuoteWireKind, termsCBOR, signature); err != nil {
+		return nil, fmt.Errorf("%w: file quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return &SignedFileQuote{
-		TermsCBOR:           append([]byte(nil), termsCBOR...),
-		SellerPubkey:        append([]byte(nil), sellerPubkey...),
-		TermsSignature:      append([]byte(nil), signature...),
-		RecommendedFilename: SanitizeRecommendedFilename(recommendedFilename),
+		FileQuoteTermsCBOR:            append([]byte(nil), termsCBOR...),
+		SellerPublicKey:               append([]byte(nil), sellerPublicKey...),
+		SellerFileQuoteTermsSignature: append([]byte(nil), signature...),
 	}, nil
 }
 
@@ -177,30 +188,30 @@ func VerifySignedFileQuote(quote *SignedFileQuote) (*FileQuoteTerms, error) {
 }
 
 // VerifyFileQuoteEvidence 验证时间无关的报价证据：结构、CBOR、压缩公钥与
-// DER 卖方签名。它不检查当前是否过期；过期判断由调用方用返回 terms 的
-// QuoteExpiresAtUnix 与自己读取的一次时间完成。
+// 统一 SignWireDocument(1, 1, ...) 卖方签名。它不检查当前是否过期；过期判断
+// 由调用方用返回 terms 的 QuoteExpiresAtUnixSeconds 与自己读取的一次时间完成。
 func VerifyFileQuoteEvidence(quote *SignedFileQuote) (*FileQuoteTerms, error) {
 	if quote == nil {
 		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)
 	}
-	if len(quote.SellerPubkey) == 0 {
-		return nil, fmt.Errorf("%w: seller pubkey is required", ErrInvalidEvidence)
+	if len(quote.SellerPublicKey) == 0 {
+		return nil, fmt.Errorf("%w: seller public key is required", ErrInvalidEvidence)
 	}
-	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
-		return nil, fmt.Errorf("%w: seller pubkey: %v", ErrInvalidEvidence, err)
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPublicKey); err != nil {
+		return nil, fmt.Errorf("%w: seller public key: %v", ErrInvalidEvidence, err)
 	}
-	if len(quote.TermsSignature) == 0 {
-		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
+	if len(quote.SellerFileQuoteTermsSignature) == 0 {
+		return nil, fmt.Errorf("%w: file quote terms signature is required", ErrInvalidEvidence)
 	}
-	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	terms, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode file quote terms: %v", ErrInvalidEvidence, err)
 	}
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return nil, err
 	}
-	if err := VerifySignature(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
-		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
+	if err := protocol.VerifyWireDocument(quote.SellerPublicKey, fileQuoteWireVersion, fileQuoteWireKind, quote.FileQuoteTermsCBOR, quote.SellerFileQuoteTermsSignature); err != nil {
+		return nil, fmt.Errorf("%w: file quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return terms, nil
 }
@@ -212,72 +223,78 @@ func verifySignedFileQuote(quote *SignedFileQuote, at time.Time) (*FileQuoteTerm
 	if quote == nil {
 		return nil, fmt.Errorf("%w: signed file quote is required", ErrInvalidEvidence)
 	}
-	if len(quote.SellerPubkey) == 0 {
-		return nil, fmt.Errorf("%w: seller pubkey is required", ErrInvalidEvidence)
+	if len(quote.SellerPublicKey) == 0 {
+		return nil, fmt.Errorf("%w: seller public key is required", ErrInvalidEvidence)
 	}
-	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
-		return nil, fmt.Errorf("%w: seller pubkey: %v", ErrInvalidEvidence, err)
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPublicKey); err != nil {
+		return nil, fmt.Errorf("%w: seller public key: %v", ErrInvalidEvidence, err)
 	}
-	if len(quote.TermsSignature) == 0 {
-		return nil, fmt.Errorf("%w: quote terms signature is required", ErrInvalidEvidence)
+	if len(quote.SellerFileQuoteTermsSignature) == 0 {
+		return nil, fmt.Errorf("%w: file quote terms signature is required", ErrInvalidEvidence)
 	}
-	terms, err := DecodeFileQuoteTerms(quote.TermsCBOR)
+	terms, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode file quote terms: %v", ErrInvalidEvidence, err)
 	}
 	if err := validateFileQuoteTermsNotExpired(terms, at); err != nil {
 		return nil, err
 	}
-	if err := VerifySignature(quote.SellerPubkey, quote.TermsCBOR, quote.TermsSignature); err != nil {
-		return nil, fmt.Errorf("%w: quote terms signature invalid: %v", ErrInvalidEvidence, err)
+	if err := protocol.VerifyWireDocument(quote.SellerPublicKey, fileQuoteWireVersion, fileQuoteWireKind, quote.FileQuoteTermsCBOR, quote.SellerFileQuoteTermsSignature); err != nil {
+		return nil, fmt.Errorf("%w: file quote terms signature invalid: %v", ErrInvalidEvidence, err)
 	}
 	return terms, nil
 }
 
-// EncodeSignedFileQuote returns the canonical CBOR representation of a quote
-// credential. RecommendedFilename is intentionally not in TermsSignature.
+// EncodeSignedFileQuote returns the complete Kind 1 wire message:
+// [1, 1, terms_cbor, seller_public_key, seller_file_quote_terms_signature].
 func EncodeSignedFileQuote(quote *SignedFileQuote) ([]byte, error) {
 	if quote == nil {
 		return nil, errors.New("signed file quote is required")
 	}
-	if len(quote.SellerPubkey) == 0 {
-		return nil, errors.New("seller pubkey is required")
+	if len(quote.SellerPublicKey) == 0 {
+		return nil, errors.New("seller public key is required")
 	}
-	if err := protocol.ValidateCompressedPubKey(quote.SellerPubkey); err != nil {
-		return nil, fmt.Errorf("seller pubkey: %w", err)
+	if err := protocol.ValidateCompressedPubKey(quote.SellerPublicKey); err != nil {
+		return nil, fmt.Errorf("seller public key: %w", err)
 	}
-	if len(quote.TermsSignature) == 0 {
-		return nil, errors.New("quote terms signature is required")
+	if len(quote.SellerFileQuoteTermsSignature) == 0 {
+		return nil, errors.New("file quote terms signature is required")
 	}
-	if _, err := DecodeFileQuoteTerms(quote.TermsCBOR); err != nil {
+	if _, err := DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR); err != nil {
 		return nil, err
 	}
-	return canonicalEnc.Marshal([]any{quoteTermsVersion, bstr(quote.TermsCBOR), bstr(quote.SellerPubkey), bstr(quote.TermsSignature), quote.RecommendedFilename})
+	return canonicalEnc.Marshal([]any{
+		fileQuoteWireVersion,
+		fileQuoteWireKind,
+		bstr(quote.FileQuoteTermsCBOR),
+		bstr(quote.SellerPublicKey),
+		bstr(quote.SellerFileQuoteTermsSignature),
+	})
 }
 
-// DecodeSignedFileQuote decodes one canonical quote credential. Signature and
-// expiry verification is intentionally separate so callers verify through the
-// fixed VerifySignedFileQuote path.
+// DecodeSignedFileQuote decodes one canonical Kind 1 wire message. Signature
+// and expiry verification is intentionally separate so callers verify through
+// the fixed VerifySignedFileQuote path.
 func DecodeSignedFileQuote(data []byte) (*SignedFileQuote, error) {
 	values, err := decodeArray(data, 5)
 	if err != nil {
 		return nil, fmt.Errorf("decode signed file quote: %w", err)
 	}
-	var version uint64
+	var version, kind uint64
 	quote := new(SignedFileQuote)
-	if err := decode(values[0], &version); err != nil || version != quoteTermsVersion {
-		return nil, errors.New("unsupported signed file quote version")
+	if err := decode(values[0], &version); err != nil || version != fileQuoteWireVersion {
+		return nil, errors.New("unsupported signed file quote wire version")
 	}
-	if err := decode(values[1], &quote.TermsCBOR); err != nil {
+	if err := decode(values[1], &kind); err != nil || kind != fileQuoteWireKind {
+		return nil, errors.New("signed file quote wire kind must be 1")
+	}
+	if err := decode(values[2], &quote.FileQuoteTermsCBOR); err != nil {
 		return nil, err
 	}
-	if err := decode(values[2], &quote.SellerPubkey); err != nil {
+	if err := decode(values[3], &quote.SellerPublicKey); err != nil {
 		return nil, err
 	}
-	if err := decode(values[3], &quote.TermsSignature); err != nil {
-		return nil, err
-	}
-	if err := decode(values[4], &quote.RecommendedFilename); err != nil {
+	if err := decode(values[4], &quote.SellerFileQuoteTermsSignature); err != nil {
 		return nil, err
 	}
 	canonical, err := EncodeSignedFileQuote(quote)
@@ -291,7 +308,9 @@ func DecodeSignedFileQuote(data []byte) (*SignedFileQuote, error) {
 }
 
 // ValidateFileQuoteTerms validates quote terms without considering time or a
-// seller signature.
+// seller signature. The recommended filename must already satisfy the single
+// sanitize rule: sellers sanitize before encoding and signing, buyers only
+// verify that the received field obeys the same rule and never rewrite it.
 func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 	if terms == nil {
 		return errors.New("file quote terms are required")
@@ -299,26 +318,29 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 	if len(terms.SeedHash) != masterseed.DigestSize {
 		return fmt.Errorf("quote seed_hash length must be %d", masterseed.DigestSize)
 	}
-	if len(terms.BuyerPubkey) == 0 {
-		return errors.New("quote buyer_pubkey is required")
+	if len(terms.BuyerPublicKey) == 0 {
+		return errors.New("quote buyer_public_key is required")
 	}
-	if err := protocol.ValidateCompressedPubKey(terms.BuyerPubkey); err != nil {
-		return fmt.Errorf("quote buyer_pubkey: %w", err)
+	if err := protocol.ValidateCompressedPubKey(terms.BuyerPublicKey); err != nil {
+		return fmt.Errorf("quote buyer_public_key: %w", err)
 	}
-	if terms.FileSize == 0 {
+	if terms.FileSizeBytes == 0 {
 		emptySeedHash := masterseed.Sum256(nil)
 		if !bytes.Equal(terms.SeedHash, emptySeedHash.Bytes()) {
 			return errors.New("empty-file quote seed_hash must equal sha256 of empty seed")
 		}
 	}
-	if terms.QuoteExpiresAtUnix <= 0 {
-		return errors.New("quote expires_at_unix is required")
+	if terms.QuoteExpiresAtUnixSeconds <= 0 {
+		return errors.New("quote expires_at_unix_seconds is required")
 	}
-	if fileQuoteBlockCount(terms.FileSize) > MaxQuoteSeedBlocks {
-		return fmt.Errorf("quote file_size exceeds maximum %d", MaxQuoteFileSize)
+	if fileQuoteBlockCount(terms.FileSizeBytes) > MaxQuoteSeedBlocks {
+		return fmt.Errorf("quote file_size_bytes exceeds maximum %d", MaxQuoteFileSize)
 	}
-	if _, err := DecodeSupportedArbiterPubkeys(terms.SupportedArbiterPubkeysCBOR); err != nil {
+	if _, err := DecodeSupportedArbiterPublicKeys(terms.SupportedArbiterPublicKeysCBOR); err != nil {
 		return err
+	}
+	if SanitizeRecommendedFilename(terms.RecommendedFilename) != terms.RecommendedFilename {
+		return errors.New("recommended_filename does not satisfy the sanitize rule")
 	}
 	return nil
 }
@@ -330,15 +352,16 @@ func validateFileQuoteTermsNotExpired(terms *FileQuoteTerms, at time.Time) error
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return err
 	}
-	if !at.Before(time.Unix(terms.QuoteExpiresAtUnix, 0)) {
+	if !at.Before(time.Unix(terms.QuoteExpiresAtUnixSeconds, 0)) {
 		return fmt.Errorf("%w: file quote is expired", ErrQuoteExpired)
 	}
 	return nil
 }
 
-// SanitizeRecommendedFilename converts unsigned display metadata into a safe
-// single filename. It must be applied before displaying or using the value as
-// a local path; the original field remains outside the quote's economic truth.
+// SanitizeRecommendedFilename converts the seller-supplied display name into a
+// safe single filename. Sellers must apply it before encoding and signing the
+// terms; receivers use the identical rule to reject any field that was not
+// sanitized upstream instead of silently rewriting signed bytes.
 func SanitizeRecommendedFilename(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = path.Base(name)
@@ -355,16 +378,16 @@ func SanitizeRecommendedFilename(name string) string {
 	return name
 }
 
-// ContentHashesPriceSat derives the aggregate buyer-signed amount for an
+// ContentHashesPriceSatoshis derives the aggregate buyer-signed amount for an
 // ordered batch of content hashes against the verified quote. Each hash equal
-// to the quote SeedHash is priced at SeedPriceSat; every other hash must be
-// found in the verified seed and is priced at its position's protocol expected
-// length (full blocks at FullBlockPriceSat, tail blocks with the proportional
-// round-up and the specified 10% seller allowance). Duplicate block positions
-// behind one hash are charged once; matches with conflicting expected lengths
-// reject the batch. The total is accumulated with checked addition so any
-// overflow fails before signing instead of wrapping.
-func ContentHashesPriceSat(terms *FileQuoteTerms, contentHashes [][]byte, seed []byte) (uint64, error) {
+// to the quote SeedHash is priced at SeedPriceSatoshis; every other hash must
+// be found in the verified seed and is priced at its position's protocol
+// expected length (full blocks at FullBlockPriceSatoshis, tail blocks with the
+// proportional round-up and the specified 10% seller allowance). Duplicate
+// block positions behind one hash are charged once; matches with conflicting
+// expected lengths reject the batch. The total is accumulated with checked
+// addition so any overflow fails before signing instead of wrapping.
+func ContentHashesPriceSatoshis(terms *FileQuoteTerms, contentHashes [][]byte, seed []byte) (uint64, error) {
 	// 导出入口自身 fail-closed：数量上限、哈希宽度与重复检查不依赖调用方
 	// 先行经过 Encode/Decode。
 	if err := validateContentHashes(contentHashes); err != nil {
@@ -376,9 +399,9 @@ func ContentHashesPriceSat(terms *FileQuoteTerms, contentHashes [][]byte, seed [
 	}
 	total := uint64(0)
 	for _, item := range items {
-		price := terms.SeedPriceSat
+		price := terms.SeedPriceSatoshis
 		if !item.IsSeed {
-			price, err = blockPriceSat(terms.FullBlockPriceSat, item.BlockSize)
+			price, err = blockPriceSatoshis(terms.FullBlockPriceSatoshis, item.BlockSize)
 			if err != nil {
 				return 0, err
 			}
@@ -391,19 +414,19 @@ func ContentHashesPriceSat(terms *FileQuoteTerms, contentHashes [][]byte, seed [
 	return total, nil
 }
 
-// blockPriceSat prices one block by its protocol expected length using big
-// integers so malformed uint64 prices cannot overflow into a lower amount.
-func blockPriceSat(fullBlockPriceSat, blockSize uint64) (uint64, error) {
+// blockPriceSatoshis prices one block by its protocol expected length using
+// big integers so malformed uint64 prices cannot overflow into a lower amount.
+func blockPriceSatoshis(fullBlockPriceSatoshis, blockSize uint64) (uint64, error) {
 	if blockSize == 0 || blockSize > BlockSize {
 		return 0, fmt.Errorf("invalid block expected size %d", blockSize)
 	}
 	if blockSize == BlockSize {
-		return fullBlockPriceSat, nil
+		return fullBlockPriceSatoshis, nil
 	}
-	if fullBlockPriceSat == 0 {
+	if fullBlockPriceSatoshis == 0 {
 		return 0, nil
 	}
-	numerator := new(big.Int).SetUint64(fullBlockPriceSat)
+	numerator := new(big.Int).SetUint64(fullBlockPriceSatoshis)
 	numerator.Mul(numerator, new(big.Int).SetUint64(blockSize))
 	numerator.Mul(numerator, big.NewInt(90))
 	denominator := new(big.Int).SetUint64(BlockSize)
@@ -419,18 +442,18 @@ func blockPriceSat(fullBlockPriceSat, blockSize uint64) (uint64, error) {
 	return price.Uint64(), nil
 }
 
-func fileQuoteBlockCount(fileSize uint64) uint64 {
-	return masterseed.BlockCountForSourceSize(fileSize)
+func fileQuoteBlockCount(fileSizeBytes uint64) uint64 {
+	return masterseed.BlockCountForSourceSize(fileSizeBytes)
 }
 
-func validateSupportedArbiterPubkeys(pubkeys [][]byte) error {
-	for index, pubkey := range pubkeys {
-		if err := protocol.ValidateCompressedPubKey(pubkey); err != nil {
-			return fmt.Errorf("supported arbiter pubkey #%d: %w", index, err)
+func validateSupportedArbiterPublicKeys(publicKeys [][]byte) error {
+	for index, publicKey := range publicKeys {
+		if err := protocol.ValidateCompressedPubKey(publicKey); err != nil {
+			return fmt.Errorf("supported arbiter public key #%d: %w", index, err)
 		}
 		for previous := 0; previous < index; previous++ {
-			if bytes.Equal(pubkeys[previous], pubkey) {
-				return fmt.Errorf("supported arbiter pubkey #%d is duplicated", index)
+			if bytes.Equal(publicKeys[previous], publicKey) {
+				return fmt.Errorf("supported arbiter public key #%d is duplicated", index)
 			}
 		}
 	}
@@ -451,8 +474,8 @@ func cloneFileQuoteTerms(terms *FileQuoteTerms) *FileQuoteTerms {
 	}
 	cloned := *terms
 	cloned.SeedHash = append([]byte(nil), terms.SeedHash...)
-	cloned.BuyerPubkey = append([]byte(nil), terms.BuyerPubkey...)
-	cloned.SupportedArbiterPubkeysCBOR = append([]byte(nil), terms.SupportedArbiterPubkeysCBOR...)
+	cloned.BuyerPublicKey = append([]byte(nil), terms.BuyerPublicKey...)
+	cloned.SupportedArbiterPublicKeysCBOR = append([]byte(nil), terms.SupportedArbiterPublicKeysCBOR...)
 	return &cloned
 }
 
@@ -461,8 +484,8 @@ func cloneSignedFileQuote(quote *SignedFileQuote) *SignedFileQuote {
 		return nil
 	}
 	cloned := *quote
-	cloned.TermsCBOR = append([]byte(nil), quote.TermsCBOR...)
-	cloned.SellerPubkey = append([]byte(nil), quote.SellerPubkey...)
-	cloned.TermsSignature = append([]byte(nil), quote.TermsSignature...)
+	cloned.FileQuoteTermsCBOR = append([]byte(nil), quote.FileQuoteTermsCBOR...)
+	cloned.SellerPublicKey = append([]byte(nil), quote.SellerPublicKey...)
+	cloned.SellerFileQuoteTermsSignature = append([]byte(nil), quote.SellerFileQuoteTermsSignature...)
 	return &cloned
 }

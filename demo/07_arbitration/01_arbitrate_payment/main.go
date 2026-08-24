@@ -11,6 +11,7 @@ import (
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/fixture"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
@@ -36,11 +37,11 @@ func demoFeePolicy(payloadCBORBytes int) uint64 {
 // 之前原子持久化；签名完成后把 exact canonical 响应字节附加到同一记录（只
 // 追加，不覆盖既有字段），供审计、恢复与 exact Kind 8 相同时的幂等重发使用。
 type custodyRecord struct {
-	RequestBytes        []byte
-	ContentPayloadsCBOR []byte
-	ClaimID             []byte
-	ArbiterAmountSat    uint64
-	ResponseBytes       []byte
+	RequestBytes          []byte
+	ContentPayloadsCBOR   []byte
+	ArbitrationClaimID    protocol.ArbitrationClaimID
+	ArbiterAmountSatoshis uint64
+	ResponseBytes         []byte
 }
 
 func main() {
@@ -67,9 +68,9 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	debug("[007 request] Claim CBOR bytes: %d", len(arbitrationRequest.ClaimCBOR))
+	debug("[007 request] Claim CBOR bytes: %d", len(arbitrationRequest.ArbitrationClaimCBOR))
 	debug("[007 request] payload bundle CBOR bytes: %d", len(arbitrationRequest.ContentPayloadsCBOR))
-	debug("[007 request] Seller Claim signature: %s", hex.EncodeToString(arbitrationRequest.SellerClaimSignature))
+	debug("[007 request] Seller Claim signature: %s", hex.EncodeToString(arbitrationRequest.SellerArbitrationClaimSignature))
 	// 应用先按 exact payload CBOR 长度计费，再把明确金额交给 SDK。
 	billedBytes := len(arbitrationRequest.ContentPayloadsCBOR)
 	arbiterAmountSat := demoFeePolicy(billedBytes)
@@ -79,16 +80,17 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("arbitration.PreparePayment: %w", err))
 	}
-	custodyKey := hex.EncodeToString(prepared.ClaimID())
+	preparedClaimID := prepared.ArbitrationClaimID()
+	custodyKey := hex.EncodeToString(preparedClaimID[:])
 	custody := make(map[string]custodyRecord)
 	custody[custodyKey] = custodyRecord{
-		RequestBytes:        append([]byte(nil), rawRequest...),
-		ContentPayloadsCBOR: prepared.ContentPayloadsCBOR(),
-		ClaimID:             prepared.ClaimID(),
-		ArbiterAmountSat:    prepared.ArbiterAmountSat(),
+		RequestBytes:          append([]byte(nil), rawRequest...),
+		ContentPayloadsCBOR:   prepared.ContentPayloadsCBOR(),
+		ArbitrationClaimID:    preparedClaimID,
+		ArbiterAmountSatoshis: prepared.ArbiterAmountSatoshis(),
 	}
 	saved, ok := custody[custodyKey]
-	if !ok || len(saved.RequestBytes) == 0 || len(saved.ClaimID) != 32 || saved.ArbiterAmountSat == 0 {
+	if !ok || len(saved.RequestBytes) == 0 || len(saved.ArbitrationClaimID) != 32 || saved.ArbiterAmountSatoshis == 0 {
 		fail(fmt.Errorf("persist arbitration custody: record missing"))
 	}
 	debug("[arbiter] persisted exact Kind 8 bytes, Claim ID %s and frozen fee; SignPreparedPayment independently rebuilds and signs", custodyKey[:16])
@@ -117,18 +119,18 @@ func main() {
 	if !bytes.Equal(persisted.ContentPayloadsCBOR, prepared.ContentPayloadsCBOR()) {
 		fail(fmt.Errorf("custody update dropped the exact payload bundle"))
 	}
-	if !bytes.Equal(persisted.ClaimID, prepared.ClaimID()) || persisted.ArbiterAmountSat != prepared.ArbiterAmountSat() {
+	if persisted.ArbitrationClaimID != preparedClaimID || persisted.ArbiterAmountSatoshis != prepared.ArbiterAmountSatoshis() {
 		fail(fmt.Errorf("custody update changed the Claim ID or the frozen fee"))
 	}
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		fail(err)
 	}
-	debug("[007 receipt] claim id: %s", hex.EncodeToString(receipt.ClaimID))
-	debug("[007 receipt] arbiter amount: %d satoshis", receipt.ArbiterAmountSat)
-	debug("[007 receipt] receipt cbor (%d bytes): %s", len(response.ReceiptCBOR), hex.EncodeToString(response.ReceiptCBOR))
-	debug("[007 response] arbiter transaction signature: %s", hex.EncodeToString(receipt.ArbiterTransactionSignature))
-	debug("[007 response] arbiter receipt signature: %s", hex.EncodeToString(response.ArbiterReceiptSignature))
+	debug("[007 receipt] claim id: %s", hex.EncodeToString(receipt.ArbitrationClaimID[:]))
+	debug("[007 receipt] arbiter amount: %d satoshis", receipt.ArbiterAmountSatoshis)
+	debug("[007 receipt] receipt cbor (%d bytes): %s", len(response.ArbitrationReceiptCBOR), hex.EncodeToString(response.ArbitrationReceiptCBOR))
+	debug("[007 response] arbiter transaction signature: %s", hex.EncodeToString(receipt.ArbiterPaymentTransactionSignature))
+	debug("[007 response] arbiter receipt signature: %s", hex.EncodeToString(response.ArbiterArbitrationReceiptSignature))
 	debug("[seller] seller independently rebuilds, verifies both Arbiter signatures, then signs and merges")
 	signed, err := f.Seller.CompleteArbitratedPayment(ctx, arbitrationRequest, response, blockHeight)
 	if err != nil {
@@ -136,9 +138,9 @@ func main() {
 	}
 	accepted := signed.State
 	debug("[accepted] sequence: %d", accepted.PaymentSequence)
-	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSat)
-	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSat)
-	debug("[accepted] arbiter amount: %d satoshis", accepted.ArbiterAmountSat)
+	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSatoshis)
+	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSatoshis)
+	debug("[accepted] arbiter amount: %d satoshis", accepted.ArbiterAmountSatoshis)
 	fmt.Printf("ARBITRATION_REQUEST_HEX=%s\n", hex.EncodeToString(rawRequest))
 	fmt.Printf("ARBITRATION_RESPONSE_HEX=%s\n", hex.EncodeToString(rawResponse))
 	fmt.Printf("ARBITRATED_TX_HEX=%s\n", hex.EncodeToString(signed.RawTx))

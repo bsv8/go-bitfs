@@ -10,10 +10,10 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv8/go-bitfs/bitfs"
-
 	"github.com/bsv8/go-bitfs/arbitration"
+	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 func wireTestSellerPubkey() []byte {
@@ -34,71 +34,68 @@ func wireTestBuyerPubkey() []byte {
 
 func TestPoolRefundPresignRequestTypedRoundTrip(t *testing.T) {
 	request := &pool.RefundPresignRequest{
-		Version:              pool.MajorVersion,
-		RefundTx:             []byte{1, 2, 3},
-		BuyerPubKey:          wireTestBuyerPubkey(),
-		SellerPubKey:         wireTestSellerPubkey(),
-		ArbiterPubKey:        wireTestArbiterPubkey(),
-		MinerFeeRateSatPerKB: 1,
-		BuyerRefundSignature: []byte{9},
+		RefundTemplateRaw:               []byte{1, 2, 3},
+		BuyerPublicKey:                  wireTestBuyerPubkey(),
+		SellerPublicKey:                 wireTestSellerPubkey(),
+		ArbiterPublicKey:                wireTestArbiterPubkey(),
+		MinerFeeRateSatoshisPerKilobyte: 1,
+		BuyerRefundTransactionSignature: []byte{9},
 	}
-	raw, err := MarshalPoolRefundPresignRequest(request)
+	raw, err := MarshalRefundPresignRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := UnmarshalPoolRefundPresignRequest(raw)
+	decoded, err := UnmarshalRefundPresignRequest(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.RefundTx, request.RefundTx) || decoded.MinerFeeRateSatPerKB != request.MinerFeeRateSatPerKB {
+	if !bytes.Equal(decoded.RefundTemplateRaw, request.RefundTemplateRaw) || decoded.MinerFeeRateSatoshisPerKilobyte != request.MinerFeeRateSatoshisPerKilobyte {
 		t.Fatal("presign request changed during wire round trip")
 	}
-	if _, err := Unmarshal(PoolRefundPresignRequest, append(raw, 0)); err == nil {
+	if _, err := Unmarshal(RefundPresignRequest, append(raw, 0)); err == nil {
 		t.Fatal("decoder accepted trailing bytes")
 	}
 }
 
 func TestPoolRefundPresignResponseTypedRoundTrip(t *testing.T) {
 	response := &pool.RefundPresignResponse{
-		Version:               pool.MajorVersion,
-		RefundTemplateTxID:    pool.RefundTemplateTxID(bytes.Repeat([]byte{3}, 32)),
-		SellerRefundSignature: []byte{7, 8},
+		RefundTemplateTxID:               pool.RefundTemplateTxID(bytes.Repeat([]byte{3}, 32)),
+		SellerRefundTransactionSignature: []byte{7, 8},
 	}
-	raw, err := MarshalPoolRefundPresignResponse(response)
+	raw, err := MarshalRefundPresignResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := UnmarshalPoolRefundPresignResponse(raw)
+	decoded, err := UnmarshalRefundPresignResponse(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.RefundTemplateTxID != response.RefundTemplateTxID || !bytes.Equal(decoded.SellerRefundSignature, response.SellerRefundSignature) {
+	if decoded.RefundTemplateTxID != response.RefundTemplateTxID || !bytes.Equal(decoded.SellerRefundTransactionSignature, response.SellerRefundTransactionSignature) {
 		t.Fatal("presign response changed during wire round trip")
 	}
-	if len(raw) == 0 || raw[0] != 0x84 {
-		t.Fatalf("002 presign response must be a four-element array: %x", raw)
+	if len(raw) == 0 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x03 {
+		t.Fatalf("002 presign response must be a four-element [1,3,...] array: %x", raw)
 	}
 }
 
-func TestFundingTxDeliveryTypedRoundTrip(t *testing.T) {
-	delivery := &pool.FundingTxDelivery{
-		Version:            pool.MajorVersion,
-		RefundTemplateTxID: pool.RefundTemplateTxID(bytes.Repeat([]byte{4}, 32)),
-		FundingTx:          []byte{5, 6, 7},
+func TestFundingTransactionDeliveryTypedRoundTrip(t *testing.T) {
+	delivery := &pool.FundingTransactionDelivery{
+		RefundTemplateTxID:    pool.RefundTemplateTxID(bytes.Repeat([]byte{4}, 32)),
+		FundingTransactionRaw: []byte{5, 6, 7},
 	}
-	raw, err := MarshalPoolFundingTxDelivery(delivery)
+	raw, err := MarshalFundingTransactionDelivery(delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := UnmarshalPoolFundingTxDelivery(raw)
+	decoded, err := UnmarshalFundingTransactionDelivery(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.RefundTemplateTxID != delivery.RefundTemplateTxID || !bytes.Equal(decoded.FundingTx, delivery.FundingTx) {
+	if decoded.RefundTemplateTxID != delivery.RefundTemplateTxID || !bytes.Equal(decoded.FundingTransactionRaw, delivery.FundingTransactionRaw) {
 		t.Fatal("funding delivery changed during wire round trip")
 	}
-	if len(raw) == 0 || raw[0] != 0x84 {
-		t.Fatalf("002 funding delivery must be a four-element array: %x", raw)
+	if len(raw) == 0 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x04 {
+		t.Fatalf("002 funding delivery must be a four-element [1,4,...] array: %x", raw)
 	}
 }
 
@@ -112,11 +109,11 @@ func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decodedRequest.ClaimCBOR, request.ClaimCBOR) || !bytes.Equal(decodedRequest.ContentPayloadsCBOR, request.ContentPayloadsCBOR) {
+	if !bytes.Equal(decodedRequest.ArbitrationClaimCBOR, request.ArbitrationClaimCBOR) || !bytes.Equal(decodedRequest.ContentPayloadsCBOR, request.ContentPayloadsCBOR) {
 		t.Fatal("007 request evidence changed during wire round trip")
 	}
-	if len(rawRequest) == 0 || rawRequest[0] != 0x85 || rawRequest[1] != 0x04 {
-		t.Fatalf("007 request must be [4,8,...] five-element array: %x", rawRequest)
+	if len(rawRequest) == 0 || rawRequest[0] != 0x85 || rawRequest[1] != 0x01 || rawRequest[2] != 0x08 {
+		t.Fatalf("007 request must be [1,8,...] five-element array: %x", rawRequest)
 	}
 	prepared, err := arbiter.PreparePayment(context.Background(), request, 900000, 500)
 	if err != nil {
@@ -130,41 +127,26 @@ func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rawResponse) == 0 || rawResponse[0] != 0x84 || rawResponse[1] != 0x04 || rawResponse[2] != 0x09 {
-		t.Fatalf("007 response must be a four-element [4,9,...] array starting with 0x84: %x", rawResponse)
+	if len(rawResponse) == 0 || rawResponse[0] != 0x84 || rawResponse[1] != 0x01 || rawResponse[2] != 0x09 {
+		t.Fatalf("007 response must be a four-element [1,9,...] array starting with 0x84: %x", rawResponse)
 	}
 	decodedResponse, err := UnmarshalArbitrationResponse(rawResponse)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decodedResponse.ReceiptCBOR, response.ReceiptCBOR) || !bytes.Equal(decodedResponse.ArbiterReceiptSignature, response.ArbiterReceiptSignature) {
+	if !bytes.Equal(decodedResponse.ArbitrationReceiptCBOR, response.ArbitrationReceiptCBOR) || !bytes.Equal(decodedResponse.ArbiterArbitrationReceiptSignature, response.ArbiterArbitrationReceiptSignature) {
 		t.Fatal("007 response receipt changed during wire round trip")
 	}
-	receipt, err := arbitration.UnmarshalReceipt(decodedResponse.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(decodedResponse.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.ArbiterAmountSat != 500 || len(receipt.ClaimID) != sha256.Size || len(receipt.ArbiterTransactionSignature) == 0 {
+	if receipt.ArbiterAmountSatoshis != 500 || len(receipt.ArbitrationClaimID) != sha256.Size || len(receipt.ArbiterPaymentTransactionSignature) == 0 {
 		t.Fatalf("decoded receipt is incomplete or mispriced: %+v", receipt)
-	}
-	// 旧五元 Kind 9 必须被 strict decoder 拒绝，不存在兼容解码。
-	legacyReceiptCBOR, err := arbitration.MarshalReceipt(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyFiveElement, err := canonicalGoldenMarshal([]any{
-		uint64(4), uint64(9), goldenBstr(legacyReceiptCBOR),
-		goldenBstr(bytes.Repeat([]byte{7}, 70)), goldenBstr(bytes.Repeat([]byte{8}, 70)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := UnmarshalArbitrationResponse(legacyFiveElement); err == nil {
-		t.Fatal("legacy five-element Kind 9 was accepted")
 	}
 	// Kind never carries instance identity: decoding a payload under a
 	// different kind must fail rather than silently reinterpreting it.
-	if _, err := Unmarshal(CumulativePayment, rawRequest); err == nil {
+	if _, err := Unmarshal(PaymentUpdate, rawRequest); err == nil {
 		t.Fatal("payload was decoded under an unrelated kind")
 	}
 	if _, err := Unmarshal(ArbitrationResponse, rawRequest); err == nil {
@@ -186,7 +168,7 @@ func wireArbitrationEvidence(t *testing.T) (*arbitration.ArbitrationRequest, *ar
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{BuyerPublicKey: buyerKey.PubKey().Compressed(), SellerPublicKey: sellerKey.PubKey().Compressed(), ArbiterPublicKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +179,11 @@ func wireArbitrationEvidence(t *testing.T) (*arbitration.ArbitrationRequest, *ar
 	funding := tx.NewTransaction()
 	funding.AddInput(&tx.TransactionInput{SourceTXID: zero, SequenceNumber: tx.DefaultSequenceNumber, UnlockingScript: script.NewFromBytes(nil)})
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: script.NewFromBytes(lock)})
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: buyerKey.PubKey().Compressed(), SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: buyerKey.PubKey().Compressed(), SellerPublicKey: sellerKey.PubKey().Compressed(), ArbiterPublicKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	presign, err := pool.NewBuyerPoolAdapter(engine, buyerKey).BuildRefundPresignRequest(context.Background(), pool.OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 2000000000, MinerFeeRateSatPerKB: 1, SellerPubKey: sellerKey.PubKey().Compressed(), ArbiterPubKey: arbiterKey.PubKey().Compressed()})
+	presign, err := pool.NewBuyerPoolAdapter(engine, buyerKey).BuildRefundPresignRequest(context.Background(), pool.OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: 2000000000, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: sellerKey.PubKey().Compressed(), ArbiterPublicKey: arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +205,7 @@ func wireArbitrationEvidence(t *testing.T) (*arbitration.ArbitrationRequest, *ar
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization, err := bitfs.NewSignedContentRequest(&bitfs.ContentRequestTerms{QuoteTermsHash: bytes.Repeat([]byte{1}, 32), RefundTemplateTxID: refundID[:], PaymentSequence: 3, SellerAmountAfterSat: 100, ContentHashesCBOR: hashes, DeliveryDeadlineUnix: 2000000100}, buyerKey)
+	signedAuthorization, err := bitfs.NewSignedContentRequest(&bitfs.PaymentAuthorization{FileQuoteTermsID: protocol.FileQuoteTermsID(bytes.Repeat([]byte{1}, 32)), RefundTemplateTxID: refundID[:], PaymentSequence: 3, SellerAmountAfterSatoshis: 100, ContentHashesCBOR: hashes, DeliveryDeadlineUnixSeconds: 2000000100}, buyerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,15 +213,11 @@ func wireArbitrationEvidence(t *testing.T) (*arbitration.ArbitrationRequest, *ar
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := arbitration.MarshalClaim(&arbitration.ArbitrationClaim{PoolOutputSatoshis: details.PoolOutputSatoshis, PoolOutputLockingScript: details.PoolLockingScript, RefundTemplateRaw: proof.RefundTx, TermsCBOR: authorization.TermsCBOR, BuyerSignature: authorization.BuyerSignature})
+	claim, err := arbitration.MarshalClaim(&arbitration.ArbitrationClaim{PoolOutputSatoshis: details.PoolOutputSatoshis, PoolOutputLockingScript: details.PoolLockingScript, RefundTemplateRaw: proof.RefundTemplateRaw, PaymentAuthorizationCBOR: signedAuthorization.PaymentAuthorizationCBOR, BuyerPaymentAuthorizationSignature: signedAuthorization.BuyerPaymentAuthorizationSignature})
 	if err != nil {
 		t.Fatal(err)
 	}
-	domain, err := arbitration.SellerClaimSigningCBOR(claim)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sellerSig, err := bitfs.SignMessage(sellerKey, domain)
+	sellerSig, err := protocol.SignWireDocument(sellerKey, protocol.WireVersion, 8, claim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +229,7 @@ func wireArbitrationEvidence(t *testing.T) (*arbitration.ArbitrationRequest, *ar
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, ClaimCBOR: claim, SellerClaimSignature: sellerSig, ContentPayloadsCBOR: payloadCBOR}, workflow
+	return &arbitration.ArbitrationRequest{ArbitrationClaimCBOR: claim, SellerArbitrationClaimSignature: sellerSig, ContentPayloadsCBOR: payloadCBOR}, workflow
 }
 
 func TestContentDeliveryTypedRoundTrip(t *testing.T) {
@@ -263,23 +241,23 @@ func TestContentDeliveryTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requestTerms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:       bytes.Repeat([]byte{1}, 32),
-		RefundTemplateTxID:   bytes.Repeat([]byte{2}, 32),
-		PaymentSequence:      2,
-		SellerAmountAfterSat: 10,
-		ContentHashesCBOR:    hashesCBOR,
-		DeliveryDeadlineUnix: 2_000_000_000,
+	requestTerms := &bitfs.PaymentAuthorization{
+		FileQuoteTermsID:            protocol.FileQuoteTermsID(bytes.Repeat([]byte{1}, 32)),
+		RefundTemplateTxID:          bytes.Repeat([]byte{2}, 32),
+		PaymentSequence:             2,
+		SellerAmountAfterSatoshis:   10,
+		ContentHashesCBOR:           hashesCBOR,
+		DeliveryDeadlineUnixSeconds: 2_000_000_000,
 	}
 	signedRequest, err := bitfs.NewSignedContentRequest(requestTerms, wireTestBuyerKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(signedRequest.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(signedRequest.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(authHash[:], [][]byte{[]byte("payload")}, sellerKey)
+	delivery, err := bitfs.NewSignedContentDelivery(authID, [][]byte{[]byte("payload")}, sellerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,13 +269,13 @@ func TestContentDeliveryTypedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.PaymentAuthorizationHash, delivery.PaymentAuthorizationHash) || !bytes.Equal(decoded.SellerPaymentAuthorizationHashSignature, delivery.SellerPaymentAuthorizationHashSignature) || !bytes.Equal(decoded.ContentPayloadsCBOR, delivery.ContentPayloadsCBOR) {
+	if !bytes.Equal(decoded.ContentDeliveryCBOR, delivery.ContentDeliveryCBOR) || !bytes.Equal(decoded.SellerContentDeliverySignature, delivery.SellerContentDeliverySignature) || !bytes.Equal(decoded.ContentPayloadsCBOR, delivery.ContentPayloadsCBOR) {
 		t.Fatal("content delivery changed during wire round trip")
 	}
-	// The 004 shell must be a four-element array led by version 4 and must
-	// not repeat the pool correlation ID.
-	if len(raw) == 0 || raw[0] != 0x84 {
-		t.Fatalf("004 must be a four-element array: %x", raw)
+	// The Kind 6 shell must be a five-element array led by [1, 6] and the
+	// payload attachment stays outside the signed document.
+	if len(raw) == 0 || raw[0] != 0x85 || raw[1] != 0x01 || raw[2] != 0x06 {
+		t.Fatalf("004 must be a five-element [1,6,...] array: %x", raw)
 	}
 	if _, err := Unmarshal(ContentDelivery, append(raw, 0)); err == nil {
 		t.Fatal("decoder accepted trailing bytes")
@@ -313,88 +291,79 @@ func wireTestBuyerKey(t *testing.T) *ec.PrivateKey {
 	return key
 }
 
-func TestArbitrationContentMessagesTypedRoundTrip(t *testing.T) {
-	request, arbiter := wireArbitrationEvidence(t)
-	claimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
+func TestContentRetrievalMessagesTypedRoundTrip(t *testing.T) {
+	request, _ := wireArbitrationEvidence(t)
+	claimID, err := arbitration.ArbitrationClaimID(request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	exactKind8, err := MarshalArbitrationRequest(request)
+	retrievalRequest, err := arbitration.NewContentRetrievalRequest(claimID, bytes.Repeat([]byte{0x71}, 32), wireTestBuyerKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := arbiter.PreparePayment(context.Background(), request, 900000, 500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := arbiter.SignPreparedPayment(context.Background(), prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	exactKind9, err := MarshalArbitrationResponse(response)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retrievalResponseStruct, err := arbitration.BuildContentRetrievalResponse(exactKind8, exactKind9)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw11, err := Marshal(ArbitrationContentResponse, retrievalResponseStruct)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	signingDomain, err := arbitration.BuyerRetrievalSigningCBOR(claimID, bytes.Repeat([]byte{0x71}, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	buyerSig, err := bitfs.SignMessage(wireTestBuyerKey(t), signingDomain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retrievalRequest := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), claimID...), Nonce: bytes.Repeat([]byte{0x71}, 32), BuyerSignature: buyerSig}
-	rawPacket10, err := Marshal(ArbitrationContentRequest, retrievalRequest)
+	rawPacket10, err := Marshal(ContentRetrievalRequest, retrievalRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw10 := rawPacket10.CBOR
-	if len(raw10) == 0 || raw10[0] != 0x85 || raw10[1] != 0x04 || raw10[2] != 0x0a {
-		t.Fatalf("Kind 10 must be a five-element [4,10,...] array: %x", raw10)
-	}
-	if len(raw11.CBOR) == 0 || raw11.CBOR[0] != 0x84 || raw11.CBOR[1] != 0x04 || raw11.CBOR[2] != 0x0b {
-		t.Fatalf("Kind 11 must be a four-element [4,11,...] array: %x", raw11.CBOR)
+	if len(raw10) == 0 || raw10[0] != 0x84 || raw10[1] != 0x01 || raw10[2] != 0x0a {
+		t.Fatalf("Kind 10 must be a four-element [1,10,...] array: %x", raw10)
 	}
 
-	decoded10, err := Unmarshal(ArbitrationContentRequest, raw10)
+	requestIDHash := sha256.Sum256(retrievalRequest.ContentRetrievalRequestCBOR)
+	unavailable, err := arbitration.BuildContentRetrievalUnavailable(protocol.ContentRetrievalRequestID(requestIDHash), arbitration.RetrievalSellerArbitrationNotReceived, mustArbiterKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw11Unavailable, err := Marshal(ContentRetrievalResponse, unavailable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw11Unavailable.CBOR) == 0 || raw11Unavailable.CBOR[0] != 0x84 || raw11Unavailable.CBOR[1] != 0x01 || raw11Unavailable.CBOR[2] != 0x0b {
+		t.Fatalf("unavailable Kind 11 must be a four-element [1,11,...] array: %x", raw11Unavailable.CBOR)
+	}
+	available, err := arbitration.BuildContentRetrievalAvailable(protocol.ContentRetrievalRequestID(requestIDHash), [][]byte{[]byte("payload")}, mustArbiterKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw11Available, err := Marshal(ContentRetrievalResponse, available)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw11Available.CBOR) == 0 || raw11Available.CBOR[0] != 0x85 || raw11Available.CBOR[1] != 0x01 || raw11Available.CBOR[2] != 0x0b {
+		t.Fatalf("available Kind 11 must be a five-element [1,11,...] array: %x", raw11Available.CBOR)
+	}
+
+	decoded10, err := Unmarshal(ContentRetrievalRequest, raw10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	typed10, ok := decoded10.(*arbitration.ContentRetrievalRequest)
-	if !ok || !bytes.Equal(typed10.ClaimID, claimID) || !bytes.Equal(typed10.Nonce, retrievalRequest.Nonce) || !bytes.Equal(typed10.BuyerSignature, buyerSig) {
+	if !ok || !bytes.Equal(typed10.ContentRetrievalRequestCBOR, retrievalRequest.ContentRetrievalRequestCBOR) || !bytes.Equal(typed10.BuyerContentRetrievalRequestSignature, retrievalRequest.BuyerContentRetrievalRequestSignature) {
 		t.Fatal("Kind 10 typed round trip changed fields")
 	}
-	decoded11, err := Unmarshal(ArbitrationContentResponse, raw11.CBOR)
+	decoded11, err := Unmarshal(ContentRetrievalResponse, raw11Available.CBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	typed11, ok := decoded11.(*arbitration.ContentRetrievalResponse)
-	if !ok || !bytes.Equal(typed11.ArbitrationRequestCBOR, exactKind8) || !bytes.Equal(typed11.ArbitrationResponseCBOR, exactKind9) {
-		t.Fatal("embedded Kind 8/9 exact bytes did not survive the Kind 11 round trip")
+	if !ok || !bytes.Equal(typed11.ContentRetrievalResultCBOR, available.ContentRetrievalResultCBOR) || !bytes.Equal(typed11.ContentPayloadsCBOR, available.ContentPayloadsCBOR) {
+		t.Fatal("Kind 11 typed round trip changed fields")
 	}
 
 	// 错误 Go 类型必须被拒绝。
-	if _, err := Marshal(ArbitrationContentRequest, response); err == nil {
+	if _, err := Marshal(ContentRetrievalRequest, unavailable); err == nil {
 		t.Fatal("wire kind 10 accepted a foreign Go type")
 	}
-	if _, err := Marshal(ArbitrationContentResponse, retrievalRequest); err == nil {
+	if _, err := Marshal(ContentRetrievalResponse, retrievalRequest); err == nil {
 		t.Fatal("wire kind 11 accepted a foreign Go type")
 	}
 
 	// transport Kind 必须与 CBOR 本体第二项一致：贴错一律失败。
-	if _, err := Unmarshal(ArbitrationContentResponse, raw10); err == nil {
+	if _, err := Unmarshal(ContentRetrievalResponse, raw10); err == nil {
 		t.Fatal("Kind 10 body decoded as Kind 11")
 	}
-	if _, err := Unmarshal(ArbitrationContentRequest, raw11.CBOR); err == nil {
+	if _, err := Unmarshal(ContentRetrievalRequest, raw11Available.CBOR); err == nil {
 		t.Fatal("Kind 11 body decoded as Kind 10")
 	}
 	// 8/9/10/11 交叉解码全部拒绝。
@@ -404,16 +373,18 @@ func TestArbitrationContentMessagesTypedRoundTrip(t *testing.T) {
 	if _, err := Unmarshal(ArbitrationResponse, raw10); err == nil {
 		t.Fatal("Kind 10 body decoded as Kind 9")
 	}
-	if _, err := Unmarshal(ArbitrationRequest, raw11.CBOR); err == nil {
+	if _, err := Unmarshal(ArbitrationRequest, raw11Available.CBOR); err == nil {
 		t.Fatal("Kind 11 body decoded as Kind 8")
 	}
-	if _, err := Unmarshal(ArbitrationResponse, raw11.CBOR); err == nil {
+	if _, err := Unmarshal(ArbitrationResponse, raw11Available.CBOR); err == nil {
 		t.Fatal("Kind 11 body decoded as Kind 9")
 	}
-	if _, err := Unmarshal(ArbitrationContentRequest, exactKind9); err == nil {
-		t.Fatal("Kind 9 body decoded as Kind 10")
+}
+
+func mustArbiterKey() *ec.PrivateKey {
+	key, err := ec.PrivateKeyFromHex("3333333333333333333333333333333333333333333333333333333333333333")
+	if err != nil {
+		panic(err)
 	}
-	if _, err := Unmarshal(ArbitrationContentResponse, exactKind8); err == nil {
-		t.Fatal("Kind 8 body decoded as Kind 11")
-	}
+	return key
 }

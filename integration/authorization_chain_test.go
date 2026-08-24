@@ -1,5 +1,6 @@
-// 授权链一致性测试：同一张 003 在 004、005、007 中必须携带完全相同的授权哈希
-// （SHA-256(TermsCBOR)），并且买方在任何未通过完整证据验证的 003 上绝不产生 005。
+// 授权链一致性测试：同一张 003 在 004、005、007 中必须携带完全相同的
+// PaymentAuthorizationID（SHA-256(exact payment_authorization_cbor)），
+// 并且买方在任何未通过完整证据验证的 003 上绝不产生 005。
 package integration
 
 import (
@@ -14,6 +15,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
 )
 
@@ -24,9 +26,10 @@ func chainSeedRequestInput(f *protocolFixture) buyer.ContentRequestInput {
 	}
 }
 
-// 同一授权在 004 交付包、005 更新与 007 响应中的哈希必须逐字节相等，且都等于
-// SHA-256(003 TermsCBOR)；完整 003 外壳的哈希不是授权哈希。
-func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
+// 同一授权在 004 交付包、005 更新与 007 响应中的 ID 必须逐字节相等，且都等于
+// PaymentAuthorizationID = SHA-256(exact payment_authorization_cbor)；
+// 完整 003 外壳或 file_quote_terms_cbor 的哈希都不是付款授权 ID。
+func TestAuthorizationIDIdenticalAcross004005And007(t *testing.T) {
 	f := newProtocolFixture(t)
 	f.openMainPool(t)
 	opening := f.completed.Opening
@@ -54,7 +57,7 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts(), arbitrationFeeSat)
+	prepared, err := f.arbiter.PreparePayment(f.ctx, arbitrationRequest, f.facts(), arbitrationFeeSatoshis)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,54 +66,59 @@ func TestAuthorizationHashIdenticalAcross004005And007(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(delivery.PaymentAuthorizationHash, authHash[:]) {
-		t.Fatal("004 carries an authorization hash other than SHA-256(TermsCBOR)")
+	deliveryBoundID, err := bitfs.DecodeContentDeliveryDocument(delivery.ContentDeliveryCBOR)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(verified.Update.PaymentAuthorizationHash, authHash[:]) {
-		t.Fatal("005 carries an authorization hash other than SHA-256(TermsCBOR)")
+	if deliveryBoundID != authID {
+		t.Fatal("004 content_delivery_cbor binds an ID other than SHA-256(payment_authorization_cbor)")
+	}
+	if verified.Update.PaymentAuthorizationID != authID {
+		t.Fatal("005 carries an authorization ID other than SHA-256(payment_authorization_cbor)")
 	}
 	rawUpdate, err := pool.EncodePaymentUpdate(verified.Update)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rawUpdate) == 0 || rawUpdate[0] != 0x83 {
-		t.Fatalf("minimal 005 must be a three-element array without pool ID or raw transaction: %x", rawUpdate)
+	if len(rawUpdate) == 0 || rawUpdate[0] != 0x84 {
+		t.Fatalf("minimal Kind 7 must be a four-element array without pool ID or raw transaction: %x", rawUpdate)
 	}
-	if signedPayment.State.PaymentAuthorizationHash != pool.Hash32(authHash) {
-		t.Fatal("accepted payment state carries a foreign authorization hash")
+	if signedPayment.State.PaymentAuthorizationID != authID {
+		t.Fatal("accepted payment state carries a foreign PaymentAuthorizationID")
 	}
-	// Claim ID 是 Kind 9 的身份绑定：它必须等于 SHA-256([4,8,exact_claim_cbor])
-	// 且绝不冒充 003 授权哈希 SHA-256(TermsCBOR)。
-	localClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ClaimCBOR)
+	// ArbitrationClaimID 是 Kind 9 的身份绑定：
+	// ArbitrationClaimID = SHA-256(exact arbitration_claim_cbor)，
+	// 且绝不冒充 PaymentAuthorizationID = SHA-256(exact payment_authorization_cbor)。
+	localClaimID, err := arbitration.ArbitrationClaimID(arbitrationRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	preparedClaimID := prepared.ClaimID()
-	if !bytes.Equal(preparedClaimID, localClaimID) {
+	preparedClaimID := prepared.ArbitrationClaimID()
+	if preparedClaimID != localClaimID {
 		t.Fatal("prepared payment Claim ID does not match the independently computed Claim ID")
 	}
-	if bytes.Equal(preparedClaimID, authHash[:]) {
+	if preparedClaimID == protocol.ArbitrationClaimID(authID) {
 		t.Fatal("Claim ID must never impersonate the payment authorization hash")
 	}
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(receipt.ClaimID, localClaimID) || receipt.ArbiterAmountSat != arbitrationFeeSat {
+	if receipt.ArbitrationClaimID != localClaimID || receipt.ArbiterAmountSatoshis != arbitrationFeeSatoshis {
 		t.Fatal("007 receipt does not bind the exact Claim ID and the frozen positive fee")
 	}
 	shellHash := sha256.Sum256(mustEncodeChainRequest(t, request))
-	if bytes.Equal(localClaimID, shellHash[:]) {
+	if localClaimID == protocol.ArbitrationClaimID(shellHash) {
 		t.Fatal("007 used the full SignedContentRequest shell hash as the Claim ID")
 	}
 }
 
 // 买方在未通过完整证据验证的 003 上绝不能生成 005：篡改买方签名、攻击者自签
-// 授权、伪造报价（错误 QuoteTermsHash）与不在白名单内的仲裁人都必须在 payload
+// 授权、伪造报价（错误 FileQuoteTermsID）与不在白名单内的仲裁人都必须在 payload
 // 校验之前被拒绝。
 func TestAcceptDeliveryRejectsUnverifiedAuthorizationWithoutProducingUpdate(t *testing.T) {
 	f := newProtocolFixture(t)
@@ -129,19 +137,19 @@ func TestAcceptDeliveryRejectsUnverifiedAuthorizationWithoutProducingUpdate(t *t
 	}
 
 	tampered := &bitfs.SignedContentRequest{
-		TermsCBOR:      append([]byte(nil), request.TermsCBOR...),
-		BuyerSignature: append([]byte(nil), request.BuyerSignature...),
+		PaymentAuthorizationCBOR:           append([]byte(nil), request.PaymentAuthorizationCBOR...),
+		BuyerPaymentAuthorizationSignature: append([]byte(nil), request.BuyerPaymentAuthorizationSignature...),
 	}
-	tampered.BuyerSignature[0] ^= 0xff
+	tampered.BuyerPaymentAuthorizationSignature[0] ^= 0xff
 	forge := forgeChainAuthorization(t, f, opening, previous)
 
-	wrongPriceQuote := mustResignedQuote(t, f, func(terms *bitfs.FileQuoteTerms) { terms.SeedPriceSat += 7 })
+	wrongPriceQuote := mustResignedQuote(t, f, func(terms *bitfs.FileQuoteTerms) { terms.SeedPriceSatoshis += 7 })
 	noArbiterQuote := mustResignedQuote(t, f, func(terms *bitfs.FileQuoteTerms) {
-		arbiters, err := bitfs.EncodeSupportedArbiterPubkeys(nil)
+		arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		terms.SupportedArbiterPubkeysCBOR = arbiters
+		terms.SupportedArbiterPublicKeysCBOR = arbiters
 	})
 
 	cases := []struct {
@@ -151,7 +159,7 @@ func TestAcceptDeliveryRejectsUnverifiedAuthorizationWithoutProducingUpdate(t *t
 	}{
 		{"tampered buyer signature", tampered, f.quote},
 		{"authorization not signed by this buyer", forge, f.quote},
-		{"forged quote with foreign terms hash", request, wrongPriceQuote},
+		{"forged quote with foreign FileQuoteTermsID", request, wrongPriceQuote},
 		{"arbiter outside the resigned whitelist", request, noArbiterQuote},
 	}
 	for _, tc := range cases {
@@ -173,7 +181,7 @@ func TestBuildContentRequestRejectsExpiredQuoteAndDeadlineBeyondExpiry(t *testin
 	f.openMainPool(t)
 
 	expiredQuote := mustResignedQuote(t, f, func(terms *bitfs.FileQuoteTerms) {
-		terms.QuoteExpiresAtUnix = time.Now().UTC().Add(-time.Hour).Unix()
+		terms.QuoteExpiresAtUnixSeconds = time.Now().UTC().Add(-time.Hour).Unix()
 	})
 	input := chainSeedRequestInput(f)
 	if _, err := f.buyer.BuildContentRequest(f.ctx, expiredQuote, f.completed.Opening, f.completed.InitialPayment, input); !errors.Is(err, bitfs.ErrQuoteExpired) {
@@ -191,7 +199,7 @@ func TestBuildContentRequestRejectsExpiredQuoteAndDeadlineBeyondExpiry(t *testin
 
 func forgeChainAuthorization(t *testing.T, f *protocolFixture, opening *pool.OpeningProof, previous *pool.PaymentState) *bitfs.SignedContentRequest {
 	t.Helper()
-	quoteHash, err := bitfs.FileQuoteTermsHash(f.quote.TermsCBOR)
+	quoteID, err := bitfs.FileQuoteTermsID(f.quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,13 +211,13 @@ func forgeChainAuthorization(t *testing.T, f *protocolFixture, opening *pool.Ope
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms := &bitfs.ContentRequestTerms{
-		QuoteTermsHash:       quoteHash[:],
-		RefundTemplateTxID:   details.RefundTemplateTxID[:],
-		PaymentSequence:      previous.PaymentSequence + 1,
-		SellerAmountAfterSat: previous.SellerAmountSat + 100,
-		ContentHashesCBOR:    hashesCBOR,
-		DeliveryDeadlineUnix: f.now.Add(30 * time.Minute).Unix(),
+	terms := &bitfs.PaymentAuthorization{
+		FileQuoteTermsID:            quoteID,
+		RefundTemplateTxID:          details.RefundTemplateTxID[:],
+		PaymentSequence:             previous.PaymentSequence + 1,
+		SellerAmountAfterSatoshis:   previous.SellerAmountSatoshis + 100,
+		ContentHashesCBOR:           hashesCBOR,
+		DeliveryDeadlineUnixSeconds: f.now.Add(30 * time.Minute).Unix(),
 	}
 	attackerKey := integrationKey(t, "99")
 	forged, err := bitfs.NewSignedContentRequest(terms, attackerKey)
@@ -221,7 +229,7 @@ func forgeChainAuthorization(t *testing.T, f *protocolFixture, opening *pool.Ope
 
 func mustResignedQuote(t *testing.T, f *protocolFixture, mutate func(*bitfs.FileQuoteTerms)) *bitfs.SignedFileQuote {
 	t.Helper()
-	terms, err := bitfs.DecodeFileQuoteTerms(f.quote.TermsCBOR)
+	terms, err := bitfs.DecodeFileQuoteTerms(f.quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +252,7 @@ func mustEncodeChainRequest(t *testing.T, request *bitfs.SignedContentRequest) [
 
 // TestClaimIDBindsSeller007AndBuyer008ButIsNotTheAuthHash proves one Claim ID
 // simultaneously routes the Seller's Kind 8 custody record and the Buyer's
-// Kind 10 retrieval, while never impersonating PaymentAuthorizationHash.
+// Kind 10 retrieval, while never impersonating PaymentAuthorizationID.
 // The Kind 10 signature authorizes exactly one Claim ID + nonce pair.
 func TestClaimIDBindsSeller007AndBuyer008ButIsNotTheAuthHash(t *testing.T) {
 	f := newProtocolFixture(t)
@@ -258,11 +266,11 @@ func TestClaimIDBindsSeller007AndBuyer008ButIsNotTheAuthHash(t *testing.T) {
 	rawKind8, _ := store.runCustodyThroughKind9(t, f, request003)
 	claimID := mustClaimIDOf(t, rawKind8)
 
-	authHash, err := bitfs.PaymentAuthorizationHash(request003.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(request003.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(claimID, authHash[:]) {
+	if claimID == protocol.ArbitrationClaimID(authID) {
 		t.Fatal("Claim ID must not equal the payment authorization hash")
 	}
 
@@ -270,50 +278,59 @@ func TestClaimIDBindsSeller007AndBuyer008ButIsNotTheAuthHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(retrievalRequest.ClaimID, claimID) {
+	routingClaimID, _, err := arbitration.DecodeContentRetrievalRequestDocument(retrievalRequest.ContentRetrievalRequestCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestIDHash := sha256.Sum256(retrievalRequest.ContentRetrievalRequestCBOR)
+	if routingClaimID != claimID {
 		t.Fatal("Buyer 008 routing ID differs from the Seller 007 Claim ID")
 	}
 	rawKind10, err := arbitration.MarshalContentRetrievalRequest(retrievalRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter)
+	rawKind11, err := store.handleContentRetrieval(rawKind10, f.arbiter, f.arbiterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Kind 10 签名只授权一个 (ClaimID, Nonce)：跨 nonce 重放被拒绝。
-	sameSigOtherNonce := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), retrievalRequest.ClaimID...), Nonce: bytes.Repeat([]byte{0x32}, 32), BuyerSignature: append([]byte(nil), retrievalRequest.BuyerSignature...)}
-	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, sameSigOtherNonce), f.arbiter); !errors.Is(err, errRetrievalUnauthorized) {
+	replayDoc, err := arbitration.EncodeContentRetrievalRequestDocument(routingClaimID, bytes.Repeat([]byte{0x32}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameSigOtherNonce := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: replayDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), retrievalRequest.BuyerContentRetrievalRequestSignature...)}
+	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, sameSigOtherNonce), f.arbiter, f.arbiterKey); !errors.Is(err, errRetrievalUnauthorized) {
 		t.Fatalf("cross-nonce replay error = %v", err)
 	}
 
-	// Kind 11 payload 绑定链：Claim ID -> TermsCBOR -> ordered hashes ->
+	// Kind 11 payload 绑定链：Claim ID -> FileQuoteTermsCBOR -> ordered hashes ->
 	// payload SHA-256 必须完整成立。
 	response11, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
 	if err != nil {
 		t.Fatal(err)
 	}
-	storedRequest, err := arbitration.UnmarshalRequest(response11.ArbitrationRequestCBOR)
+	verifiedResult, err := arbitration.VerifyContentRetrievalResponse(retrievalRequest, f.completed.Opening.ArbiterPublicKey, response11)
+	if err != nil {
+		t.Fatalf("Kind 11 failed verification against the buyer request: %v", err)
+	}
+	if verifiedResult.ContentRetrievalRequestID != protocol.ContentRetrievalRequestID(requestIDHash) {
+		t.Fatal("Kind 11 does not answer the exact buyer request")
+	}
+	storedRequest, err := arbitration.UnmarshalRequest(rawKind8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	storedResponse, err := arbitration.UnmarshalResponse(response11.ArbitrationResponseCBOR)
+	payloads, err := bitfs.DecodeContentPayloads(verifiedResult.PayloadsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := arbitration.VerifyCustodiedContent(storedRequest, storedResponse)
+	decodedClaim, err := arbitration.UnmarshalClaim(storedRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(verified.ClaimID, claimID) {
-		t.Fatal("verified chain does not terminate at the routed Claim ID")
-	}
-	decodedClaim, err := arbitration.UnmarshalClaim(storedRequest.ClaimCBOR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentTerms, err := bitfs.DecodeContentRequestTerms(decodedClaim.TermsCBOR)
+	contentTerms, err := bitfs.DecodePaymentAuthorization(decodedClaim.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +338,8 @@ func TestClaimIDBindsSeller007AndBuyer008ButIsNotTheAuthHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := range verified.Payloads {
-		digest := sha256.Sum256(verified.Payloads[index])
+	for index := range payloads {
+		digest := sha256.Sum256(payloads[index])
 		if !bytes.Equal(digest[:], hashes[index]) {
 			t.Fatalf("payload binding broken at item #%d", index+1)
 		}
@@ -349,7 +366,7 @@ func TestKind10CannotReplayAcrossClaims(t *testing.T) {
 	rawFirst, _ := store.runCustodyThroughKind9(t, f, first003)
 	rawSecond, _ := store.runCustodyThroughKind9(t, f, second003)
 	claimIDA, claimIDB := mustClaimIDOf(t, rawFirst), mustClaimIDOf(t, rawSecond)
-	if bytes.Equal(claimIDA, claimIDB) {
+	if claimIDA == claimIDB {
 		t.Fatal("test premise broken: two claims share one ID")
 	}
 
@@ -358,8 +375,12 @@ func TestKind10CannotReplayAcrossClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	crossClaim := &arbitration.ContentRetrievalRequest{Version: arbitration.MajorVersion, ClaimID: append([]byte(nil), claimIDB...), Nonce: append([]byte(nil), nonce...), BuyerSignature: append([]byte(nil), requestForA.BuyerSignature...)}
-	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, crossClaim), f.arbiter); !errors.Is(err, errRetrievalUnauthorized) {
+	crossDoc, err := arbitration.EncodeContentRetrievalRequestDocument(claimIDB, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossClaim := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), requestForA.BuyerContentRetrievalRequestSignature...)}
+	if _, err := store.handleContentRetrieval(mustMarshalKind10(t, crossClaim), f.arbiter, f.arbiterKey); !errors.Is(err, errRetrievalUnauthorized) {
 		t.Fatalf("cross-claim replay error = %v", err)
 	}
 }

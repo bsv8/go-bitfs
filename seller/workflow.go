@@ -13,6 +13,7 @@ import (
 	"github.com/bsv8/go-bitfs/bitfs"
 	"github.com/bsv8/go-bitfs/internal/refundlock"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // WorkflowConfig supplies the seller official BSV private key. It intentionally
@@ -22,6 +23,7 @@ import (
 type WorkflowConfig struct {
 	// PrivateKey is the caller-parsed official BSV Go SDK private key. It
 	// never enters any wire message, local result, log, or persisted structure.
+	// 调用方解析好的官方 BSV 私钥；绝不进入任何 wire 报文、本地结果或日志。
 	PrivateKey *ec.PrivateKey
 }
 
@@ -39,21 +41,26 @@ type Workflow struct {
 // Response, because later steps (0205, arbitration) need it again.
 type SellerPresignResult struct {
 	// Response is the signed 0202 refund-presign response (wire message).
+	// 待发送的 Kind 3 预签响应 wire 报文。
 	Response *pool.RefundPresignResponse
 	// Opening is the seller-local presign evidence (not yet funded).
+	// 卖方本地预签证据（尚未注资）；必须先保存 Opening 再发送 Response。
 	Opening *pool.OpeningProof
 }
 
 // PoolFundingAcceptance is the composite result of AcceptPoolFunding.
 type PoolFundingAcceptance struct {
-	// Opening is the complete opening proof including the delivered FundingTx.
+	// Opening is the complete opening proof including the delivered FundingTransactionRaw.
+	// 含已交付 FundingTransactionRaw 的完整开池证明（应用需保存）。
 	Opening *pool.OpeningProof
 	// InitialPayment is the initial refund payment state parsed from the
 	// merged refund transaction; the application saves it as local state.
+	// 从合并退款交易解析出的初始付款状态；应用作为本地状态保存。
 	InitialPayment *pool.PaymentState
-	// FundingTx repeats the verified funding transaction bytes for the
+	// FundingTransactionRaw repeats the verified funding transaction bytes for the
 	// application to broadcast through its own node adapter.
-	FundingTx []byte
+	// 已验证资金交易字节的原样副本；由应用经自己的节点适配器广播。
+	FundingTransactionRaw []byte
 }
 
 // ContentDeliveryState is the lock-free local role state returned by
@@ -66,14 +73,17 @@ type PoolFundingAcceptance struct {
 // semantics and never duplicates base-state values.
 type ContentDeliveryState struct {
 	// RefundTemplateTxID identifies the pool this delivery belongs to.
+	// 标识本交付所属费用池的统一关联 ID（按交易 TxID 算法派生）。
 	RefundTemplateTxID pool.RefundTemplateTxID
-	// PaymentAuthorizationHash is the SHA-256 of the signed 003 terms CBOR.
-	PaymentAuthorizationHash pool.Hash32
+	// PaymentAuthorizationID is the SHA-256 of the exact payment authorization CBOR.
+	// 付款授权 ID = SHA-256(exact payment_authorization_cbor)，应用查找键。
+	PaymentAuthorizationID protocol.PaymentAuthorizationID
 	// PaymentSequence is this batch's target payment state sequence.
+	// 本批次的目标付款状态序号（= 前一状态 + 1）。
 	PaymentSequence uint32
-	// SellerAmountAfterSat is the absolute cumulative seller amount after the
-	// authorized batch payment.
-	SellerAmountAfterSat uint64
+	// SellerAmountAfterSatoshis is the absolute cumulative seller amount after the
+	// authorized batch payment. 授权批次付款后的卖方绝对累计金额（单位 satoshi）。
+	SellerAmountAfterSatoshis uint64
 }
 
 // NewWorkflow validates the seller private key and returns a stateless workflow.
@@ -88,7 +98,7 @@ func (workflow *Workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoo
 	if proof == nil {
 		return nil, fmt.Errorf("%w: opening proof is required", pool.ErrInvalidEvidence)
 	}
-	return pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey})
+	return pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey})
 }
 
 // verifySellerOwnsOpening binds caller-supplied opening evidence to the
@@ -102,7 +112,7 @@ func (workflow *Workflow) verifySellerOwnsOpening(_ context.Context, proof *pool
 	if proof == nil {
 		return fmt.Errorf("%w: opening proof is required", pool.ErrInvalidEvidence)
 	}
-	if !bytes.Equal(workflow.publicKey, proof.SellerPubKey) {
+	if !bytes.Equal(workflow.publicKey, proof.SellerPublicKey) {
 		return fmt.Errorf("%w: workflow key does not match opening seller", pool.ErrInvalidEvidence)
 	}
 	return nil
@@ -115,7 +125,7 @@ func (workflow *Workflow) verifySellerOwnsRequest(_ context.Context, request *po
 	if request == nil {
 		return fmt.Errorf("%w: refund presign request is required", pool.ErrInvalidEvidence)
 	}
-	if !bytes.Equal(workflow.publicKey, request.SellerPubKey) {
+	if !bytes.Equal(workflow.publicKey, request.SellerPublicKey) {
 		return fmt.Errorf("%w: workflow key does not match refund request seller", pool.ErrInvalidEvidence)
 	}
 	return nil
@@ -134,20 +144,24 @@ func checkSellerPoolNotExpired(opening *pool.OpeningProof, at time.Time, blockHe
 	return nil
 }
 
-// CreateQuote signs deterministic 001 quote terms using system UTC read once
-// at entry and returns the complete credential. Saving it is the application's
-// job. The recommended filename is display metadata and is not part of the
-// signature.
+// CreateQuote signs the deterministic Kind 1 quote terms using system UTC read
+// once at entry and returns the complete credential. Saving it is the
+// application's job. The recommended filename is seller-supplied content
+// description: it is sanitized first, then folded into the signed terms, so
+// different filenames yield different file_quote_terms_id values.
 func (workflow *Workflow) CreateQuote(_ context.Context, draft bitfs.FileQuoteTerms, recommendedFilename string) (*bitfs.SignedFileQuote, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
 	draft = cloneFileQuoteTermsSeller(&draft)
+	// Seller 先 sanitize，再编码与签名：验证入口要求条款中的文件名已满足
+	// 唯一的 sanitize 规则。
+	draft.RecommendedFilename = bitfs.SanitizeRecommendedFilename(recommendedFilename)
 	at := time.Now().UTC()
 	if err := bitfs.ValidateFileQuoteTerms(&draft); err != nil {
 		return nil, err
 	}
-	if !at.Before(time.Unix(draft.QuoteExpiresAtUnix, 0)) {
+	if !at.Before(time.Unix(draft.QuoteExpiresAtUnixSeconds, 0)) {
 		return nil, fmt.Errorf("%w: file quote is expired", bitfs.ErrQuoteExpired)
 	}
 	quote, err := bitfs.NewSignedFileQuote(&draft, workflow.privateKey, recommendedFilename)
@@ -176,7 +190,7 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 	if err := workflow.verifySellerOwnsRequest(ctx, request); err != nil {
 		return nil, err
 	}
-	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPubKey: request.BuyerPubKey, SellerPubKey: request.SellerPubKey, ArbiterPubKey: request.ArbiterPubKey})
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: request.BuyerPublicKey, SellerPublicKey: request.SellerPublicKey, ArbiterPublicKey: request.ArbiterPublicKey})
 	if err != nil {
 		return nil, err
 	}
@@ -192,45 +206,45 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 	if err != nil {
 		return nil, err
 	}
-	response := &pool.RefundPresignResponse{Version: pool.MajorVersion, RefundTemplateTxID: refundTemplateTxID, SellerRefundSignature: append([]byte(nil), proof.SellerRefundSignature...)}
+	response := &pool.RefundPresignResponse{RefundTemplateTxID: refundTemplateTxID, SellerRefundTransactionSignature: append([]byte(nil), proof.SellerRefundTransactionSignature...)}
 	return &SellerPresignResult{Response: response, Opening: proof}, nil
 }
 
 // AcceptPoolFunding verifies a 0204 funding delivery against the explicitly
 // supplied seller presign evidence, completes the opening proof, and computes
-// the initial refund state. The application broadcasts the returned FundingTx
+// the initial refund state. The application broadcasts the returned FundingTransactionRaw
 // through its own node adapter and persists Opening and InitialPayment; the
 // SDK submits nothing and accepts nothing on the network's behalf.
-func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTxDelivery) (*PoolFundingAcceptance, error) {
+func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTransactionDelivery) (*PoolFundingAcceptance, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
-	delivery = pool.CloneFundingTxDelivery(delivery)
-	if err := pool.ValidateFundingTxDelivery(delivery); err != nil {
+	delivery = pool.CloneFundingTransactionDelivery(delivery)
+	if err := pool.ValidateFundingTransactionDelivery(delivery); err != nil {
 		return nil, err
 	}
 	proof := pool.CloneOpeningProof(presignProof)
 	if err := workflow.verifySellerOwnsOpening(ctx, proof); err != nil {
 		return nil, err
 	}
-	if _, err := pool.ParseCanonicalTransaction(delivery.FundingTx); err != nil {
+	if _, err := pool.ParseCanonicalTransaction(delivery.FundingTransactionRaw); err != nil {
 		return nil, err
 	}
 	engine, err := workflow.engineFor(proof)
 	if err != nil {
 		return nil, err
 	}
-	derivedRefundTemplateTxID, err := engine.TransactionID(proof.RefundTx)
+	derivedRefundTemplateTxID, err := engine.TransactionID(proof.RefundTemplateRaw)
 	if err != nil {
 		return nil, err
 	}
 	if (pool.RefundTemplateTxID(derivedRefundTemplateTxID)) != delivery.RefundTemplateTxID {
 		return nil, fmt.Errorf("%w: delivery correlation ID does not match supplied opening proof", pool.ErrInvalidEvidence)
 	}
-	if err := engine.VerifyFundingTx(ctx, delivery.FundingTx, proof); err != nil {
+	if err := engine.VerifyFundingTx(ctx, delivery.FundingTransactionRaw, proof); err != nil {
 		return nil, err
 	}
-	proof.FundingTx = append([]byte(nil), delivery.FundingTx...)
+	proof.FundingTransactionRaw = append([]byte(nil), delivery.FundingTransactionRaw...)
 	if err := engine.VerifyOpening(proof); err != nil {
 		return nil, err
 	}
@@ -245,7 +259,7 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *p
 	if err := engine.VerifyAcceptedPayment(initial, proof); err != nil {
 		return nil, fmt.Errorf("verify initial pool state: %w", err)
 	}
-	return &PoolFundingAcceptance{Opening: proof, InitialPayment: initial, FundingTx: append([]byte(nil), delivery.FundingTx...)}, nil
+	return &PoolFundingAcceptance{Opening: proof, InitialPayment: initial, FundingTransactionRaw: append([]byte(nil), delivery.FundingTransactionRaw...)}, nil
 }
 
 // ContentDeliveryInput carries the caller-provided content facts for a 004
@@ -254,27 +268,33 @@ func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *p
 type ContentDeliveryInput struct {
 	// ContentPayloads is the raw payload batch, ordered exactly like the hash
 	// array committed in the referenced 003.
+	// 原始 payload 批次，顺序与被引用 003 提交的哈希数组完全一致；整批原子交付。
 	ContentPayloads [][]byte
 	// Seed contains the raw seed bytes when the batch includes any block; it
 	// may be empty when a pure-seed batch itself carries the seed.
+	// 批次包含任何块时必须提供的 seed 原文字节；纯 seed 批次可为空。
 	Seed []byte
 	// BlockHeight is the caller-provided current block height, read only when
 	// the opening's refund uses a block-height locktime.
+	// 调用方提供的当前区块高度；仅当退款使用区块高锁定时才会读取。
 	BlockHeight uint32
 }
 
 // BuildContentDelivery verifies the buyer's 003 request against the
 // explicitly supplied quote, opening proof, and previous payment state,
-// re-computes the payment authorization hash, decodes the authorized hash
-// batch, and validates every caller-supplied payload's count, order, hash,
+// re-computes the PaymentAuthorizationID (SHA-256 over the exact
+// payment_authorization_cbor), decodes the authorized hash batch, and
+// validates every caller-supplied payload's count, order, hash,
 // seed/block membership, and protocol length before recomputing and matching
 // the aggregate price, target sequence, and absolute cumulative amount. Only
-// then does it sign the exact 32-byte authorization hash with this workflow's
-// private key through the fixed SignMessage path and encode the four-element
-// 004. It returns the wire delivery together with the ContentDeliveryState
-// that the application must save and pass back when accepting the buyer's 005
-// update. The SDK reads no content beyond the supplied bytes and holds no
-// lease; concurrent deliveries on one pool are serialized by the caller.
+// then does it build content_delivery_cbor =
+// deterministic-CBOR([payment_authorization_id]) and sign exactly that
+// document through SignWireDocument(1, 6, ...) before encoding the five-element
+// Kind 6 wire message. It returns the wire delivery together with the
+// ContentDeliveryState that the application must save and pass back when
+// accepting the buyer's 005 update. The SDK reads no content beyond the
+// supplied bytes and holds no lease; concurrent deliveries on one pool are
+// serialized by the caller.
 func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs.SignedFileQuote, opening *pool.OpeningProof, previous *pool.PaymentState, request *bitfs.SignedContentRequest, input ContentDeliveryInput) (*bitfs.SignedContentDelivery, *ContentDeliveryState, error) {
 	if workflow == nil {
 		return nil, nil, errors.New("seller workflow is required")
@@ -316,11 +336,11 @@ func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	if requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
+	if requestTerms.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
 		return nil, nil, fmt.Errorf("%w: authorization amount cannot decrease", pool.ErrInvalidEvidence)
 	}
-	expectedPrice := requestTerms.SellerAmountAfterSat - previous.SellerAmountSat
-	if err := engine.CheckPaymentCapacity(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSat: requestTerms.SellerAmountAfterSat}); err != nil {
+	expectedPrice := requestTerms.SellerAmountAfterSatoshis - previous.SellerAmountSatoshis
+	if err := engine.CheckPaymentCapacity(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSatoshis: requestTerms.SellerAmountAfterSatoshis}); err != nil {
 		return nil, nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}
 	contentHashes, err := bitfs.DecodeContentHashes(requestTerms.ContentHashesCBOR)
@@ -341,19 +361,19 @@ func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs
 	if err != nil {
 		return nil, nil, err
 	}
-	price, err := bitfs.ContentHashesPriceSat(quoteTerms, contentHashes, effectiveSeed)
+	price, err := bitfs.ContentHashesPriceSatoshis(quoteTerms, contentHashes, effectiveSeed)
 	if err != nil {
 		return nil, nil, fmt.Errorf("calculate aggregate content price: %w", err)
 	}
-	if price != expectedPrice || requestTerms.SellerAmountAfterSat != previous.SellerAmountSat+price {
+	if price != expectedPrice || requestTerms.SellerAmountAfterSatoshis != previous.SellerAmountSatoshis+price {
 		return nil, nil, fmt.Errorf("%w: authorization amount or sequence does not match verified content price", pool.ErrInvalidEvidence)
 	}
-	// 卖方只对精确 32 字节授权哈希做裸消息签名；payload 不进入签名。
-	authHash, err := bitfs.PaymentAuthorizationHash(request.TermsCBOR)
+	// 卖方通过统一 helper 对 content_delivery_cbor 签名；payload 不进入签名。
+	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, nil, err
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(authHash[:], payloads, workflow.privateKey)
+	delivery, err := bitfs.NewSignedContentDelivery(authID, payloads, workflow.privateKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -361,10 +381,10 @@ func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs
 		return nil, nil, fmt.Errorf("%w: delivery payload encoding changed during construction", bitfs.ErrInvalidEvidence)
 	}
 	state := &ContentDeliveryState{
-		RefundTemplateTxID:       refundTemplateTxID,
-		PaymentAuthorizationHash: poolHash32Seller(authHash[:]),
-		PaymentSequence:          requestTerms.PaymentSequence,
-		SellerAmountAfterSat:     requestTerms.SellerAmountAfterSat,
+		RefundTemplateTxID:        refundTemplateTxID,
+		PaymentAuthorizationID:    authID,
+		PaymentSequence:           requestTerms.PaymentSequence,
+		SellerAmountAfterSatoshis: requestTerms.SellerAmountAfterSatoshis,
 	}
 	return delivery, state, nil
 }
@@ -373,7 +393,7 @@ func (workflow *Workflow) BuildContentDelivery(ctx context.Context, quote *bitfs
 // the explicitly supplied original signed 003 authorization, opening proof,
 // previous accepted state, and the ContentDeliveryState saved after building
 // 004. The application must first look up the exact original SignedContentRequest
-// by the wire's PaymentAuthorizationHash and pass it in; the SDK never scans
+// by the wire's PaymentAuthorizationID and pass it in; the SDK never scans
 // pools or queries stores. It recomputes and compares the authorization hash,
 // verifies the exact 003 buyer signature and every pool/target binding, then
 // deterministically rebuilds the unsigned payment state transaction locally
@@ -398,12 +418,12 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 		return nil, fmt.Errorf("%w: original signed content request is required", pool.ErrInvalidEvidence)
 	}
 	localAuthorization := bitfs.CloneSignedContentRequest(authorization)
-	// 2. 重算 SHA-256(003 TermsCBOR)，与 005 授权哈希逐字节比较。
-	authHash, err := bitfs.PaymentAuthorizationHash(localAuthorization.TermsCBOR)
+	// 2. 重算 SHA-256(payment_authorization_cbor)，与 005 授权 ID 逐字节比较。
+	authID, err := bitfs.PaymentAuthorizationID(localAuthorization.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(update.PaymentAuthorizationHash, authHash[:]) {
+	if update.PaymentAuthorizationID != authID {
 		return nil, fmt.Errorf("%w: payment update references a different authorization than the supplied signed request", pool.ErrInvalidEvidence)
 	}
 	if err := workflow.verifySellerOwnsOpening(ctx, opening); err != nil {
@@ -459,17 +479,17 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 	}
 	// 8. ContentDeliveryState 与原始 003 完全一致：授权哈希、目标序号、绝对
 	// 累计金额，证明本地确实为这张授权生成过 004。
-	if deliveryState.PaymentAuthorizationHash != pool.Hash32(authHash) ||
+	if deliveryState.PaymentAuthorizationID != authID ||
 		deliveryState.PaymentSequence != requestTerms.PaymentSequence ||
-		deliveryState.SellerAmountAfterSat != requestTerms.SellerAmountAfterSat {
+		deliveryState.SellerAmountAfterSatoshis != requestTerms.SellerAmountAfterSatoshis {
 		return nil, pool.ErrStalePaymentSequence
 	}
-	if requestTerms.SellerAmountAfterSat < previous.SellerAmountSat {
+	if requestTerms.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
 		return nil, fmt.Errorf("%w: authorized seller amount cannot decrease", pool.ErrInvalidEvidence)
 	}
 	// 9. 用 OpeningProof、previous 和 003 目标值调用唯一 BuildPaymentUpdate
 	// 本地重建未签名状态交易；005 不携带也不接受任何 raw bytes。
-	unsigned, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSat: requestTerms.SellerAmountAfterSat})
+	unsigned, err := engine.BuildPaymentUpdate(ctx, pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSatoshis: requestTerms.SellerAmountAfterSatoshis})
 	if err != nil {
 		return nil, fmt.Errorf("rebuild payment state transaction: %w", err)
 	}
@@ -478,16 +498,16 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 	}
 	// 10. 用固定 Buyer verifier 验证 005 签名覆盖重建出的精确交易；任何错
 	// opening、错 previous、错金额、错序号或错费用都会导致失败。
-	if err := engine.VerifyBuyerPayment(unsigned, update.BuyerTransactionSignature, opening); err != nil {
+	if err := engine.VerifyBuyerPayment(unsigned, update.BuyerPaymentTransactionSignature, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer payment over rebuilt transaction: %w", err)
 	}
 	// 11. Seller 对同一重建交易签名，并用唯一 Buyer+Seller merge 入口生成
 	// 完整 SignedPayment。
-	sellerSig, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerPayment(ctx, unsigned, opening)
+	sellerSignature, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerPayment(ctx, unsigned, opening)
 	if err != nil {
 		return nil, fmt.Errorf("sign payment update: %w", err)
 	}
-	signed, err := engine.MergeBuyerSellerPayment(unsigned, update.BuyerTransactionSignature, sellerSig, opening)
+	signed, err := engine.MergeBuyerSellerPayment(unsigned, update.BuyerPaymentTransactionSignature, sellerSignature, opening)
 	if err != nil {
 		return nil, fmt.Errorf("merge buyer and seller payment signatures: %w", err)
 	}
@@ -495,7 +515,7 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 		return nil, fmt.Errorf("%w: seller produced empty signed payment", pool.ErrInvalidEvidence)
 	}
 	// 12. 把授权哈希写入返回的 PaymentState；SDK 不保存、不广播、不宣布节点接受。
-	signed.State.PaymentAuthorizationHash = hash32ToPool(authHash)
+	signed.State.PaymentAuthorizationID = authID
 	return signed, nil
 }
 
@@ -506,7 +526,7 @@ func (workflow *Workflow) AcceptPayment(ctx context.Context, opening *pool.Openi
 // not judge whether the candidate matches a pending request or business
 // target, and does not broadcast; accepting and broadcasting are business
 // decisions. The timestamp lock uses system UTC read once at entry.
-func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.OpeningProof, unsigned *pool.UnsignedPayment, buyerSig []byte, blockHeight uint32) (*pool.SignedPayment, error) {
+func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.OpeningProof, unsigned *pool.UnsignedPayment, buyerSignature []byte, blockHeight uint32) (*pool.SignedPayment, error) {
 	if workflow == nil {
 		return nil, errors.New("seller workflow is required")
 	}
@@ -531,17 +551,17 @@ func (workflow *Workflow) SignImmediateClose(ctx context.Context, opening *pool.
 	if err != nil {
 		return nil, err
 	}
-	if unsigned.SellerAmountSat+unsigned.BuyerAmountSat+unsigned.ArbiterAmountSat > details.PoolOutputSatoshis {
+	if unsigned.SellerAmountSatoshis+unsigned.BuyerAmountSatoshis+unsigned.ArbiterAmountSatoshis > details.PoolOutputSatoshis {
 		return nil, fmt.Errorf("%w: immediate close outputs exceed the pool capacity", pool.ErrInvalidEvidence)
 	}
-	if err := engine.VerifyBuyerPayment(unsigned, buyerSig, opening); err != nil {
+	if err := engine.VerifyBuyerPayment(unsigned, buyerSignature, opening); err != nil {
 		return nil, fmt.Errorf("verify buyer close signature: %w", err)
 	}
-	sellerSig, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerPayment(ctx, unsigned, opening)
+	sellerSignature, err := pool.NewSellerPoolAdapter(engine, workflow.privateKey).SignSellerPayment(ctx, unsigned, opening)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := engine.MergeBuyerSellerPayment(unsigned, buyerSig, sellerSig, opening)
+	signed, err := engine.MergeBuyerSellerPayment(unsigned, buyerSignature, sellerSignature, opening)
 	if err != nil {
 		return nil, err
 	}
@@ -580,30 +600,34 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 		return nil, err
 	}
 	// 共享 Claim builder：与 Buyer 取件路径使用同一份纯函数，保证双方从相同
-	// opening + 精确签名 003 得到逐字节相同的 ClaimCBOR 与 Claim ID。
+	// opening + 精确签名 003 得到逐字节相同的 ArbitrationClaimCBOR 与 Claim ID。
 	built, err := arbitration.BuildClaimFromAuthorization(opening, authorization)
 	if err != nil {
 		return nil, fmt.Errorf("build arbitration Claim: %w", err)
 	}
-	terms := built.Terms
-	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
+	claimAuthorization := built.Authorization
+	if !at.Before(time.Unix(claimAuthorization.DeliveryDeadlineUnixSeconds, 0)) {
 		return nil, fmt.Errorf("%w: delivery deadline has passed", pool.ErrInvalidEvidence)
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(authorization.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(authorization.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(delivery.PaymentAuthorizationHash, authHash[:]) {
+	deliveryAuthorizationID, err := bitfs.DecodeContentDeliveryDocument(delivery.ContentDeliveryCBOR)
+	if err != nil {
+		return nil, err
+	}
+	if deliveryAuthorizationID != authID {
 		return nil, fmt.Errorf("%w: 004 delivery references a different authorization", pool.ErrInvalidEvidence)
 	}
-	if err := bitfs.VerifySignature(opening.SellerPubKey, authHash[:], delivery.SellerPaymentAuthorizationHashSignature); err != nil {
+	if err := protocol.VerifyWireDocument(opening.SellerPublicKey, protocol.WireVersion, 6, delivery.ContentDeliveryCBOR, delivery.SellerContentDeliverySignature); err != nil {
 		return nil, fmt.Errorf("%w: 004 seller signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
 	payloads, err := bitfs.DecodeContentPayloads(delivery.ContentPayloadsCBOR)
 	if err != nil {
 		return nil, err
 	}
-	hashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
+	hashes, err := bitfs.DecodeContentHashes(claimAuthorization.ContentHashesCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -615,19 +639,15 @@ func (workflow *Workflow) BuildArbitrationRequest(ctx context.Context, opening *
 			return nil, fmt.Errorf("%w: 004 payload #%d does not match 003 hash", pool.ErrInvalidEvidence, index+1)
 		}
 	}
-	claimCBOR := built.ClaimCBOR
-	signingCBOR, err := arbitration.SellerClaimSigningCBOR(claimCBOR)
+	claimCBOR := built.ArbitrationClaimCBOR
+	sellerClaimSignature, err := protocol.SignWireDocument(workflow.privateKey, protocol.WireVersion, 8, claimCBOR)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sign arbitration Claim: %w", err)
 	}
-	sellerClaimSignature, err := bitfs.SignMessage(workflow.privateKey, signingCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := bitfs.VerifySignature(workflow.publicKey, signingCBOR, sellerClaimSignature); err != nil {
+	if err := protocol.VerifyWireDocument(workflow.publicKey, protocol.WireVersion, 8, claimCBOR, sellerClaimSignature); err != nil {
 		return nil, fmt.Errorf("%w: generated Seller Claim signature failed verification: %v", pool.ErrInvalidEvidence, err)
 	}
-	return &arbitration.ArbitrationRequest{Version: arbitration.MajorVersion, ClaimCBOR: claimCBOR, SellerClaimSignature: sellerClaimSignature, ContentPayloadsCBOR: delivery.ContentPayloadsCBOR}, nil
+	return &arbitration.ArbitrationRequest{ArbitrationClaimCBOR: claimCBOR, SellerArbitrationClaimSignature: sellerClaimSignature, ContentPayloadsCBOR: delivery.ContentPayloadsCBOR}, nil
 }
 
 // CompleteArbitratedPayment verifies Kind 8/9 entirely from the Claim and the
@@ -651,15 +671,15 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 	if _, err := arbitration.MarshalResponse(response); err != nil {
 		return nil, err
 	}
-	receipt, err := arbitration.UnmarshalReceipt(response.ReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		return nil, err
 	}
-	claim, err := arbitration.UnmarshalClaim(request.ClaimCBOR)
+	claim, err := arbitration.UnmarshalClaim(request.ArbitrationClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	terms, err := bitfs.DecodeContentRequestTerms(claim.TermsCBOR)
+	authorization, err := bitfs.DecodePaymentAuthorization(claim.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -667,24 +687,20 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(workflow.publicKey, keys.SellerPubKey) {
+	if !bytes.Equal(workflow.publicKey, keys.SellerPublicKey) {
 		return nil, fmt.Errorf("%w: workflow key does not match Claim seller", pool.ErrInvalidEvidence)
 	}
-	if err := bitfs.VerifySignature(keys.BuyerPubKey, claim.TermsCBOR, claim.BuyerSignature); err != nil {
+	if err := protocol.VerifyWireDocument(keys.BuyerPublicKey, protocol.WireVersion, 5, claim.PaymentAuthorizationCBOR, claim.BuyerPaymentAuthorizationSignature); err != nil {
 		return nil, fmt.Errorf("%w: Buyer authorization signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
-	sellerSigning, err := arbitration.SellerClaimSigningCBOR(request.ClaimCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := bitfs.VerifySignature(keys.SellerPubKey, sellerSigning, request.SellerClaimSignature); err != nil {
+	if err := protocol.VerifyWireDocument(keys.SellerPublicKey, protocol.WireVersion, 8, request.ArbitrationClaimCBOR, request.SellerArbitrationClaimSignature); err != nil {
 		return nil, fmt.Errorf("%w: Seller Claim signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
 	payloads, err := bitfs.DecodeContentPayloads(request.ContentPayloadsCBOR)
 	if err != nil {
 		return nil, err
 	}
-	hashes, err := bitfs.DecodeContentHashes(terms.ContentHashesCBOR)
+	hashes, err := bitfs.DecodeContentHashes(authorization.ContentHashesCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -697,28 +713,24 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 		}
 	}
 	// Seller 从 Claim primitives 独立重算 Claim ID 并与回执比较，不信任传输层身份。
-	localClaimID, err := arbitration.ArbitrationClaimID(request.ClaimCBOR)
+	localClaimID, err := arbitration.ArbitrationClaimID(request.ArbitrationClaimCBOR)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(receipt.ClaimID, localClaimID) {
+	if receipt.ArbitrationClaimID != localClaimID {
 		return nil, fmt.Errorf("%w: receipt Claim ID does not match the independently computed Claim ID", pool.ErrInvalidEvidence)
 	}
-	receiptSigning, err := arbitration.ArbiterReceiptSigningCBOR(response.ReceiptCBOR)
-	if err != nil {
-		return nil, err
-	}
-	if err := bitfs.VerifySignature(keys.ArbiterPubKey, receiptSigning, response.ArbiterReceiptSignature); err != nil {
+	if err := protocol.VerifyWireDocument(keys.ArbiterPublicKey, protocol.WireVersion, 9, response.ArbitrationReceiptCBOR, response.ArbiterArbitrationReceiptSignature); err != nil {
 		return nil, fmt.Errorf("%w: Arbitration receipt signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
-	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, terms.PaymentSequence, terms.SellerAmountAfterSat, receipt.ArbiterAmountSat)
+	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, authorization.PaymentSequence, authorization.SellerAmountAfterSatoshis, receipt.ArbiterAmountSatoshis)
 	if err != nil {
 		return nil, err
 	}
 	if err := pool.CheckArbitrationRefundNotExpired(claim.RefundTemplateRaw, blockHeight); err != nil {
 		return nil, fmt.Errorf("%w: refund template is no longer available for arbitration: %v", pool.ErrInvalidEvidence, err)
 	}
-	authHash, err := bitfs.PaymentAuthorizationHash(claim.TermsCBOR)
+	authID, err := bitfs.PaymentAuthorizationID(claim.PaymentAuthorizationCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -727,24 +739,24 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, request
 		return nil, err
 	}
 	// 先验证回执绑定的仲裁交易签名覆盖本地重建的付费 candidate，再产生 Seller 签名。
-	if err := engine.VerifyArbitrationArbiterPayment(unsigned, receipt.ArbiterTransactionSignature); err != nil {
+	if err := engine.VerifyArbitrationArbiterPayment(unsigned, receipt.ArbiterPaymentTransactionSignature); err != nil {
 		return nil, fmt.Errorf("%w: Arbiter transaction signature is invalid: %v", pool.ErrInvalidEvidence, err)
 	}
-	sellerSig, err := engine.SignArbitrationSellerPayment(ctx, unsigned, workflow.privateKey)
+	sellerSignature, err := engine.SignArbitrationSellerPayment(ctx, unsigned, workflow.privateKey)
 	if err != nil {
 		return nil, err
 	}
-	signed, err := engine.MergeArbitratedPoolSellerArbiterSignatures(unsigned, sellerSig, receipt.ArbiterTransactionSignature)
+	signed, err := engine.MergeArbitratedPoolSellerArbiterSignatures(unsigned, sellerSignature, receipt.ArbiterPaymentTransactionSignature)
 	if err != nil {
 		return nil, err
 	}
 	if signed == nil || len(signed.RawTx) == 0 {
 		return nil, fmt.Errorf("%w: merged arbitration transaction is empty", pool.ErrInvalidEvidence)
 	}
-	if signed.State.ArbiterAmountSat != receipt.ArbiterAmountSat || signed.State.SellerAmountSat != terms.SellerAmountAfterSat {
+	if signed.State.ArbiterAmountSatoshis != receipt.ArbiterAmountSatoshis || signed.State.SellerAmountSatoshis != authorization.SellerAmountAfterSatoshis {
 		return nil, fmt.Errorf("%w: merged arbitration amounts do not match the receipt and Buyer terms", pool.ErrInvalidEvidence)
 	}
-	signed.State.PaymentAuthorizationHash = hash32ToPool(authHash)
+	signed.State.PaymentAuthorizationID = authID
 	return signed, nil
 }
 
@@ -757,22 +769,14 @@ func cloneArbitrationRequest(value *arbitration.ArbitrationRequest) *arbitration
 	if value == nil {
 		return nil
 	}
-	return &arbitration.ArbitrationRequest{Version: value.Version, ClaimCBOR: append([]byte(nil), value.ClaimCBOR...), SellerClaimSignature: append([]byte(nil), value.SellerClaimSignature...), ContentPayloadsCBOR: append([]byte(nil), value.ContentPayloadsCBOR...)}
+	return &arbitration.ArbitrationRequest{ArbitrationClaimCBOR: append([]byte(nil), value.ArbitrationClaimCBOR...), SellerArbitrationClaimSignature: append([]byte(nil), value.SellerArbitrationClaimSignature...), ContentPayloadsCBOR: append([]byte(nil), value.ContentPayloadsCBOR...)}
 }
 
 func cloneArbitrationResponse(value *arbitration.ArbitrationResponse) *arbitration.ArbitrationResponse {
 	if value == nil {
 		return nil
 	}
-	return &arbitration.ArbitrationResponse{Version: value.Version, ReceiptCBOR: append([]byte(nil), value.ReceiptCBOR...), ArbiterReceiptSignature: append([]byte(nil), value.ArbiterReceiptSignature...)}
-}
-
-func hash32ToPool(value bitfs.Hash32) pool.Hash32 { return pool.Hash32(value) }
-
-func poolHash32Seller(raw []byte) pool.Hash32 {
-	var result pool.Hash32
-	copy(result[:], raw)
-	return result
+	return &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: append([]byte(nil), value.ArbitrationReceiptCBOR...), ArbiterArbitrationReceiptSignature: append([]byte(nil), value.ArbiterArbitrationReceiptSignature...)}
 }
 
 func cloneFileQuoteTermsSeller(terms *bitfs.FileQuoteTerms) bitfs.FileQuoteTerms {
@@ -781,21 +785,21 @@ func cloneFileQuoteTermsSeller(terms *bitfs.FileQuoteTerms) bitfs.FileQuoteTerms
 	}
 	cloned := *terms
 	cloned.SeedHash = append([]byte(nil), terms.SeedHash...)
-	cloned.BuyerPubkey = append([]byte(nil), terms.BuyerPubkey...)
-	cloned.SupportedArbiterPubkeysCBOR = append([]byte(nil), terms.SupportedArbiterPubkeysCBOR...)
+	cloned.BuyerPublicKey = append([]byte(nil), terms.BuyerPublicKey...)
+	cloned.SupportedArbiterPublicKeysCBOR = append([]byte(nil), terms.SupportedArbiterPublicKeysCBOR...)
 	return cloned
 }
 
 // checkRequestTimingLocal 复刻 bitfs 包内的 003 时间判断：报价过期、交付
 // 截止、截止不超过报价。at 是本操作唯一一次读取的 UTC。
-func checkRequestTimingLocal(terms *bitfs.ContentRequestTerms, quoteTerms *bitfs.FileQuoteTerms, at time.Time) error {
-	if !at.Before(time.Unix(quoteTerms.QuoteExpiresAtUnix, 0)) {
+func checkRequestTimingLocal(terms *bitfs.PaymentAuthorization, quoteTerms *bitfs.FileQuoteTerms, at time.Time) error {
+	if !at.Before(time.Unix(quoteTerms.QuoteExpiresAtUnixSeconds, 0)) {
 		return fmt.Errorf("%w: file quote is expired", bitfs.ErrQuoteExpired)
 	}
-	if !at.Before(time.Unix(terms.DeliveryDeadlineUnix, 0)) {
+	if !at.Before(time.Unix(terms.DeliveryDeadlineUnixSeconds, 0)) {
 		return fmt.Errorf("%w: delivery deadline has passed", bitfs.ErrDeliveryDeadline)
 	}
-	if terms.DeliveryDeadlineUnix > quoteTerms.QuoteExpiresAtUnix {
+	if terms.DeliveryDeadlineUnixSeconds > quoteTerms.QuoteExpiresAtUnixSeconds {
 		return fmt.Errorf("%w: delivery deadline exceeds quote expiry", bitfs.ErrDeliveryDeadline)
 	}
 	return nil

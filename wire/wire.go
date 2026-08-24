@@ -1,7 +1,11 @@
 // Package wire maps transport-level message kinds to the canonical encoders and
-// strict decoders for 001–008. It copies exact CBOR bytes and adds no envelope,
-// signature, storage, business validation, or network behavior; callers invoke
-// the owning bitfs, pool, or arbitration verifier after decoding.
+// strict decoders for 001–008. Every complete wire message starts with
+// [protocol.WireVersion, kind]; the outer pair is injected by each owning
+// encoder, checked by every strict decoder, and folded into ordinary message
+// signatures through protocol.SignWireDocument. The package copies exact CBOR
+// bytes and adds no envelope, signature, storage, business validation, or
+// network behavior; callers invoke the owning bitfs, pool, or arbitration
+// verifier after decoding.
 package wire
 
 import (
@@ -14,74 +18,77 @@ import (
 )
 
 // ProtocolFamily is the wire protocol identifier carried by the transport layer.
-const ProtocolFamily = "bitfs.protocol.v4"
+const ProtocolFamily = "bitfs.protocol.v1"
 
-// Kind identifies the message type selected by the transport. For the legacy
-// 001–006 documents the transport tag is not inserted into their signed CBOR;
-// 007 deliberately has body signing domains containing type 8 or 9, while the
-// transport Kind remains a separate selector. Kind never identifies a pool
-// instance: messages that define a RefundTemplateTxID carry it in the CBOR
-// document; the 0201 presign request derives it from RefundTx and has no
-// separate hash field.
+// Kind identifies the message type selected by the transport. The outer pair
+// [protocol.WireVersion, kind] opens every complete wire message; the strict
+// decoder selected by Kind re-checks both values before interpreting any
+// child document. Kind never identifies a pool instance: messages that define
+// a RefundTemplateTxID carry it in their payload, while the 0201 presign
+// request derives it from refund_template_raw.
 type Kind uint16
 
 const (
-	// Quote is a signed file quote.
-	// Direction: seller -> buyer.
-	Quote Kind = 1
-	// PoolRefundPresignRequest requests the seller's refund signature.
+	// FileQuote is a signed file quote. Direction: seller -> buyer.
+	FileQuote Kind = 1
+	// RefundPresignRequest requests the seller's refund transaction signature.
 	// Direction: buyer -> seller.
-	PoolRefundPresignRequest Kind = 2
-	// PoolRefundPresignResponse carries the seller's refund signature.
+	RefundPresignRequest Kind = 2
+	// RefundPresignResponse carries the seller's refund transaction signature.
 	// Direction: seller -> buyer.
-	PoolRefundPresignResponse Kind = 3
-	// PoolFundingTxDelivery carries the signed funding transaction.
+	RefundPresignResponse Kind = 3
+	// FundingTransactionDelivery carries the signed funding transaction.
 	// Direction: buyer -> seller.
-	PoolFundingTxDelivery Kind = 4
-	// ContentRequest carries the signed content request and payment authorization.
+	FundingTransactionDelivery Kind = 4
+	// ContentRequest carries the signed payment authorization.
 	// Direction: buyer -> seller.
 	ContentRequest Kind = 5
-	// ContentDelivery carries the signed content payload.
-	// Direction: seller -> buyer.
+	// ContentDelivery carries the signed content delivery and its payload
+	// attachment. Direction: seller -> buyer.
 	ContentDelivery Kind = 6
-	// CumulativePayment carries a minimal cumulative payment credential: the
-	// payment authorization hash plus the buyer transaction signature over
-	// the locally rebuilt state transaction. The receiver routes it by the
-	// authorization hash to the exact saved signed content request; no pool
-	// ID or raw transaction travels on the wire.
+	// PaymentUpdate carries a minimal cumulative payment credential: the
+	// payment authorization ID plus the buyer transaction signature over the
+	// locally rebuilt state transaction. The receiver routes it by the
+	// authorization ID to the exact saved signed content request; no pool ID
+	// or raw transaction travels on the wire.
 	// Direction: buyer -> seller.
-	CumulativePayment Kind = 7
+	PaymentUpdate Kind = 7
 	// ArbitrationRequest carries evidence for arbitration.
 	// Direction: seller -> arbiter.
 	ArbitrationRequest Kind = 8
-	// ArbitrationResponse carries the arbitration receipt and the detached
-	// signature over [4, 9, exact_receipt_cbor]; the receipt binds the Claim
-	// ID, the positive arbiter amount, and the arbitration transaction
+	// ArbitrationResponse carries the arbitration receipt and the arbiter's
+	// unified signature over [1, 9, exact_receipt_cbor]; the receipt binds the
+	// Claim ID, the positive arbiter amount, and the arbitration transaction
 	// signature over the independently rebuilt candidate.
 	// Direction: arbiter -> seller.
 	ArbitrationResponse Kind = 9
-	// ArbitrationContentRequest carries a buyer's authenticated retrieval
-	// request for one arbitrated custody record: [4, 10, claim_id, nonce,
-	// buyer_signature]. The Claim ID routes the lookup; only the buyer key
+	// ContentRetrievalRequest carries a buyer's authenticated retrieval request
+	// for one arbitrated custody record:
+	// [1, 10, content_retrieval_request_cbor, buyer_signature]. The Claim ID
+	// inside the signed document routes the lookup; only the buyer key
 	// recovered from the stored Claim can authorize it.
 	// Direction: buyer -> arbiter.
-	ArbitrationContentRequest Kind = 10
-	// ArbitrationContentResponse returns one custody record's exact persisted
-	// Kind 8 and Kind 9 bytes embedded verbatim in
-	// [4, 11, exact_kind8_cbor, exact_kind9_cbor]. It adds no outer
-	// signature: the embedded Seller/Arbiter signatures are the evidence.
+	ContentRetrievalRequest Kind = 10
+	// ContentRetrievalResponse returns one arbiter-signed retrieval result:
+	// branch 0 answers unavailable with a structured reason and no attachment;
+	// branch 1 binds the exact content_payloads_cbor through its
+	// content_payloads_id and attaches the payloads verbatim.
 	// Direction: arbiter -> buyer.
-	ArbitrationContentResponse Kind = 11
+	ContentRetrievalResponse Kind = 11
 )
 
 // Packet carries a transport-selected Kind and the exact canonical CBOR bytes
 // produced by the corresponding protocol encoder. It adds no envelope and no
-// session semantics; pool instances are correlated by RefundTemplateTxID where the
-// message defines that field, while 0201 derives it from RefundTx and the
-// minimal 005 credential is routed by its payment authorization hash through
-// the application's lookup index.
+// session semantics; pool instances are correlated by RefundTemplateTxID where
+// the message defines that field, while the 0201 presign request derives it
+// from refund_template_raw and the minimal 005 credential is routed by its
+// payment authorization ID through the application's lookup index.
 type Packet struct {
+	// Kind 是传输层选择的报文类别（1..11）；严格 decoder 在解释任何子文档前
+	// 都会复核外层 [protocol.WireVersion, kind] 对。
 	Kind Kind
+	// CBOR 是相应协议 encoder 产生的 exact 规范 CBOR 字节；本包不添加任何
+	// envelope 或会话语义。
 	CBOR []byte
 }
 
@@ -93,7 +100,7 @@ func Marshal(kind Kind, message any) (Packet, error) {
 		err error
 	)
 	switch kind {
-	case Quote:
+	case FileQuote:
 		value, ok := message.(*bitfs.SignedFileQuote)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *bitfs.SignedFileQuote", kind)
@@ -111,25 +118,25 @@ func Marshal(kind Kind, message any) (Packet, error) {
 			return Packet{}, fmt.Errorf("wire kind %d requires *bitfs.SignedContentDelivery", kind)
 		}
 		raw, err = bitfs.EncodeSignedContentDelivery(value)
-	case PoolRefundPresignRequest:
+	case RefundPresignRequest:
 		value, ok := message.(*pool.RefundPresignRequest)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *pool.RefundPresignRequest", kind)
 		}
 		raw, err = pool.EncodeRefundPresignRequest(value)
-	case PoolRefundPresignResponse:
+	case RefundPresignResponse:
 		value, ok := message.(*pool.RefundPresignResponse)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *pool.RefundPresignResponse", kind)
 		}
 		raw, err = pool.EncodeRefundPresignResponse(value)
-	case PoolFundingTxDelivery:
-		value, ok := message.(*pool.FundingTxDelivery)
+	case FundingTransactionDelivery:
+		value, ok := message.(*pool.FundingTransactionDelivery)
 		if !ok {
-			return Packet{}, fmt.Errorf("wire kind %d requires *pool.FundingTxDelivery", kind)
+			return Packet{}, fmt.Errorf("wire kind %d requires *pool.FundingTransactionDelivery", kind)
 		}
-		raw, err = pool.EncodeFundingTxDelivery(value)
-	case CumulativePayment:
+		raw, err = pool.EncodeFundingTransactionDelivery(value)
+	case PaymentUpdate:
 		value, ok := message.(*pool.PaymentUpdate)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *pool.PaymentUpdate", kind)
@@ -147,13 +154,13 @@ func Marshal(kind Kind, message any) (Packet, error) {
 			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ArbitrationResponse", kind)
 		}
 		raw, err = arbitration.MarshalResponse(value)
-	case ArbitrationContentRequest:
+	case ContentRetrievalRequest:
 		value, ok := message.(*arbitration.ContentRetrievalRequest)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ContentRetrievalRequest", kind)
 		}
 		raw, err = arbitration.MarshalContentRetrievalRequest(value)
-	case ArbitrationContentResponse:
+	case ContentRetrievalResponse:
 		value, ok := message.(*arbitration.ContentRetrievalResponse)
 		if !ok {
 			return Packet{}, fmt.Errorf("wire kind %d requires *arbitration.ContentRetrievalResponse", kind)
@@ -169,48 +176,49 @@ func Marshal(kind Kind, message any) (Packet, error) {
 }
 
 // Unmarshal dispatches rawCBOR to the strict decoder selected by kind. It checks
-// canonical encoding and shape; callers must still run the package verifier.
+// canonical encoding, the outer version/kind pair, and shape; callers must
+// still run the package verifier.
 func Unmarshal(kind Kind, rawCBOR []byte) (any, error) {
 	if len(rawCBOR) == 0 {
 		return nil, errors.New("wire CBOR is required")
 	}
 	switch kind {
-	case Quote:
+	case FileQuote:
 		return bitfs.DecodeSignedFileQuote(rawCBOR)
 	case ContentRequest:
 		return bitfs.DecodeSignedContentRequest(rawCBOR)
 	case ContentDelivery:
 		return bitfs.DecodeSignedContentDelivery(rawCBOR)
-	case PoolRefundPresignRequest:
+	case RefundPresignRequest:
 		return pool.DecodeRefundPresignRequest(rawCBOR)
-	case PoolRefundPresignResponse:
+	case RefundPresignResponse:
 		return pool.DecodeRefundPresignResponse(rawCBOR)
-	case PoolFundingTxDelivery:
-		return pool.DecodeFundingTxDelivery(rawCBOR)
-	case CumulativePayment:
+	case FundingTransactionDelivery:
+		return pool.DecodeFundingTransactionDelivery(rawCBOR)
+	case PaymentUpdate:
 		return pool.DecodePaymentUpdate(rawCBOR)
 	case ArbitrationRequest:
 		return arbitration.UnmarshalRequest(rawCBOR)
 	case ArbitrationResponse:
 		return arbitration.UnmarshalResponse(rawCBOR)
-	case ArbitrationContentRequest:
+	case ContentRetrievalRequest:
 		return arbitration.UnmarshalContentRetrievalRequest(rawCBOR)
-	case ArbitrationContentResponse:
+	case ContentRetrievalResponse:
 		return arbitration.UnmarshalContentRetrievalResponse(rawCBOR)
 	default:
 		return nil, fmt.Errorf("unsupported new wire kind %d", kind)
 	}
 }
 
-// MarshalQuote encodes a SignedFileQuote with bitfs's canonical encoder.
-func MarshalQuote(message *bitfs.SignedFileQuote) ([]byte, error) {
-	packet, err := Marshal(Quote, message)
+// MarshalFileQuote encodes a SignedFileQuote with bitfs's canonical encoder.
+func MarshalFileQuote(message *bitfs.SignedFileQuote) ([]byte, error) {
+	packet, err := Marshal(FileQuote, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalQuote strictly decodes a SignedFileQuote.
-func UnmarshalQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error) {
-	message, err := Unmarshal(Quote, rawCBOR)
+// UnmarshalFileQuote strictly decodes a SignedFileQuote.
+func UnmarshalFileQuote(rawCBOR []byte) (*bitfs.SignedFileQuote, error) {
+	message, err := Unmarshal(FileQuote, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -247,60 +255,60 @@ func UnmarshalContentDelivery(rawCBOR []byte) (*bitfs.SignedContentDelivery, err
 	return message.(*bitfs.SignedContentDelivery), nil
 }
 
-// MarshalPoolRefundPresignRequest encodes a pool-opening presign request.
-func MarshalPoolRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error) {
-	packet, err := Marshal(PoolRefundPresignRequest, message)
+// MarshalRefundPresignRequest encodes a pool-opening presign request.
+func MarshalRefundPresignRequest(message *pool.RefundPresignRequest) ([]byte, error) {
+	packet, err := Marshal(RefundPresignRequest, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalPoolRefundPresignRequest strictly decodes a pool-opening presign request.
-func UnmarshalPoolRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error) {
-	message, err := Unmarshal(PoolRefundPresignRequest, rawCBOR)
+// UnmarshalRefundPresignRequest strictly decodes a pool-opening presign request.
+func UnmarshalRefundPresignRequest(rawCBOR []byte) (*pool.RefundPresignRequest, error) {
+	message, err := Unmarshal(RefundPresignRequest, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
 	return message.(*pool.RefundPresignRequest), nil
 }
 
-// MarshalPoolRefundPresignResponse encodes a pool-opening presign response.
-func MarshalPoolRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error) {
-	packet, err := Marshal(PoolRefundPresignResponse, message)
+// MarshalRefundPresignResponse encodes a pool-opening presign response.
+func MarshalRefundPresignResponse(message *pool.RefundPresignResponse) ([]byte, error) {
+	packet, err := Marshal(RefundPresignResponse, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalPoolRefundPresignResponse strictly decodes a pool-opening presign response.
-func UnmarshalPoolRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error) {
-	message, err := Unmarshal(PoolRefundPresignResponse, rawCBOR)
+// UnmarshalRefundPresignResponse strictly decodes a pool-opening presign response.
+func UnmarshalRefundPresignResponse(rawCBOR []byte) (*pool.RefundPresignResponse, error) {
+	message, err := Unmarshal(RefundPresignResponse, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
 	return message.(*pool.RefundPresignResponse), nil
 }
 
-// MarshalPoolFundingTxDelivery encodes delivery of the pool funding transaction.
-func MarshalPoolFundingTxDelivery(message *pool.FundingTxDelivery) ([]byte, error) {
-	packet, err := Marshal(PoolFundingTxDelivery, message)
+// MarshalFundingTransactionDelivery encodes delivery of the pool funding transaction.
+func MarshalFundingTransactionDelivery(message *pool.FundingTransactionDelivery) ([]byte, error) {
+	packet, err := Marshal(FundingTransactionDelivery, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalPoolFundingTxDelivery strictly decodes a pool funding transaction delivery.
-func UnmarshalPoolFundingTxDelivery(rawCBOR []byte) (*pool.FundingTxDelivery, error) {
-	message, err := Unmarshal(PoolFundingTxDelivery, rawCBOR)
+// UnmarshalFundingTransactionDelivery strictly decodes a pool funding transaction delivery.
+func UnmarshalFundingTransactionDelivery(rawCBOR []byte) (*pool.FundingTransactionDelivery, error) {
+	message, err := Unmarshal(FundingTransactionDelivery, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return message.(*pool.FundingTxDelivery), nil
+	return message.(*pool.FundingTransactionDelivery), nil
 }
 
 // MarshalPaymentUpdate encodes a buyer-authorized cumulative payment update.
 func MarshalPaymentUpdate(message *pool.PaymentUpdate) ([]byte, error) {
-	packet, err := Marshal(CumulativePayment, message)
+	packet, err := Marshal(PaymentUpdate, message)
 	return packet.CBOR, err
 }
 
 // UnmarshalPaymentUpdate strictly decodes a cumulative payment update.
 func UnmarshalPaymentUpdate(rawCBOR []byte) (*pool.PaymentUpdate, error) {
-	message, err := Unmarshal(CumulativePayment, rawCBOR)
+	message, err := Unmarshal(PaymentUpdate, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -338,33 +346,32 @@ func UnmarshalArbitrationResponse(rawCBOR []byte) (*arbitration.ArbitrationRespo
 	return message.(*arbitration.ArbitrationResponse), nil
 }
 
-// MarshalArbitrationContentRequest encodes a buyer's authenticated Kind 10
+// MarshalContentRetrievalRequest encodes a buyer's authenticated Kind 10
 // retrieval request.
-func MarshalArbitrationContentRequest(message *arbitration.ContentRetrievalRequest) ([]byte, error) {
-	packet, err := Marshal(ArbitrationContentRequest, message)
+func MarshalContentRetrievalRequest(message *arbitration.ContentRetrievalRequest) ([]byte, error) {
+	packet, err := Marshal(ContentRetrievalRequest, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalArbitrationContentRequest strictly decodes a Kind 10 retrieval request.
-func UnmarshalArbitrationContentRequest(rawCBOR []byte) (*arbitration.ContentRetrievalRequest, error) {
-	message, err := Unmarshal(ArbitrationContentRequest, rawCBOR)
+// UnmarshalContentRetrievalRequest strictly decodes a Kind 10 retrieval request.
+func UnmarshalContentRetrievalRequest(rawCBOR []byte) (*arbitration.ContentRetrievalRequest, error) {
+	message, err := Unmarshal(ContentRetrievalRequest, rawCBOR)
 	if err != nil {
 		return nil, err
 	}
 	return message.(*arbitration.ContentRetrievalRequest), nil
 }
 
-// MarshalArbitrationContentResponse encodes the four-element Kind 11 custody
-// evidence response with its embedded exact Kind 8/9 bytes.
-func MarshalArbitrationContentResponse(message *arbitration.ContentRetrievalResponse) ([]byte, error) {
-	packet, err := Marshal(ArbitrationContentResponse, message)
+// MarshalContentRetrievalResponse encodes the arbiter-signed Kind 11 retrieval
+// result for whichever branch its result document declares.
+func MarshalContentRetrievalResponse(message *arbitration.ContentRetrievalResponse) ([]byte, error) {
+	packet, err := Marshal(ContentRetrievalResponse, message)
 	return packet.CBOR, err
 }
 
-// UnmarshalArbitrationContentResponse strictly decodes a Kind 11 custody
-// evidence response.
-func UnmarshalArbitrationContentResponse(rawCBOR []byte) (*arbitration.ContentRetrievalResponse, error) {
-	message, err := Unmarshal(ArbitrationContentResponse, rawCBOR)
+// UnmarshalContentRetrievalResponse strictly decodes a Kind 11 retrieval result.
+func UnmarshalContentRetrievalResponse(rawCBOR []byte) (*arbitration.ContentRetrievalResponse, error) {
+	message, err := Unmarshal(ContentRetrievalResponse, rawCBOR)
 	if err != nil {
 		return nil, err
 	}

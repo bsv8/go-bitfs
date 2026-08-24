@@ -35,7 +35,7 @@ func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 type BuyerOpeningState struct {
     RefundTemplateTxID pool.RefundTemplateTxID
     Request      *pool.RefundPresignRequest
-    FundingTx    []byte // never transmitted outside FundingTxDelivery
+    FundingTx    []byte // never transmitted outside FundingTransactionDelivery
 }
 
 // PoolOpeningPreparation is the composite result of PreparePoolOpening.
@@ -71,10 +71,10 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, input pool.Ope
 // Wire input: 0202 response. Local input: saved BuyerOpeningState.
 func (workflow *Workflow) AcceptRefundPresign(ctx context.Context, state *BuyerOpeningState, response *pool.RefundPresignResponse) (*RefundPresignAcceptance, error)
 
-// BuildFundingTxDelivery packages an already verified proof's funding
+// BuildFundingTransactionDelivery packages an already verified proof's funding
 // transaction into the 0204 wire delivery. The caller passes the proof;
 // nothing is loaded by hash.
-func (workflow *Workflow) BuildFundingTxDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTxDelivery, error)
+func (workflow *Workflow) BuildFundingTransactionDelivery(ctx context.Context, opening *pool.OpeningProof) (*pool.FundingTransactionDelivery, error)
 
 // BuildContentRequest verifies quote/opening/previous-state binding, price,
 // and balance, then signs the 003 request with the workflow's private key.
@@ -90,7 +90,7 @@ func (workflow *Workflow) AcceptDelivery(ctx context.Context, quote *bitfs.Signe
 // detached signature from a caller-selected base state and caller-chosen
 // target seller amount. The SDK does not claim base is the business-latest
 // state. Send both values to the seller.
-func (workflow *Workflow) BuildImmediateClose(ctx context.Context, opening *pool.OpeningProof, base *pool.PaymentState, targetSellerAmountSat uint64, blockHeight uint32) (*pool.UnsignedPayment, []byte, error)
+func (workflow *Workflow) BuildImmediateClose(ctx context.Context, opening *pool.OpeningProof, base *pool.PaymentState, targetSellerAmountSatoshis uint64, blockHeight uint32) (*pool.UnsignedPayment, []byte, error)
 
 // CompleteImmediateClose verifies only that the fully signed close is
 // protocol-valid for the opening; whether it matches the business expectation
@@ -105,7 +105,8 @@ func (workflow *Workflow) BuildRefundAfterExpiry(ctx context.Context, opening *p
 
 // BuildArbitrationContentRequest rebuilds the Claim ID from the buyer's own
 // opening plus the exact signed 003 through the shared Claim builder, signs
-// [4, 10, claim_id, nonce] with the fixed message path, self-verifies, and
+// [arbitration_claim_id, retrieval_nonce] through SignWireDocument(1, 10,
+// ...), self-verifies, and
 // returns a deep-copied Kind 10. The nonce is 32 application-generated random
 // bytes; no quote/deadline/refund gate applies here (post-hoc recovery).
 func (workflow *Workflow) BuildArbitrationContentRequest(ctx context.Context, opening *pool.OpeningProof, authorization *bitfs.SignedContentRequest, nonce []byte) (*arbitration.ContentRetrievalRequest, error)
@@ -120,9 +121,9 @@ type ArbitratedContentInput struct {
 }
 
 type VerifiedArbitratedContent struct {
-    ClaimID  []byte                              // verified arbitration claim identity
-    Payloads [][]byte                            // verified content in authorized order
-    Receipt  *arbitration.ArbitrationReceipt     // Kind 9 audit data
+    ContentRetrievalRequestID protocol.ContentRetrievalRequestID // SHA-256(exact Kind 10 request document)
+    ArbitrationClaimID        protocol.ArbitrationClaimID        // verified arbitration claim identity
+    Payloads                  [][]byte                           // verified content in authorized order
 }
 
 // The result deliberately has no PaymentUpdate: 008 acceptance never produces
@@ -180,10 +181,10 @@ type PoolFundingAcceptance struct {
 // owner/lease/acquire/held/release/expiry semantics — serialization is the
 // caller's job.
 type ContentDeliveryState struct {
-    RefundTemplateTxID        pool.RefundTemplateTxID
-    PaymentAuthorizationHash  pool.Hash32
-    PaymentSequence           uint32
-    SellerAmountAfterSat      uint64
+    RefundTemplateTxID         pool.RefundTemplateTxID
+    PaymentAuthorizationID     protocol.PaymentAuthorizationID
+    PaymentSequence            uint32
+    SellerAmountAfterSatoshis  uint64
 }
 
 // CreateQuote signs deterministic 001 terms using system UTC read once at
@@ -198,7 +199,7 @@ func (workflow *Workflow) PresignPoolOpening(ctx context.Context, request *pool.
 // presign proof and computes the initial refund state. Nothing is submitted:
 // broadcast the returned FundingTx yourself, then persist Opening and
 // InitialPayment.
-func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTxDelivery) (*PoolFundingAcceptance, error)
+func (workflow *Workflow) AcceptPoolFunding(ctx context.Context, presignProof *pool.OpeningProof, delivery *pool.FundingTransactionDelivery) (*PoolFundingAcceptance, error)
 
 // BuildContentDelivery verifies 003 against explicit quote/opening/previous
 // state and caller-supplied content bytes, then signs 004. Save the returned
@@ -244,28 +245,26 @@ type WorkflowConfig struct {
 
 func NewWorkflow(config WorkflowConfig) (*Workflow, error)
 
-// ArbitrationReceipt is the inner three-element Kind 9 document: Claim ID,
-// positive arbiter amount, and the ForkID|All transaction signature over the
-// independently rebuilt candidate.
+// ArbitrationReceipt is the inner three-element Kind 9 document: typed Claim
+// ID, positive arbiter amount, and the ForkID|All transaction signature over
+// the independently rebuilt candidate.
 type ArbitrationReceipt struct {
-    ClaimID                     []byte
-    ArbiterAmountSat            uint64
-    ArbiterTransactionSignature []byte
+    ArbitrationClaimID                 protocol.ArbitrationClaimID
+    ArbiterAmountSatoshis              uint64
+    ArbiterPaymentTransactionSignature []byte
 }
 
 // ArbitrationResponse is the exact four-element Kind 9 message.
 type ArbitrationResponse struct {
-    Version                 uint64
-    ReceiptCBOR             []byte
-    ArbiterReceiptSignature []byte
+    ArbitrationReceiptCBOR             []byte
+    ArbiterArbitrationReceiptSignature []byte // SignWireDocument(1, 9, ...)
 }
 
-// ArbitrationClaimID returns SHA-256(deterministic-CBOR([4, 8, exact_claim_cbor])).
-func ArbitrationClaimID(claimCBOR []byte) ([]byte, error)
+// ArbitrationClaimID returns SHA-256(exact_claim_cbor) as a typed ID.
+func ArbitrationClaimID(claimCBOR []byte) (protocol.ArbitrationClaimID, error)
 func ValidateReceipt(receipt *ArbitrationReceipt) error
 func MarshalReceipt(receipt *ArbitrationReceipt) ([]byte, error)
 func UnmarshalReceipt(raw []byte) (*ArbitrationReceipt, error)
-func ArbiterReceiptSigningCBOR(receiptCBOR []byte) ([]byte, error)
 
 // PreparePayment validates Claim, Buyer authorization, Seller Claim signature,
 // payload custody, and the independently rebuilt candidate for the caller's
@@ -277,43 +276,48 @@ func (workflow *arbitration.Workflow) PreparePayment(ctx context.Context, reques
 // SignPreparedPayment rechecks the opaque prepared evidence against the frozen
 // exact request and frozen fee, independently rebuilds the candidate, signs the
 // transaction signature first, encodes the Receipt, and returns the response
-// carrying both the receipt message signature over [4, 9, exact_receipt_cbor]
+// carrying both the receipt message signature over exact_receipt_cbor through
+// SignWireDocument(1, 9, ...)
 // and the transaction signature inside it.
 func (workflow *arbitration.Workflow) SignPreparedPayment(ctx context.Context, prepared *arbitration.PreparedPayment) (*arbitration.ArbitrationResponse, error)
 
-// PreparedPayment deep-copy getters: Request(), ContentPayloadsCBOR(),
-// ContentPayloads(), ClaimID(), ArbiterAmountSat(), PaymentAuthorizationHash(),
-// UnsignedPayment(), DeadlineUnix(), PreparedAt().
+// PreparedPayment deep-copy getters: Request(), Claim(),
+// ContentPayloadsCBOR(), ContentPayloads(), ArbitrationClaimID(),
+// PaymentAuthorizationID(), ArbiterAmountSatoshis(), UnsignedPayment(),
+// RefundTemplateTxID(), DeadlineUnixSeconds(), PreparedAt().
 
-// ContentRetrievalRequest is the exact five-element Kind 10 message.
+// ContentRetrievalRequest is the exact four-element Kind 10 message. The
+// buyer signs content_retrieval_request_cbor =
+// [arbitration_claim_id, retrieval_nonce] through SignWireDocument(1, 10, ...).
 type ContentRetrievalRequest struct {
-    Version        uint64
-    ClaimID        []byte // 32 bytes
-    Nonce          []byte // 32 bytes, not all zero
-    BuyerSignature []byte
+    ContentRetrievalRequestCBOR           []byte
+    BuyerContentRetrievalRequestSignature []byte
 }
 
-// ContentRetrievalResponse is the exact four-element Kind 11 message embedding
-// the exact persisted Kind 8/9 bytes verbatim; payloads appear only once,
-// inside the embedded Kind 8. No third outer signature exists on Kind 11.
+// ContentRetrievalResponse is the Arbiter-signed two-branch union (Kind 11):
+// unavailable [1, 11, result_cbor, signature] carries a structured reason and
+// no attachment; available [1, 11, result_cbor, signature,
+// content_payloads_cbor] binds the exact bundle through its
+// content_payloads_id. No embedded Kind 8/9 bytes exist on Kind 11.
 type ContentRetrievalResponse struct {
-    Version                 uint64
-    ArbitrationRequestCBOR  []byte
-    ArbitrationResponseCBOR []byte
+    ContentRetrievalResultCBOR             []byte
+    ArbiterContentRetrievalResultSignature []byte // SignWireDocument(1, 11, ...)
+    ContentPayloadsCBOR                    []byte // available branch only
 }
 
 // VerifiedCustodiedContent is the deep-copied result of full custody evidence
-// verification: Claim ID, payload bundle, Receipt, and both embedded messages.
+// verification: typed Claim ID, the payload bundle derived from the exact
+// Kind 8 evidence bytes, Receipt, and both stored messages.
 type VerifiedCustodiedContent struct {
-    ClaimID      []byte
-    PayloadsCBOR []byte
-    Payloads     [][]byte
-    Receipt      *ArbitrationReceipt
-    Request      *ArbitrationRequest
-    Response     *ArbitrationResponse
+    ArbitrationClaimID protocol.ArbitrationClaimID
+    PayloadsCBOR       []byte
+    Payloads           [][]byte
+    Receipt            *ArbitrationReceipt
+    Request            *ArbitrationRequest
+    Response           *ArbitrationResponse
 }
 
-func BuyerRetrievalSigningCBOR(claimID, nonce []byte) ([]byte, error)
+func EncodeContentRetrievalRequestDocument(claimID protocol.ArbitrationClaimID, nonce []byte) ([]byte, error)
 func MarshalContentRetrievalRequest(request *ContentRetrievalRequest) ([]byte, error)
 func UnmarshalContentRetrievalRequest(raw []byte) (*ContentRetrievalRequest, error)
 func ValidateContentRetrievalResponse(response *ContentRetrievalResponse) error
@@ -329,15 +333,18 @@ func VerifyCustodiedContent(arbitrationRequest *ArbitrationRequest, arbitrationR
 
 // VerifyContentRetrievalRequest authenticates one Kind 10 against a stored
 // record: full custody verification first, then the arbiter-key check, then
-// the buyer signature over [4, 10, claim_id, nonce] with the buyer key
+// the buyer signature over content_retrieval_request_cbor through
+// SignWireDocument(1, 10, ...) with the buyer key
 // recovered from the stored Claim. The application still owns lookup, nonce
 // atomicity, retention, and transport.
 func (workflow *Workflow) VerifyContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest, storedArbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error)
 
-// BuildContentRetrievalResponse wraps two exact persisted custody documents
-// into Kind 11 after strict decoding and fully verifying them; the original
-// bytes are embedded verbatim, never re-encoded.
-func BuildContentRetrievalResponse(exactKind8, exactKind9 []byte) (*ContentRetrievalResponse, error)
+// BuildContentRetrievalUnavailable signs the negative Kind 11 branch for a
+// structurally valid request ID; BuildContentRetrievalAvailableRaw signs the
+// positive branch over the exact canonical payload bundle, binding it through
+// content_payloads_id.
+func BuildContentRetrievalUnavailable(requestID protocol.ContentRetrievalRequestID, reason ContentRetrievalUnavailableReason, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error)
+func BuildContentRetrievalAvailableRaw(requestID protocol.ContentRetrievalRequestID, payloadsCBOR []byte, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error)
 ```
 
 The pool package also exposes one deliberately public pure function for the
@@ -397,7 +404,7 @@ journal.SaveOpening("buyer", acceptance.Opening)
 journal.SaveLatestPayment("buyer", acceptance.InitialPayment)
 
 // 0204: package the verified proof's funding transaction.
-delivery, err := buyerWorkflow.BuildFundingTxDelivery(ctx, acceptance.Opening)
+delivery, err := buyerWorkflow.BuildFundingTransactionDelivery(ctx, acceptance.Opening)
 send(delivery)
 
 // 0205: verify funding against the saved presign proof.
@@ -428,10 +435,10 @@ verified, err := buyerWorkflow.AcceptDelivery(ctx, quote, opening, latest, reque
 for _, payload := range verified.Payloads { save(payload) } // saving is the application's responsibility
 // The minimal 005 credential carries only hash + buyer signature; index the
 // exact original 003 under the authorization hash before sending it.
-journal.IndexAuthorization(verified.Update.PaymentAuthorizationHash, request)
+journal.IndexAuthorization(verified.Update.PaymentAuthorizationID, request)
 send(verified.Update)
 
-authorization := journal.LoadAuthorizationByHash(verified.Update.PaymentAuthorizationHash)
+authorization := journal.LoadAuthorizationByID(verified.Update.PaymentAuthorizationID)
 signed, err := sellerWorkflow.AcceptPayment(ctx, opening, latest,
     authorization, savedDeliveryState, verified.Update, blockHeight)
 journal.SaveLatestPayment("seller", &signed.State)
@@ -460,7 +467,7 @@ broadcast(signed.RawTx)
 ### 7. Two other endings: negotiated close and expiry refund
 
 ```go
-unsigned, buyerSig, _ := buyerWorkflow.BuildImmediateClose(ctx, opening, latest, targetSellerAmountSat, blockHeight)
+unsigned, buyerSig, _ := buyerWorkflow.BuildImmediateClose(ctx, opening, latest, targetSellerAmountSatoshis, blockHeight)
 closed, _ := sellerWorkflow.SignImmediateClose(ctx, opening, unsigned, buyerSig, blockHeight)
 final, _ := buyerWorkflow.CompleteImmediateClose(ctx, opening, closed)
 broadcast(final.RawTx)
@@ -480,18 +487,19 @@ nonce := make([]byte, arbitration.RetrievalNonceBytes)
 rand.Read(nonce)
 retrievalRequest, err := buyerWorkflow.BuildArbitrationContentRequest(ctx,
     opening, sent003Authorization, nonce)
-rawKind10, err := wire.MarshalArbitrationContentRequest(retrievalRequest)
+rawKind10, err := arbitration.MarshalContentRetrievalRequest(retrievalRequest)
 journal.RecordOutbox("kind10", rawKind10) // persist BEFORE sending
 sendToArbiter(rawKind10)
 
-// Arbiter application: strict decode -> lookup -> Retrievable check ->
-// VerifyContentRetrievalRequest (signature first) -> atomic nonce CAS ->
-// BuildContentRetrievalResponse embedding the exact persisted Kind 8/9.
+// Arbiter application: strict decode -> replay of the first persisted answer ->
+// lookup -> buyer authentication -> atomic nonce CAS -> sign the Kind 11
+// branch, binding the verified evidence payload bundle through
+// content_payloads_id (no embedded Kind 8/9).
 rawKind11 := handleContentRetrieval(rawKind10)
 sendToBuyer(rawKind11)
 
 // Buyer: full time-independent acceptance; no clock read anywhere.
-kind11, err := wire.UnmarshalArbitrationContentResponse(rawKind11)
+kind11, err := arbitration.UnmarshalContentRetrievalResponse(rawKind11)
 verified, err := buyerWorkflow.AcceptArbitratedContent(ctx, quote, opening,
     latest, sent003Authorization, retrievalRequest, kind11, buyer.ArbitratedContentInput{Seed: seedBytes})
 for _, payload := range verified.Payloads { save(payload) } // app persistence

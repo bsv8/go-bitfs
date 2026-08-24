@@ -15,8 +15,8 @@ title: 003 · 内容获取请求需求
 
 003 携带 1–64 个不重复的有序内容哈希批次（`ContentHashesCBOR`，先确定性 CBOR 编码再作为 `bstr` 嵌入的子文档）。协议没有任何由发送方声明的内容类型：
 
-- 等于报价 `SeedHash` 的哈希被识别为 seed，按 `SeedPriceSat` 计价。
-- 其余哈希必须出现在该 seed 的文件块哈希列表中，并按其位置的协议期望长度计价（完整块按 `FullBlockPriceSat`；尾块按比例上取整及约定的 10% 卖方计算规则）。
+- 等于报价 `SeedHash` 的哈希被识别为 seed，按 `SeedPriceSatoshis` 计价。
+- 其余哈希必须出现在该 seed 的文件块哈希列表中，并按其位置的协议期望长度计价（完整块按 `FullBlockPriceSatoshis`；尾块按比例上取整及约定的 10% 卖方计算规则）。
 - 找不到的哈希返回 `ErrContentNotInSeed`。
 - 顺序是授权的一部分：哈希不会被排序、去重或重排后接受；重复条目直接拒绝。
 - 同一哈希若在 seed 中出现多次，购买一次即可复用到文件中所有相同位置；若这些位置推导出冲突的期望长度，证据不可消歧，整批拒绝。
@@ -26,7 +26,7 @@ title: 003 · 内容获取请求需求
 
 买方用 `RefundTemplateTxID` 选择可用费用池，并只承诺一个目标 `PaymentSequence`：接收方验证 `request.PaymentSequence == previous.PaymentSequence + 1`（相对其当前已接受状态），且目标不得超过 `0xfffffffe`。
 
-`SellerAmountAfterSat` 是付款后卖方的绝对累计金额——不是本批增量。聚合批次价格必须精确等于 `SellerAmountAfterSat - previous.SellerAmountSat`，并在签名前用 checked-add 累加；溢出、容量不足或任一项分类失败都会让整个构造在任何签名存在之前失败。
+`SellerAmountAfterSatoshis` 是付款后卖方的绝对累计金额——不是本批增量。聚合批次价格必须精确等于 `SellerAmountAfterSatoshis - previous.SellerAmountSatoshis`，并在签名前用 checked-add 累加；溢出、容量不足或任一项分类失败都会让整个构造在任何签名存在之前失败。
 
 同一个池不能同时被卖方接受为多张未完成请求，否则同一笔余额会被重复承诺。这是调用方应用的本地运行约束（应用负责按池串行化批次）；SDK 仅验证显式输入，不在 SDK 内新增 store、mutex 或 lease。
 
@@ -34,8 +34,8 @@ title: 003 · 内容获取请求需求
 
 ## 为什么只带引用
 
-003 不携带公钥和矿工费率：Buyer/Seller/Arbiter 公钥与费率由 `RefundTemplateTxID` 对应且不可修改的 OpeningProof 唯一确定。正常 003 验证使用对应 OpeningProof（`VerifySignedContentRequestForOpening`）。007 Claim 不携带 OpeningProof，而是携带精确角色顺序的资金池脚本和卖方声明的 source context，供仲裁者独立重建 candidate。报价仅由 `QuoteTermsHash` 选择——费用池不能替代报价，因为同一池可以购买同一组角色下不同报价的内容。
+003 不携带公钥和矿工费率：Buyer/Seller/Arbiter 公钥与费率由 `RefundTemplateTxID` 对应且不可修改的 OpeningProof 唯一确定。正常 003 验证使用对应 OpeningProof（`VerifySignedContentRequestForOpening`）。007 Claim 不携带 OpeningProof，而是携带精确角色顺序的资金池脚本和卖方声明的 source context，供仲裁者独立重建 candidate。报价仅由 `FileQuoteTermsID` 选择——费用池不能替代报价，因为同一池可以购买同一组角色下不同报价的内容。
 
-精确的 `TermsCBOR` 随后产生 `PaymentAuthorizationHash = SHA-256(TermsCBOR)`。004 用它引用授权，005 用它把付款和具体批次取件关联。007 中卖方把本地保存的 003 与已验证的 004 payload bundle 组合成带 Seller 签名的 Claim；仲裁者接收 Claim 和 payload bundle，并独立重建付款，不接收 OpeningProof 或历史付款链。
+精确的 `payment_authorization_cbor` 随后产生 `PaymentAuthorizationID = SHA-256(payment_authorization_cbor)`。004 用它引用授权，005 用它把付款和具体批次取件关联。007 中卖方把本地保存的 003 与已验证的 004 payload bundle 组合成带 Seller 签名的 Claim；仲裁者接收 Claim 和 payload bundle，并独立重建付款，不接收 OpeningProof 或历史付款链。
 
 编码细节见[内容获取请求规范](003-content-request-spec.md)。

@@ -1,8 +1,8 @@
 // 0201 是开池流程的第一个买方动作。
 //
-// 这个子项目负责两件事：先在买方本地准备一笔真实的 FundingTx，再根据
-// FundingTx 构造退款交易并生成 RefundPresignRequest。需要特别注意的是，
-// FundingTx 的原文不会放进本次发给卖方的报文，报文中只公开其交易 ID；
+// 这个子项目负责两件事：先在买方本地准备一笔真实的 FundingTransactionRaw，再根据
+// FundingTransactionRaw 构造退款交易并生成 RefundPresignRequest。需要特别注意的是，
+// FundingTransactionRaw 的原文不会放进本次发给卖方的报文，报文中只公开其交易 ID；
 // 这样卖方可以先验证退款条件，但要等买方把本地状态写入自己的 checkpoint
 // 之后，才会收到完整的资金交易（见 0204）。
 package main
@@ -45,7 +45,7 @@ func main() {
 	debug("[buyer] selected network: %s", addresses.Network)
 	debug("[buyer] funding address: %s", addresses.SelectedAddress)
 	// PrepareFunding 在 demo 层查询 JungleBus，重建地址的已确认 UTXO，
-	// 选择一个可用输出，并使用买方私钥签名真实 FundingTx。它不是协议报文，
+	// 选择一个可用输出，并使用买方私钥签名真实 FundingTransactionRaw。它不是协议报文，
 	// 只在买方本地短暂持有，稍后随 BuyerOpeningState 进入买方 checkpoint。
 	funding, err := session.PrepareFunding(ctx)
 	if err != nil {
@@ -78,7 +78,7 @@ func main() {
 	} else {
 		debug("[config] miner fee rate override: DEMO_02_MINER_FEE_RATE_SAT_PER_KB")
 	}
-	debug("[funding] miner fee rate: %d sat/KB (%s)", funding.MinerFeeRateSatPerKB, funding.MinerFeeRateSource)
+	debug("[funding] miner fee rate: %d sat/KB (%s)", funding.MinerFeeRateSatoshisPerKilobyte, funding.MinerFeeRateSource)
 	debug("[funding] actual miner fee: %d satoshis; raw size: %d bytes", funding.FundingFeeSatoshis, len(funding.RawTx))
 	// 这里用库的规范交易解析器计算 FundingTxID，而不是对原始 hex 做普通
 	// 哈希。规范解析同时保证后续流程使用的交易序列化与协议身份一致。
@@ -91,7 +91,7 @@ func main() {
 	// PreparePoolOpening 返回 wire 报文与买方私有状态。SDK 不做任何保存；
 	// 应用必须先持久化 State，再发送 Request。这里由 demo checkpoint 承担
 	// “应用数据库”的角色。
-	preparation, err := session.Buyer.PreparePoolOpening(ctx, session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatPerKB))
+	preparation, err := session.Buyer.PreparePoolOpening(ctx, session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatoshisPerKilobyte))
 	if err != nil {
 		fail(fmt.Errorf("buyer.PreparePoolOpening: %w", err))
 	}
@@ -102,7 +102,7 @@ func main() {
 	debug("[buyer] BuyerOpeningState 已保存到应用 checkpoint %s", checkpointPath)
 	// wire 层使用协议规定的严格 CBOR 编码。编码失败时不能继续输出，
 	// 否则下一个子项目会把不完整数据误当成 RefundPresignRequest。
-	raw, err := wire.MarshalPoolRefundPresignRequest(preparation.Request)
+	raw, err := wire.MarshalRefundPresignRequest(preparation.Request)
 	if err != nil {
 		fail(fmt.Errorf("encode RefundPresignRequest: %w", err))
 	}
@@ -110,10 +110,10 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("derive RefundTemplateTxID: %w", err))
 	}
-	debug("[buyer] RefundTx bytes: %d", len(preparation.Request.RefundTx))
+	debug("[buyer] RefundTemplateRaw bytes: %d", len(preparation.Request.RefundTemplateRaw))
 	debug("[buyer] RefundTemplateTxID (pool correlation ID): %s", hex.EncodeToString(refundTemplateTxID[:]))
-	debug("[buyer] FundingTxID (derived from RefundTx): %s", fundingTransaction.TxID().String())
-	debug("[buyer] FundingTx 原文尚未进入报文：yes（仅保存在买方私有 checkpoint）")
+	debug("[buyer] FundingTxID (derived from RefundTemplateRaw): %s", fundingTransaction.TxID().String())
+	debug("[buyer] FundingTransactionRaw 原文尚未进入报文：yes（仅保存在买方私有 checkpoint）")
 	debug("[transport] buyer -> seller: PoolRefundPresignRequest (%d bytes)", len(raw))
 	// stdout 只输出可传给下一个命令的 hex 报文，stderr 承载调试日志。
 	// 这种分离使得 tee 保存的文件不会混入人类可读日志。

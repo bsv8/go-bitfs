@@ -36,9 +36,9 @@ func TestBuild2of3LockingScriptUsesExplicitParticipantRoles(t *testing.T) {
 	arbiter := mustPoolTestKey(t, "33")
 
 	lock, err := Build2of3LockingScript(MultisigPoolPublicKeys{
-		BuyerPubKey:   buyer.PubKey().Compressed(),
-		SellerPubKey:  seller.PubKey().Compressed(),
-		ArbiterPubKey: arbiter.PubKey().Compressed(),
+		BuyerPublicKey:   buyer.PubKey().Compressed(),
+		SellerPublicKey:  seller.PubKey().Compressed(),
+		ArbiterPublicKey: arbiter.PubKey().Compressed(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,9 +56,9 @@ func TestBuild2of3LockingScriptUsesExplicitParticipantRoles(t *testing.T) {
 
 func TestParseArbitratedPoolLockingScriptRejectsNonCanonicalRoles(t *testing.T) {
 	keys := MultisigPoolPublicKeys{
-		BuyerPubKey:   mustPoolTestKey(t, "11").PubKey().Compressed(),
-		SellerPubKey:  mustPoolTestKey(t, "22").PubKey().Compressed(),
-		ArbiterPubKey: mustPoolTestKey(t, "33").PubKey().Compressed(),
+		BuyerPublicKey:   mustPoolTestKey(t, "11").PubKey().Compressed(),
+		SellerPublicKey:  mustPoolTestKey(t, "22").PubKey().Compressed(),
+		ArbiterPublicKey: mustPoolTestKey(t, "33").PubKey().Compressed(),
 	}
 	raw, err := Build2of3LockingScript(keys)
 	if err != nil {
@@ -88,11 +88,11 @@ func TestSignerBoundaryRejectsWrongRoleMalformedAndInvalidSignatures(t *testing.
 	}
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyer.PubKey().Compressed(), SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()}
+	input := OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()}
 	if _, err := NewBuyerPoolAdapter(engine, seller).BuildRefundPresignRequest(ctx, input); err == nil {
 		t.Fatal("wrong role signer was accepted")
 	}
@@ -114,11 +114,11 @@ func TestBuildRefundPresignRequestRequiresPoolAtOutputZero(t *testing.T) {
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 1, LockingScript: script.NewFromBytes([]byte{0x51})})
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyer.PubKey().Compressed(), SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = NewBuyerPoolAdapter(engine, buyer).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	_, err = NewBuyerPoolAdapter(engine, buyer).BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err == nil {
 		t.Fatal("pool output at index 1 was accepted")
 	}
@@ -136,14 +136,14 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	}
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyer.PubKey().Compressed(), SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	buyerPool := NewBuyerPoolAdapter(engine, buyer)
 	sellerPool := NewSellerPoolAdapter(engine, seller)
 	arbiterPool := NewArbiterPoolAdapter(engine, arbiter)
-	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: 500, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,28 +166,28 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if previous.PaymentSequence != 2 || previous.ArbiterAmountSat != 0 {
+	if previous.PaymentSequence != 2 || previous.ArbiterAmountSatoshis != 0 {
 		t.Fatalf("opening state = %+v", previous)
 	}
-	unsigned, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSat: 1000})
+	unsigned, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSatoshis: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyerSig, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
+	buyerSignature, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(unsigned.RawTx, mustRawUnsigned(t, unsigned)) {
 		t.Fatal("buyer signing changed unsigned transaction")
 	}
-	if err := engine.VerifyBuyerPayment(unsigned, buyerSig, proof); err != nil {
+	if err := engine.VerifyBuyerPayment(unsigned, buyerSignature, proof); err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
+	sellerSignature, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := sellerPool.MergeBuyerSellerPayment(unsigned, buyerSig, sellerSig, proof)
+	accepted, err := sellerPool.MergeBuyerSellerPayment(unsigned, buyerSignature, sellerSignature, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 		t.Fatalf("normal signature metadata = %+v", parsedAccepted)
 	}
 	accepted.State.RawTx = append([]byte(nil), accepted.RawTx...)
-	finalUnsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: &accepted.State, SellerAmountAfterSat: accepted.State.SellerAmountSat})
+	finalUnsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: &accepted.State, SellerAmountAfterSatoshis: accepted.State.SellerAmountSatoshis})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbitrationUnsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, 2000, 500)
+	arbitrationUnsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, 2000, 500)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,12 +256,12 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	if len(parsedArbitrated.BuyerTransactionSignature) != 0 || len(parsedArbitrated.SellerTransactionSignature) == 0 || len(parsedArbitrated.ArbiterTransactionSignature) == 0 {
 		t.Fatalf("arbitrated signature metadata = %+v", parsedArbitrated)
 	}
-	for _, amount := range []uint64{0, 1000, 2000, previous.BuyerAmountSat} {
-		normal, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSat: amount})
+	for _, amount := range []uint64{0, 1000, 2000, previous.BuyerAmountSatoshis} {
+		normal, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSatoshis: amount})
 		if err != nil {
 			t.Fatalf("normal candidate amount %d: %v", amount, err)
 		}
-		if normal.ArbiterAmountSat != 0 {
+		if normal.ArbiterAmountSatoshis != 0 {
 			t.Fatalf("normal 005 candidate at amount %d carried a non-zero arbiter amount", amount)
 		}
 		parsedNormal, err := tx.NewTransactionFromBytes(normal.RawTx)
@@ -308,11 +308,11 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 		t.Fatal("arbitration signer accepted a changed locktime")
 	}
 	tamperedMetadata := *arbitrationUnsigned
-	tamperedMetadata.SellerAmountSat++
+	tamperedMetadata.SellerAmountSatoshis++
 	if _, err := engine.SignArbitrationSellerPayment(ctx, &tamperedMetadata, seller); err == nil {
 		t.Fatal("arbitration signer accepted changed candidate metadata")
 	}
-	zeroSourceTx, err := tx.NewTransactionFromBytes(proof.RefundTx)
+	zeroSourceTx, err := tx.NewTransactionFromBytes(proof.RefundTemplateRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,11 +331,11 @@ func TestMultisigPoolV4NormalAndArbitrationDetachedSignatures(t *testing.T) {
 	malformed.Outputs = malformed.Outputs[:1]
 	malformedUnsigned := *arbitrationUnsigned
 	malformedUnsigned.RawTx = malformed.Bytes()
-	if err := engine.VerifyBuyerPayment(&malformedUnsigned, buyerSig, proof); err == nil {
+	if err := engine.VerifyBuyerPayment(&malformedUnsigned, buyerSignature, proof); err == nil {
 		t.Fatal("malformed detached verification unexpectedly succeeded")
 	}
 	assertMergeRejectsWithoutPanic(t, func() error {
-		_, err := sellerPool.MergeBuyerSellerPayment(&malformedUnsigned, buyerSig, sellerSig, proof)
+		_, err := sellerPool.MergeBuyerSellerPayment(&malformedUnsigned, buyerSignature, sellerSignature, proof)
 		return err
 	})
 	assertMergeRejectsWithoutPanic(t, func() error {
@@ -376,7 +376,7 @@ func mustUnsignedPaymentFixture(t *testing.T) (*MultisigPoolEngine, *OpeningProo
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsigned, err := engine.BuildPaymentUpdate(context.Background(), PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1000})
+	unsigned, err := engine.BuildPaymentUpdate(context.Background(), PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSatoshis: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,20 +392,20 @@ func TestExportedPoolAPIsRejectProofBoundAdversaries(t *testing.T) {
 	buyerPool := NewBuyerPoolAdapter(engine, buyerSigner)
 	sellerPool := NewSellerPoolAdapter(engine, sellerSigner)
 	arbiterPool := NewArbiterPoolAdapter(engine, arbiterSigner)
-	buyerSig, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
+	buyerSignature, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
+	sellerSignature, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterSig, err := arbiterPool.SignArbiterPayment(ctx, unsigned, proof)
+	arbiterSignature, err := arbiterPool.SignArbiterPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	badMetadata := *unsigned
-	badMetadata.SellerAmountSat++
+	badMetadata.SellerAmountSatoshis++
 	badRaw := append([]byte(nil), unsigned.RawTx...)
 	badMetadata.RawTx = badRaw
 	cases := []struct {
@@ -417,15 +417,15 @@ func TestExportedPoolAPIsRejectProofBoundAdversaries(t *testing.T) {
 		{"sign seller", func() error { _, e := sellerPool.SignSellerPayment(ctx, &badMetadata, proof); return e }, sellerSigner},
 		{"sign seller arbitration", func() error { _, e := engine.SignArbitrationSellerPayment(ctx, &badMetadata, sellerSigner); return e }, sellerSigner},
 		{"sign arbiter", func() error { _, e := arbiterPool.SignArbiterPayment(ctx, &badMetadata, proof); return e }, arbiterSigner},
-		{"verify buyer", func() error { return engine.VerifyBuyerPayment(&badMetadata, buyerSig, proof) }, nil},
-		{"verify seller", func() error { return engine.VerifySellerPayment(&badMetadata, sellerSig, proof) }, nil},
-		{"verify arbiter", func() error { return engine.VerifyArbiterPayment(&badMetadata, arbiterSig, proof) }, nil},
+		{"verify buyer", func() error { return engine.VerifyBuyerPayment(&badMetadata, buyerSignature, proof) }, nil},
+		{"verify seller", func() error { return engine.VerifySellerPayment(&badMetadata, sellerSignature, proof) }, nil},
+		{"verify arbiter", func() error { return engine.VerifyArbiterPayment(&badMetadata, arbiterSignature, proof) }, nil},
 		{"merge buyer seller", func() error {
-			_, e := engine.MergeBuyerSellerPayment(&badMetadata, buyerSig, sellerSig, proof)
+			_, e := engine.MergeBuyerSellerPayment(&badMetadata, buyerSignature, sellerSignature, proof)
 			return e
 		}, nil},
 		{"merge seller arbiter", func() error {
-			_, e := engine.MergeSellerArbiterPayment(&badMetadata, sellerSig, sellerSig, proof)
+			_, e := engine.MergeSellerArbiterPayment(&badMetadata, sellerSignature, sellerSignature, proof)
 			return e
 		}, nil},
 	}
@@ -443,11 +443,17 @@ func TestExportedPoolAPIsRejectProofBoundAdversaries(t *testing.T) {
 		{"sign seller nil proof", func() error { _, e := sellerPool.SignSellerPayment(ctx, unsigned, nil); return e }, sellerSigner},
 		{"sign arbitration seller nil key", func() error { _, e := engine.SignArbitrationSellerPayment(ctx, unsigned, nil); return e }, sellerSigner},
 		{"sign arbiter nil proof", func() error { _, e := arbiterPool.SignArbiterPayment(ctx, unsigned, nil); return e }, arbiterSigner},
-		{"verify buyer nil proof", func() error { return engine.VerifyBuyerPayment(unsigned, buyerSig, nil) }, nil},
-		{"verify seller nil proof", func() error { return engine.VerifySellerPayment(unsigned, sellerSig, nil) }, nil},
-		{"verify arbiter nil proof", func() error { return engine.VerifyArbiterPayment(unsigned, arbiterSig, nil) }, nil},
-		{"merge normal nil proof", func() error { _, e := engine.MergeBuyerSellerPayment(unsigned, buyerSig, sellerSig, nil); return e }, nil},
-		{"merge arbitration nil proof", func() error { _, e := engine.MergeSellerArbiterPayment(unsigned, sellerSig, arbiterSig, nil); return e }, nil},
+		{"verify buyer nil proof", func() error { return engine.VerifyBuyerPayment(unsigned, buyerSignature, nil) }, nil},
+		{"verify seller nil proof", func() error { return engine.VerifySellerPayment(unsigned, sellerSignature, nil) }, nil},
+		{"verify arbiter nil proof", func() error { return engine.VerifyArbiterPayment(unsigned, arbiterSignature, nil) }, nil},
+		{"merge normal nil proof", func() error {
+			_, e := engine.MergeBuyerSellerPayment(unsigned, buyerSignature, sellerSignature, nil)
+			return e
+		}, nil},
+		{"merge arbitration nil proof", func() error {
+			_, e := engine.MergeSellerArbiterPayment(unsigned, sellerSignature, arbiterSignature, nil)
+			return e
+		}, nil},
 	}
 	for _, tc := range nilProofCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -466,7 +472,7 @@ func TestExportedPoolAPIsRejectProofBoundAdversaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrong.RawTx = value.Bytes()
-	if err := engine.VerifyBuyerPayment(&wrong, buyerSig, proof); err == nil {
+	if err := engine.VerifyBuyerPayment(&wrong, buyerSignature, proof); err == nil {
 		t.Fatal("wrong outpoint was accepted")
 	}
 }
@@ -484,7 +490,7 @@ func TestArbitrationFinalSequenceRejectsBeforeSigner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	acceptedUnsigned, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSat: 1000})
+	acceptedUnsigned, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: 3, SellerAmountAfterSatoshis: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +507,7 @@ func TestArbitrationFinalSequenceRejectsBeforeSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	accepted.State.RawTx = accepted.RawTx
-	finalUnsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: &accepted.State, SellerAmountAfterSat: accepted.State.SellerAmountSat})
+	finalUnsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: &accepted.State, SellerAmountAfterSatoshis: accepted.State.SellerAmountSatoshis})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,15 +558,15 @@ func TestEveryExportedPaymentEntryRejectsWrongOutpointAndMalformedProof(t *testi
 	buyerPool := NewBuyerPoolAdapter(engine, buyerSigner)
 	sellerPool := NewSellerPoolAdapter(engine, sellerSigner)
 	arbiterPool := NewArbiterPoolAdapter(engine, arbiterSigner)
-	buyerSig, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
+	buyerSignature, err := buyerPool.SignBuyerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
+	sellerSignature, err := sellerPool.SignSellerPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterSig, err := arbiterPool.SignArbiterPayment(ctx, unsigned, proof)
+	arbiterSignature, err := arbiterPool.SignArbiterPayment(ctx, unsigned, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,15 +599,21 @@ func TestEveryExportedPaymentEntryRejectsWrongOutpointAndMalformedProof(t *testi
 			_, e := arbiterPool.SignArbiterPayment(ctx, u, p)
 			return e
 		}, arbiterSigner},
-		{"buyer verify", func(u *UnsignedPayment, p *OpeningProof) error { return engine.VerifyBuyerPayment(u, buyerSig, p) }, nil},
-		{"seller verify", func(u *UnsignedPayment, p *OpeningProof) error { return engine.VerifySellerPayment(u, sellerSig, p) }, nil},
-		{"arbiter verify", func(u *UnsignedPayment, p *OpeningProof) error { return engine.VerifyArbiterPayment(u, arbiterSig, p) }, nil},
+		{"buyer verify", func(u *UnsignedPayment, p *OpeningProof) error {
+			return engine.VerifyBuyerPayment(u, buyerSignature, p)
+		}, nil},
+		{"seller verify", func(u *UnsignedPayment, p *OpeningProof) error {
+			return engine.VerifySellerPayment(u, sellerSignature, p)
+		}, nil},
+		{"arbiter verify", func(u *UnsignedPayment, p *OpeningProof) error {
+			return engine.VerifyArbiterPayment(u, arbiterSignature, p)
+		}, nil},
 		{"buyer seller merge", func(u *UnsignedPayment, p *OpeningProof) error {
-			_, e := engine.MergeBuyerSellerPayment(u, buyerSig, sellerSig, p)
+			_, e := engine.MergeBuyerSellerPayment(u, buyerSignature, sellerSignature, p)
 			return e
 		}, nil},
 		{"seller arbiter merge", func(u *UnsignedPayment, p *OpeningProof) error {
-			_, e := engine.MergeSellerArbiterPayment(u, sellerSig, arbiterSig, p)
+			_, e := engine.MergeSellerArbiterPayment(u, sellerSignature, arbiterSignature, p)
 			return e
 		}, nil},
 	}
@@ -613,7 +625,7 @@ func TestEveryExportedPaymentEntryRejectsWrongOutpointAndMalformedProof(t *testi
 		})
 		t.Run(tc.name+" malformed proof", func(t *testing.T) {
 			badProof := CloneOpeningProof(proof)
-			badProof.RefundTx = []byte{1, 2, 3}
+			badProof.RefundTemplateRaw = []byte{1, 2, 3}
 			if err := callWithoutPanic(func() error { return tc.call(unsigned, badProof) }); err == nil {
 				t.Fatal("malformed proof unexpectedly accepted")
 			}
@@ -632,7 +644,7 @@ func TestEveryArbitrationEntryRejectsFinalSequenceBeforeSignerOrMerge(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: initial, SellerAmountAfterSat: initial.SellerAmountSat})
+	unsigned, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: initial, SellerAmountAfterSatoshis: initial.SellerAmountSatoshis})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +691,7 @@ func TestBuildPaymentUpdateRejectsSkipOutpointAndMetadataTampering(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 2, SellerAmountAfterSat: 1000}); err == nil {
+	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 2, SellerAmountAfterSatoshis: 1000}); err == nil {
 		t.Fatal("skip-sequence payment update was accepted")
 	}
 	wrongPrevious := *previous
@@ -695,12 +707,12 @@ func TestBuildPaymentUpdateRejectsSkipOutpointAndMetadataTampering(t *testing.T)
 		t.Fatal(err)
 	}
 	wrongPrevious.RawTx = value.Bytes()
-	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: &wrongPrevious, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1000}); err == nil {
+	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: &wrongPrevious, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSatoshis: 1000}); err == nil {
 		t.Fatal("wrong previous outpoint was accepted")
 	}
 	forged := *previous
-	forged.SellerAmountSat++
-	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: &forged, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1000}); err == nil {
+	forged.SellerAmountSatoshis++
+	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: &forged, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSatoshis: 1000}); err == nil {
 		t.Fatal("forged previous metadata was accepted")
 	}
 }
@@ -721,7 +733,7 @@ func TestBuildPaymentUpdateIsDeterministicAndContextBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1000}
+	input := PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSatoshis: 1000}
 	first, err := engine.BuildPaymentUpdate(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -733,14 +745,14 @@ func TestBuildPaymentUpdateIsDeterministicAndContextBound(t *testing.T) {
 	if !bytes.Equal(first.RawTx, second.RawTx) {
 		t.Fatal("identical inputs rebuilt different payment state transactions")
 	}
-	differentAmount, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSat: 1001})
+	differentAmount, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 1, SellerAmountAfterSatoshis: 1001})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(first.RawTx, differentAmount.RawTx) {
 		t.Fatal("different seller amounts rebuilt identical transactions")
 	}
-	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 2, SellerAmountAfterSat: 1000}); err == nil {
+	if _, err := engine.BuildPaymentUpdate(ctx, PaymentUpdateInput{Opening: proof, Previous: previous, PaymentSequence: previous.PaymentSequence + 2, SellerAmountAfterSatoshis: 1000}); err == nil {
 		t.Fatal("skip-sequence rebuild was accepted")
 	}
 }
@@ -810,13 +822,13 @@ func mustRefundExpiryFixtureWithKeys(t *testing.T, lockTime uint32) (*MultisigPo
 	}
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 100000, LockingScript: lock})
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyer.PubKey().Compressed(), SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	buyerPool := NewBuyerPoolAdapter(engine, buyer)
 	sellerPool := NewSellerPoolAdapter(engine, seller)
-	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: lockTime, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	request, err := buyerPool.BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: lockTime, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,12 +863,12 @@ func TestBuildImmediateCloseAllowsBelowBaseTargetButRejectsOverCapacity(t *testi
 	}
 
 	// 目标金额低于基准 Seller 金额是业务决定，SDK 只受容量约束。
-	if _, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: base, SellerAmountAfterSat: 1}); err != nil {
+	if _, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: base, SellerAmountAfterSatoshis: 1}); err != nil {
 		t.Fatalf("below-base target rejected by protocol boundary: %v", err)
 	}
 
 	// 超过池容量必须拒绝。
-	if _, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: base, SellerAmountAfterSat: details.PoolOutputSatoshis + 1}); err == nil {
+	if _, err := engine.BuildImmediateClose(ctx, CloseInput{Opening: proof, Base: base, SellerAmountAfterSatoshis: details.PoolOutputSatoshis + 1}); err == nil {
 		t.Fatal("over-capacity immediate close was accepted")
 	}
 	_ = unsigned
@@ -888,11 +900,11 @@ func mustPaidArbitrationFixture(t *testing.T) (*MultisigPoolEngine, *OpeningProo
 	}
 	funding := tx.NewTransaction()
 	funding.AddOutput(&tx.TransactionOutput{Satoshis: 10_000_000, LockingScript: lock})
-	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPubKey: buyer.PubKey().Compressed(), SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	engine, err := NewMultisigPoolEngine(MultisigPoolEngineConfig{BuyerPublicKey: buyer.PubKey().Compressed(), SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := NewBuyerPoolAdapter(engine, buyer).BuildRefundPresignRequest(ctx, OpeningInput{FundingTx: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatPerKB: 1, SellerPubKey: seller.PubKey().Compressed(), ArbiterPubKey: arbiter.PubKey().Compressed()})
+	request, err := NewBuyerPoolAdapter(engine, buyer).BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding.Bytes(), ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: seller.PubKey().Compressed(), ArbiterPublicKey: arbiter.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +920,7 @@ func mustPaidArbitrationFixture(t *testing.T) (*MultisigPoolEngine, *OpeningProo
 	if err != nil {
 		t.Fatal(err)
 	}
-	refund, err := parseCanonicalTransaction(proof.RefundTx)
+	refund, err := parseCanonicalTransaction(proof.RefundTemplateRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,14 +934,14 @@ func TestBuildArbitrationPaymentFromClaimPositiveFeeBoundaries(t *testing.T) {
 	sellerAmount := uint64(2000)
 
 	zeroFee := func() error {
-		_, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, 0)
+		_, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, 0)
 		return err
 	}
 	if zeroFee() == nil {
 		t.Fatal("zero arbiter fee was accepted by the success builder")
 	}
 
-	oneSat, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, 1)
+	oneSat, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, 1)
 	if err != nil {
 		t.Fatalf("one-sat fee candidate rejected: %v", err)
 	}
@@ -937,22 +949,22 @@ func TestBuildArbitrationPaymentFromClaimPositiveFeeBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rawOne.Outputs[2].Satoshis != 1 || oneSat.ArbiterAmountSat != 1 {
-		t.Fatalf("one-sat fee metadata mismatch: metadata %d raw %d", oneSat.ArbiterAmountSat, rawOne.Outputs[2].Satoshis)
+	if rawOne.Outputs[2].Satoshis != 1 || oneSat.ArbiterAmountSatoshis != 1 {
+		t.Fatalf("one-sat fee metadata mismatch: metadata %d raw %d", oneSat.ArbiterAmountSatoshis, rawOne.Outputs[2].Satoshis)
 	}
-	if rawOne.Outputs[1].Satoshis != sellerAmount || oneSat.SellerAmountSat != sellerAmount {
+	if rawOne.Outputs[1].Satoshis != sellerAmount || oneSat.SellerAmountSatoshis != sellerAmount {
 		t.Fatalf("seller output drifted from Buyer-authorized amount: %d", rawOne.Outputs[1].Satoshis)
 	}
-	if oneSat.BuyerAmountSat != spendable-sellerAmount-1 || rawOne.Outputs[0].Satoshis != spendable-sellerAmount-1 {
-		t.Fatalf("buyer remainder = %d, want %d", oneSat.BuyerAmountSat, spendable-sellerAmount-1)
+	if oneSat.BuyerAmountSatoshis != spendable-sellerAmount-1 || rawOne.Outputs[0].Satoshis != spendable-sellerAmount-1 {
+		t.Fatalf("buyer remainder = %d, want %d", oneSat.BuyerAmountSatoshis, spendable-sellerAmount-1)
 	}
-	if oneSat.BuyerAmountSat+oneSat.SellerAmountSat+oneSat.ArbiterAmountSat+(details.PoolOutputSatoshis-spendable) != details.PoolOutputSatoshis {
+	if oneSat.BuyerAmountSatoshis+oneSat.SellerAmountSatoshis+oneSat.ArbiterAmountSatoshis+(details.PoolOutputSatoshis-spendable) != details.PoolOutputSatoshis {
 		t.Fatal("buyer + seller + arbiter + refund fee did not conserve the pool output")
 	}
 
 	// 恰好耗尽 Buyer 余额是合法边界：Buyer 输出为零但三个输出仍然存在。
 	maxFee := spendable - sellerAmount
-	exhausted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, maxFee)
+	exhausted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, maxFee)
 	if err != nil {
 		t.Fatalf("exactly-exhausting fee rejected: %v", err)
 	}
@@ -960,20 +972,20 @@ func TestBuildArbitrationPaymentFromClaimPositiveFeeBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exhausted.BuyerAmountSat != 0 || rawExhausted.Outputs[0].Satoshis != 0 || len(rawExhausted.Outputs) != 3 {
-		t.Fatalf("exhausted buyer output = %d over %d outputs", exhausted.BuyerAmountSat, len(rawExhausted.Outputs))
+	if exhausted.BuyerAmountSatoshis != 0 || rawExhausted.Outputs[0].Satoshis != 0 || len(rawExhausted.Outputs) != 3 {
+		t.Fatalf("exhausted buyer output = %d over %d outputs", exhausted.BuyerAmountSatoshis, len(rawExhausted.Outputs))
 	}
 
-	overByOne, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, maxFee+1)
+	overByOne, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, maxFee+1)
 	if !errors.Is(err, ErrInsufficientBalance) || overByOne != nil {
 		t.Fatalf("fee exceeding balance by one sat = %v, want ErrInsufficientBalance", err)
 	}
-	_, hugeFeeErr := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, ^uint64(0))
+	_, hugeFeeErr := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, ^uint64(0))
 	if !errors.Is(hugeFeeErr, ErrInsufficientBalance) {
 		t.Fatalf("oversized fee error = %v, want ErrInsufficientBalance", hugeFeeErr)
 	}
 	// Seller 金额本身超过可花费余额时，无论费用多少都拒绝，不得削减修复。
-	_, overSeller := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, spendable+1, 1)
+	_, overSeller := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, spendable+1, 1)
 	if !errors.Is(overSeller, ErrInsufficientBalance) {
 		t.Fatalf("seller amount beyond spendable error = %v, want ErrInsufficientBalance", overSeller)
 	}
@@ -985,31 +997,31 @@ func TestArbitrationSignaturesBindThirdOutputAmount(t *testing.T) {
 	sellerAmount := uint64(2000)
 	fee := uint64(500)
 
-	unsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, fee)
+	unsigned, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, fee)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSig, err := engine.SignArbitrationSellerPayment(ctx, unsigned, mustPoolTestKey(t, "22"))
+	sellerSignature, err := engine.SignArbitrationSellerPayment(ctx, unsigned, mustPoolTestKey(t, "22"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterSig, err := engine.SignArbitrationArbiterPayment(ctx, unsigned, mustPoolTestKey(t, "33"))
+	arbiterSignature, err := engine.SignArbitrationArbiterPayment(ctx, unsigned, mustPoolTestKey(t, "33"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, driftedFee := range []uint64{fee + 1, fee - 1} {
-		shifted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTx, 3, sellerAmount, driftedFee)
+		shifted, err := BuildArbitrationPaymentFromClaim(details.PoolOutputSatoshis, details.PoolLockingScript, proof.RefundTemplateRaw, 3, sellerAmount, driftedFee)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if bytes.Equal(shifted.RawTx, unsigned.RawTx) {
 			t.Fatalf("fee drift to %d produced identical candidate bytes", driftedFee)
 		}
-		if err := engine.VerifyArbitrationSellerPayment(shifted, sellerSig); err == nil {
+		if err := engine.VerifyArbitrationSellerPayment(shifted, sellerSignature); err == nil {
 			t.Fatalf("Seller signature survived a third-output change to %d sats", driftedFee)
 		}
-		if err := engine.VerifyArbitrationArbiterPayment(shifted, arbiterSig); err == nil {
+		if err := engine.VerifyArbitrationArbiterPayment(shifted, arbiterSignature); err == nil {
 			t.Fatalf("Arbiter signature survived a third-output change to %d sats", driftedFee)
 		}
 	}
@@ -1028,7 +1040,7 @@ func TestArbitrationSignaturesBindThirdOutputAmount(t *testing.T) {
 
 	// 元数据与 raw 不一致（错误第三输出金额）必须被拒绝。
 	badMetadata := *unsigned
-	badMetadata.ArbiterAmountSat++
+	badMetadata.ArbiterAmountSatoshis++
 	if _, err := engine.SignArbitrationSellerPayment(ctx, &badMetadata, mustPoolTestKey(t, "22")); err == nil {
 		t.Fatal("signer accepted changed third-output metadata")
 	}

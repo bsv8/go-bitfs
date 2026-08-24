@@ -34,17 +34,24 @@ const lockTimeTimestampThreshold uint32 = 500_000_000
 // block height explicitly per call; fee and transaction rules come from
 // MultisigPool v4.
 type MultisigPoolEngineConfig struct {
-	BuyerPubKey   []byte
-	SellerPubKey  []byte
-	ArbiterPubKey []byte
+	// BuyerPublicKey 是费用池第一角色的压缩公钥（33 字节）；角色顺序固定
+	// [Buyer, Seller, Arbiter]，不可互换。
+	BuyerPublicKey []byte
+	// SellerPublicKey 是费用池第二角色的压缩公钥（33 字节）。
+	SellerPublicKey []byte
+	// ArbiterPublicKey 是费用池第三角色（仲裁方）的压缩公钥（33 字节）。
+	ArbiterPublicKey []byte
 }
 
 // MultisigPoolPublicKeys identifies the three pool participants by settlement role.
 // The explicit fields keep callers from relying on positional key ordering.
 type MultisigPoolPublicKeys struct {
-	BuyerPubKey   []byte
-	SellerPubKey  []byte
-	ArbiterPubKey []byte
+	// BuyerPublicKey 是资金池输出锁定脚本中的第一个角色公钥（压缩 33 字节）。
+	BuyerPublicKey []byte
+	// SellerPublicKey 是资金池输出锁定脚本中的第二个角色公钥（压缩 33 字节）。
+	SellerPublicKey []byte
+	// ArbiterPublicKey 是资金池输出锁定脚本中的第三个角色公钥（压缩 33 字节）。
+	ArbiterPublicKey []byte
 }
 
 // MultisigPoolEngine is the adapter boundary to MultisigPool v4. It preserves
@@ -60,18 +67,21 @@ type MultisigPoolEngine struct {
 // message, local result, log, or persisted structure.
 type BuyerPoolAdapter struct {
 	*MultisigPoolEngine
+	// Key 是调用方解析好的买方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
 	Key *ec.PrivateKey
 }
 
 // SellerPoolAdapter adapts the pool engine to seller workflow operations.
 type SellerPoolAdapter struct {
 	*MultisigPoolEngine
+	// Key 是调用方解析好的卖方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
 	Key *ec.PrivateKey
 }
 
 // ArbiterPoolAdapter adapts the pool engine to arbiter workflow operations.
 type ArbiterPoolAdapter struct {
 	*MultisigPoolEngine
+	// Key 是调用方解析好的仲裁方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
 	Key *ec.PrivateKey
 }
 
@@ -97,15 +107,15 @@ func NewArbiterPoolAdapter(engine *MultisigPoolEngine, key *ec.PrivateKey) *Arbi
 // Buyer/Seller/Arbiter identity for every later transaction check. It returns an
 // error for malformed or duplicate keys and performs no network or storage I/O.
 func NewMultisigPoolEngine(config MultisigPoolEngineConfig) (*MultisigPoolEngine, error) {
-	buyer, err := parsePoolKey(config.BuyerPubKey)
+	buyer, err := parsePoolKey(config.BuyerPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("buyer public key: %w", err)
 	}
-	seller, err := parsePoolKey(config.SellerPubKey)
+	seller, err := parsePoolKey(config.SellerPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("seller public key: %w", err)
 	}
-	arbiter, err := parsePoolKey(config.ArbiterPubKey)
+	arbiter, err := parsePoolKey(config.ArbiterPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("arbiter public key: %w", err)
 	}
@@ -122,15 +132,15 @@ func (engine *MultisigPoolEngine) roles() mp.ArbitratedPoolRoles {
 // Build2of3LockingScript delegates construction of the 2-of-3 MultisigPool
 // locking script using the explicit Buyer, Seller, and Arbiter public keys.
 func Build2of3LockingScript(keys MultisigPoolPublicKeys) ([]byte, error) {
-	buyer, err := parsePoolKey(keys.BuyerPubKey)
+	buyer, err := parsePoolKey(keys.BuyerPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("buyer public key: %w", err)
 	}
-	seller, err := parsePoolKey(keys.SellerPubKey)
+	seller, err := parsePoolKey(keys.SellerPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("seller public key: %w", err)
 	}
-	arbiter, err := parsePoolKey(keys.ArbiterPubKey)
+	arbiter, err := parsePoolKey(keys.ArbiterPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("arbiter public key: %w", err)
 	}
@@ -152,10 +162,10 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 	if input.ExpiryLockTime == 0 {
 		return nil, invalid("refund expiry locktime is required")
 	}
-	if err := engine.matchConfiguredParticipantKeys(input.SellerPubKey, input.ArbiterPubKey); err != nil {
+	if err := engine.matchConfiguredParticipantKeys(input.SellerPublicKey, input.ArbiterPublicKey); err != nil {
 		return nil, err
 	}
-	funding, err := parseCanonicalTransaction(input.FundingTx)
+	funding, err := parseCanonicalTransaction(input.FundingTransactionRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +180,7 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 	if !bytes.Equal(output.LockingScript.Bytes(), lock.Bytes()) {
 		return nil, invalid("funding output does not use the configured pool lock")
 	}
-	state, err := mp.BuildArbitratedPoolOpeningState(funding.TxID().CloneBytes(), PoolOutputIndex, output.Satoshis, engine.roles(), input.ExpiryLockTime, mp.FeeSatPerKB(input.MinerFeeRateSatPerKB))
+	state, err := mp.BuildArbitratedPoolOpeningState(funding.TxID().CloneBytes(), PoolOutputIndex, output.Satoshis, engine.roles(), input.ExpiryLockTime, mp.FeeSatPerKB(input.MinerFeeRateSatoshisPerKilobyte))
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +197,7 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 		}
 		return nil, invalid("buyer refund signature is invalid")
 	}
-	return &RefundPresignRequest{Version: MajorVersion, RefundTx: state.Bytes(), BuyerPubKey: engine.buyer.Compressed(), SellerPubKey: engine.seller.Compressed(), ArbiterPubKey: engine.arbiter.Compressed(), MinerFeeRateSatPerKB: input.MinerFeeRateSatPerKB, BuyerRefundSignature: append([]byte(nil), sig...)}, nil
+	return &RefundPresignRequest{RefundTemplateRaw: state.Bytes(), BuyerPublicKey: engine.buyer.Compressed(), SellerPublicKey: engine.seller.Compressed(), ArbiterPublicKey: engine.arbiter.Compressed(), MinerFeeRateSatoshisPerKilobyte: input.MinerFeeRateSatoshisPerKilobyte, BuyerRefundTransactionSignature: append([]byte(nil), sig...)}, nil
 }
 
 type refundPresignTerms struct {
@@ -197,7 +207,7 @@ type refundPresignTerms struct {
 	poolLockingScript  []byte
 }
 
-// deriveRefundPresignTerms makes RefundTx the single source of truth for its
+// deriveRefundPresignTerms makes RefundTemplateRaw the single source of truth for its
 // funding outpoint and pool amount. The locking script is fixed by the three
 // role keys. The pool amount is the refund's buyer output plus the canonical
 // MultisigPool fee, whose encoded size is independent of the amount value.
@@ -205,7 +215,7 @@ func (engine *MultisigPoolEngine) deriveRefundPresignTerms(request *RefundPresig
 	if engine == nil {
 		return nil, invalid("MultisigPool engine is required")
 	}
-	state, err := parseCanonicalTransaction(request.RefundTx)
+	state, err := parseCanonicalTransaction(request.RefundTemplateRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +229,7 @@ func (engine *MultisigPoolEngine) deriveRefundPresignTerms(request *RefundPresig
 		return nil, err
 	}
 	fundingTxID := state.Inputs[0].SourceTXID.CloneBytes()
-	feeTemplate, err := mp.BuildArbitratedPoolOpeningState(fundingTxID, PoolOutputIndex, math.MaxUint64, engine.roles(), state.LockTime, mp.FeeSatPerKB(request.MinerFeeRateSatPerKB))
+	feeTemplate, err := mp.BuildArbitratedPoolOpeningState(fundingTxID, PoolOutputIndex, math.MaxUint64, engine.roles(), state.LockTime, mp.FeeSatPerKB(request.MinerFeeRateSatoshisPerKilobyte))
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +243,7 @@ func (engine *MultisigPoolEngine) deriveRefundPresignTerms(request *RefundPresig
 	}
 	poolLock := engine.lockBytes()
 	setPoolSource(state, poolAmount, poolLock)
-	if err := engine.verifyOpeningState(state, fundingTxID, PoolOutputIndex, poolAmount, request.MinerFeeRateSatPerKB); err != nil {
+	if err := engine.verifyOpeningState(state, fundingTxID, PoolOutputIndex, poolAmount, request.MinerFeeRateSatoshisPerKilobyte); err != nil {
 		return nil, err
 	}
 	return &refundPresignTerms{state: state, fundingTxID: fundingTxID, poolOutputSatoshis: poolAmount, poolLockingScript: poolLock}, nil
@@ -265,14 +275,14 @@ func (engine *MultisigPoolEngine) validateRefundPresignRequestAndBuyer(request *
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return nil, err
 	}
-	if err := engine.validateRequestRoles(request.BuyerPubKey, request.SellerPubKey, request.ArbiterPubKey); err != nil {
+	if err := engine.validateRequestRoles(request.BuyerPublicKey, request.SellerPublicKey, request.ArbiterPublicKey); err != nil {
 		return nil, err
 	}
 	terms, err := engine.deriveRefundPresignTerms(request)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := mp.VerifyArbitratedPoolBuyerSignature(terms.state, terms.poolOutputSatoshis, engine.roles(), request.BuyerRefundSignature)
+	ok, err := mp.VerifyArbitratedPoolBuyerSignature(terms.state, terms.poolOutputSatoshis, engine.roles(), request.BuyerRefundTransactionSignature)
 	if err != nil || !ok {
 		return nil, invalid("buyer refund signature is invalid")
 	}
@@ -305,10 +315,10 @@ func (engine *MultisigPoolEngine) BuildOpeningProof(ctx context.Context, request
 		return nil, err
 	}
 	proof := &OpeningProof{
-		Version: MajorVersion, RefundTx: append([]byte(nil), request.RefundTx...),
-		BuyerPubKey: append([]byte(nil), request.BuyerPubKey...), SellerPubKey: append([]byte(nil), request.SellerPubKey...), ArbiterPubKey: append([]byte(nil), request.ArbiterPubKey...),
-		MinerFeeRateSatPerKB: request.MinerFeeRateSatPerKB, BuyerRefundSignature: append([]byte(nil), request.BuyerRefundSignature...), SellerRefundSignature: append([]byte(nil), sellerSignature...),
-		FundingTx: append([]byte(nil), fundingTx...),
+		RefundTemplateRaw: append([]byte(nil), request.RefundTemplateRaw...),
+		BuyerPublicKey:    append([]byte(nil), request.BuyerPublicKey...), SellerPublicKey: append([]byte(nil), request.SellerPublicKey...), ArbiterPublicKey: append([]byte(nil), request.ArbiterPublicKey...),
+		MinerFeeRateSatoshisPerKilobyte: request.MinerFeeRateSatoshisPerKilobyte, BuyerRefundTransactionSignature: append([]byte(nil), request.BuyerRefundTransactionSignature...), SellerRefundTransactionSignature: append([]byte(nil), sellerSignature...),
+		FundingTransactionRaw: append([]byte(nil), fundingTx...),
 	}
 	if len(fundingTx) != 0 {
 		if err := engine.VerifyOpening(proof); err != nil {
@@ -319,17 +329,17 @@ func (engine *MultisigPoolEngine) BuildOpeningProof(ctx context.Context, request
 }
 
 // deriveOpeningDetails reconstructs every value omitted from OpeningProof.
-// RefundTx is authoritative for RefundTemplateTxID, the funding outpoint, and amount;
-// participant keys are authoritative for the locking script. When FundingTx is
+// RefundTemplateRaw is authoritative for RefundTemplateTxID, the funding outpoint, and amount;
+// participant keys are authoritative for the locking script. When FundingTransactionRaw is
 // present it must independently agree with those derived terms.
 func (engine *MultisigPoolEngine) deriveOpeningDetails(proof *OpeningProof) (*OpeningDetails, error) {
 	if engine == nil || proof == nil {
 		return nil, invalid("opening proof is required")
 	}
 	request := &RefundPresignRequest{
-		Version: MajorVersion, RefundTx: proof.RefundTx,
-		BuyerPubKey: proof.BuyerPubKey, SellerPubKey: proof.SellerPubKey, ArbiterPubKey: proof.ArbiterPubKey,
-		MinerFeeRateSatPerKB: proof.MinerFeeRateSatPerKB, BuyerRefundSignature: proof.BuyerRefundSignature,
+		RefundTemplateRaw: proof.RefundTemplateRaw,
+		BuyerPublicKey:    proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey,
+		MinerFeeRateSatoshisPerKilobyte: proof.MinerFeeRateSatoshisPerKilobyte, BuyerRefundTransactionSignature: proof.BuyerRefundTransactionSignature,
 	}
 	terms, err := engine.deriveRefundPresignTerms(request)
 	if err != nil {
@@ -342,10 +352,10 @@ func (engine *MultisigPoolEngine) deriveOpeningDetails(proof *OpeningProof) (*Op
 		PoolLockingScript:  append([]byte(nil), terms.poolLockingScript...),
 		RefundLockTime:     terms.state.LockTime,
 	}
-	if len(proof.FundingTx) == 0 {
+	if len(proof.FundingTransactionRaw) == 0 {
 		return details, nil
 	}
-	funding, err := parseCanonicalTransaction(proof.FundingTx)
+	funding, err := parseCanonicalTransaction(proof.FundingTransactionRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -391,17 +401,17 @@ func (engine *MultisigPoolEngine) VerifyOpening(proof *OpeningProof) error {
 	if err := ValidateOpeningProof(proof); err != nil {
 		return err
 	}
-	if err := engine.validateRequestRoles(proof.BuyerPubKey, proof.SellerPubKey, proof.ArbiterPubKey); err != nil {
+	if err := engine.validateRequestRoles(proof.BuyerPublicKey, proof.SellerPublicKey, proof.ArbiterPublicKey); err != nil {
 		return err
 	}
-	if len(proof.FundingTx) == 0 {
+	if len(proof.FundingTransactionRaw) == 0 {
 		return invalid("complete funding transaction is required")
 	}
 	details, err := engine.deriveOpeningDetails(proof)
 	if err != nil {
 		return err
 	}
-	refund, err := parseCanonicalTransaction(proof.RefundTx)
+	refund, err := parseCanonicalTransaction(proof.RefundTemplateRaw)
 	if err != nil {
 		return err
 	}
@@ -412,17 +422,17 @@ func (engine *MultisigPoolEngine) VerifyOpening(proof *OpeningProof) error {
 	if err := requireUnsigned(refund); err != nil {
 		return err
 	}
-	if err := engine.verifyOpeningState(refund, details.FundingTxID[:], PoolOutputIndex, details.PoolOutputSatoshis, proof.MinerFeeRateSatPerKB); err != nil {
+	if err := engine.verifyOpeningState(refund, details.FundingTxID[:], PoolOutputIndex, details.PoolOutputSatoshis, proof.MinerFeeRateSatoshisPerKilobyte); err != nil {
 		return err
 	}
-	ok, err := mp.VerifyArbitratedPoolBuyerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.BuyerRefundSignature)
+	ok, err := mp.VerifyArbitratedPoolBuyerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.BuyerRefundTransactionSignature)
 	if err != nil || !ok {
 		if err != nil {
 			return err
 		}
 		return invalid("buyer refund signature is invalid")
 	}
-	ok, err = mp.VerifyArbitratedPoolSellerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.SellerRefundSignature)
+	ok, err = mp.VerifyArbitratedPoolSellerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.SellerRefundTransactionSignature)
 	if err != nil || !ok {
 		if err != nil {
 			return err
@@ -469,7 +479,7 @@ func (engine *MultisigPoolEngine) refundExpired(proof *OpeningProof, at time.Tim
 	if err := engine.VerifyOpening(proof); err != nil {
 		return err
 	}
-	refund, err := parseCanonicalTransaction(proof.RefundTx)
+	refund, err := parseCanonicalTransaction(proof.RefundTemplateRaw)
 	if err != nil {
 		return err
 	}
@@ -481,7 +491,7 @@ func (engine *MultisigPoolEngine) BuildRefundSubmission(proof *OpeningProof) ([]
 	if err := engine.VerifyOpening(proof); err != nil {
 		return nil, err
 	}
-	refund, err := parseCanonicalTransaction(proof.RefundTx)
+	refund, err := parseCanonicalTransaction(proof.RefundTemplateRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +500,7 @@ func (engine *MultisigPoolEngine) BuildRefundSubmission(proof *OpeningProof) ([]
 		return nil, err
 	}
 	setPoolSource(refund, details.PoolOutputSatoshis, details.PoolLockingScript)
-	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(refund, details.PoolOutputSatoshis, engine.roles(), proof.BuyerRefundSignature, proof.SellerRefundSignature)
+	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(refund, details.PoolOutputSatoshis, engine.roles(), proof.BuyerRefundTransactionSignature, proof.SellerRefundTransactionSignature)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +538,7 @@ func (engine *MultisigPoolEngine) VerifyFundingTx(_ context.Context, rawTx []byt
 
 // VerifyPoolParticipants checks that the opening proof's buyer, seller, and arbiter keys match the supplied values.
 func (engine *MultisigPoolEngine) VerifyPoolParticipants(proof *OpeningProof, buyer, seller, arbiter []byte) error {
-	if proof == nil || !bytes.Equal(proof.BuyerPubKey, buyer) || !bytes.Equal(proof.SellerPubKey, seller) || !bytes.Equal(proof.ArbiterPubKey, arbiter) {
+	if proof == nil || !bytes.Equal(proof.BuyerPublicKey, buyer) || !bytes.Equal(proof.SellerPublicKey, seller) || !bytes.Equal(proof.ArbiterPublicKey, arbiter) {
 		return invalid("pool participant roles do not match")
 	}
 	return nil
@@ -660,7 +670,7 @@ func (engine *MultisigPoolEngine) verifyCanonicalState(state *tx.Transaction, pr
 	previous.Inputs[0].SequenceNumber = sequence - 1
 	previousSource := &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}
 	lock := lockTime
-	expected, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: previousSource, Sequence: sequence, LockTime: &lock, SellerAmount: sellerAmount, ArbiterAmount: arbiterAmount, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(proof.MinerFeeRateSatPerKB), PaymentProof: nil})
+	expected, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: previousSource, Sequence: sequence, LockTime: &lock, SellerAmount: sellerAmount, ArbiterAmount: arbiterAmount, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(proof.MinerFeeRateSatoshisPerKilobyte), PaymentProof: nil})
 	if err != nil {
 		return err
 	}
@@ -685,7 +695,7 @@ func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input 
 	if err != nil {
 		return err
 	}
-	if input.SellerAmountAfterSat < input.Previous.SellerAmountSat || input.SellerAmountAfterSat > details.PoolOutputSatoshis {
+	if input.SellerAmountAfterSatoshis < input.Previous.SellerAmountSatoshis || input.SellerAmountAfterSatoshis > details.PoolOutputSatoshis {
 		return ErrInsufficientBalance
 	}
 	if input.PaymentSequence <= input.Previous.PaymentSequence || input.PaymentSequence == finalPoolSequence {
@@ -731,7 +741,7 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 		return nil, err
 	}
 	setPoolSource(previous, details.PoolOutputSatoshis, details.PoolLockingScript)
-	state, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: input.PaymentSequence, SellerAmount: input.SellerAmountAfterSat, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatPerKB), PaymentProof: nil})
+	state, err := mp.BuildArbitratedPoolState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: input.PaymentSequence, SellerAmount: input.SellerAmountAfterSatoshis, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatoshisPerKilobyte), PaymentProof: nil})
 	if err != nil {
 		return nil, err
 	}
@@ -761,12 +771,12 @@ func (adapter *SellerPoolAdapter) SignSellerPayment(ctx context.Context, unsigne
 
 // SignImmediateClose signs the seller's portion of an immediate close and merges it with the buyer signature,
 // returning the completed SignedPayment.
-func (adapter *SellerPoolAdapter) SignImmediateClose(ctx context.Context, unsigned *UnsignedPayment, buyerSig []byte, proof *OpeningProof) (*SignedPayment, error) {
-	sellerSig, err := adapter.signSeller(ctx, unsigned, proof)
+func (adapter *SellerPoolAdapter) SignImmediateClose(ctx context.Context, unsigned *UnsignedPayment, buyerSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
+	sellerSignature, err := adapter.signSeller(ctx, unsigned, proof)
 	if err != nil {
 		return nil, err
 	}
-	return adapter.MergeBuyerSellerPayment(unsigned, buyerSig, sellerSig, proof)
+	return adapter.MergeBuyerSellerPayment(unsigned, buyerSignature, sellerSignature, proof)
 }
 
 // SignArbiterPayment produces the arbiter's detached signature over an unsigned pool transaction.
@@ -987,7 +997,7 @@ func (engine *MultisigPoolEngine) validateUnsignedPayment(unsigned *UnsignedPaym
 	if err != nil {
 		return nil, err
 	}
-	if unsigned.RefundTemplateTxID != parsed.RefundTemplateTxID || unsigned.PaymentSequence != parsed.PaymentSequence || unsigned.BuyerAmountSat != parsed.BuyerAmountSat || unsigned.SellerAmountSat != parsed.SellerAmountSat || unsigned.ArbiterAmountSat != parsed.ArbiterAmountSat || unsigned.PoolOutputSatoshis != parsed.PoolOutputSatoshis || !bytes.Equal(unsigned.PoolLockingScript, parsed.PoolLockingScript) {
+	if unsigned.RefundTemplateTxID != parsed.RefundTemplateTxID || unsigned.PaymentSequence != parsed.PaymentSequence || unsigned.BuyerAmountSatoshis != parsed.BuyerAmountSatoshis || unsigned.SellerAmountSatoshis != parsed.SellerAmountSatoshis || unsigned.ArbiterAmountSatoshis != parsed.ArbiterAmountSatoshis || unsigned.PoolOutputSatoshis != parsed.PoolOutputSatoshis || !bytes.Equal(unsigned.PoolLockingScript, parsed.PoolLockingScript) {
 		return nil, invalid("unsigned payment metadata does not match proof-bound raw transaction")
 	}
 	state, err := parseCanonicalTransaction(unsigned.RawTx)
@@ -1001,7 +1011,7 @@ func (engine *MultisigPoolEngine) validateUnsignedPayment(unsigned *UnsignedPaym
 	// This is the normal 001–006 payment path: the arbiter output must remain
 	// zero. Paid arbiter candidates belong exclusively to the 007 builder and
 	// its own validator in arbitration.go.
-	if parsed.ArbiterAmountSat != 0 {
+	if parsed.ArbiterAmountSatoshis != 0 {
 		return nil, invalid("normal pool payment cannot pay the arbiter")
 	}
 	if err := engine.verifyCanonicalState(state, proof, details, state.Outputs[1].Satoshis, 0, state.Inputs[0].SequenceNumber, state.LockTime); err != nil {
@@ -1011,36 +1021,36 @@ func (engine *MultisigPoolEngine) validateUnsignedPayment(unsigned *UnsignedPaym
 }
 
 // MergeBuyerSellerPayment combines detached role signatures into the required fully signed payment transaction.
-func (adapter *SellerPoolAdapter) MergeBuyerSellerPayment(unsigned *UnsignedPayment, buyerSig, sellerSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (adapter *SellerPoolAdapter) MergeBuyerSellerPayment(unsigned *UnsignedPayment, buyerSignature, sellerSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	if adapter == nil || adapter.MultisigPoolEngine == nil {
 		return nil, invalid("seller pool adapter requires an engine")
 	}
-	return adapter.MultisigPoolEngine.mergeBuyerSeller(unsigned, buyerSig, sellerSig, proof)
+	return adapter.MultisigPoolEngine.mergeBuyerSeller(unsigned, buyerSignature, sellerSignature, proof)
 }
 
-func (engine *MultisigPoolEngine) MergeBuyerSellerPayment(unsigned *UnsignedPayment, buyerSig, sellerSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (engine *MultisigPoolEngine) MergeBuyerSellerPayment(unsigned *UnsignedPayment, buyerSignature, sellerSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	if engine == nil {
 		return nil, invalid("pool engine is required")
 	}
-	return engine.mergeBuyerSeller(unsigned, buyerSig, sellerSig, proof)
+	return engine.mergeBuyerSeller(unsigned, buyerSignature, sellerSignature, proof)
 }
 
 // MergeSellerArbiterPayment combines detached role signatures into the required fully signed payment transaction.
-func (adapter *SellerPoolAdapter) MergeSellerArbiterPayment(unsigned *UnsignedPayment, sellerSig, arbiterSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (adapter *SellerPoolAdapter) MergeSellerArbiterPayment(unsigned *UnsignedPayment, sellerSignature, arbiterSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	if adapter == nil || adapter.MultisigPoolEngine == nil {
 		return nil, invalid("seller pool adapter requires an engine")
 	}
-	return adapter.MultisigPoolEngine.mergeSellerArbiter(unsigned, sellerSig, arbiterSig, proof)
+	return adapter.MultisigPoolEngine.mergeSellerArbiter(unsigned, sellerSignature, arbiterSignature, proof)
 }
 
-func (engine *MultisigPoolEngine) MergeSellerArbiterPayment(unsigned *UnsignedPayment, sellerSig, arbiterSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (engine *MultisigPoolEngine) MergeSellerArbiterPayment(unsigned *UnsignedPayment, sellerSignature, arbiterSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	if engine == nil {
 		return nil, invalid("pool engine is required")
 	}
-	return engine.mergeSellerArbiter(unsigned, sellerSig, arbiterSig, proof)
+	return engine.mergeSellerArbiter(unsigned, sellerSignature, arbiterSignature, proof)
 }
 
-func (engine *MultisigPoolEngine) mergeBuyerSeller(unsigned *UnsignedPayment, buyerSig, sellerSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (engine *MultisigPoolEngine) mergeBuyerSeller(unsigned *UnsignedPayment, buyerSignature, sellerSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	state, err := engine.validateUnsignedPayment(unsigned, proof)
 	if err != nil {
 		return nil, err
@@ -1049,26 +1059,26 @@ func (engine *MultisigPoolEngine) mergeBuyerSeller(unsigned *UnsignedPayment, bu
 	if err != nil {
 		return nil, err
 	}
-	if ok, err := mp.VerifyArbitratedPoolBuyerSignature(state, details.PoolOutputSatoshis, engine.roles(), buyerSig); err != nil || !ok {
+	if ok, err := mp.VerifyArbitratedPoolBuyerSignature(state, details.PoolOutputSatoshis, engine.roles(), buyerSignature); err != nil || !ok {
 		if err != nil {
 			return nil, err
 		}
 		return nil, invalid("buyer transaction signature is invalid")
 	}
-	if ok, err := mp.VerifyArbitratedPoolSellerSignature(state, details.PoolOutputSatoshis, engine.roles(), sellerSig); err != nil || !ok {
+	if ok, err := mp.VerifyArbitratedPoolSellerSignature(state, details.PoolOutputSatoshis, engine.roles(), sellerSignature); err != nil || !ok {
 		if err != nil {
 			return nil, err
 		}
 		return nil, invalid("seller transaction signature is invalid")
 	}
-	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(state, details.PoolOutputSatoshis, engine.roles(), buyerSig, sellerSig)
+	merged, err := mp.MergeArbitratedPoolBuyerSellerSignatures(state, details.PoolOutputSatoshis, engine.roles(), buyerSignature, sellerSignature)
 	if err != nil {
 		return nil, err
 	}
-	return engine.signedFromTx(merged, unsigned, buyerSig, sellerSig, nil), nil
+	return engine.signedFromTx(merged, unsigned, buyerSignature, sellerSignature, nil), nil
 }
 
-func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, sellerSig, arbiterSig []byte, proof *OpeningProof) (*SignedPayment, error) {
+func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, sellerSignature, arbiterSignature []byte, proof *OpeningProof) (*SignedPayment, error) {
 	if unsigned == nil || unsigned.PaymentSequence == finalPoolSequence {
 		return nil, invalid("arbitration payment cannot use final sequence")
 	}
@@ -1083,23 +1093,23 @@ func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, 
 	if err != nil {
 		return nil, err
 	}
-	if ok, err := mp.VerifyArbitratedPoolSellerSignature(state, details.PoolOutputSatoshis, engine.roles(), sellerSig); err != nil || !ok {
+	if ok, err := mp.VerifyArbitratedPoolSellerSignature(state, details.PoolOutputSatoshis, engine.roles(), sellerSignature); err != nil || !ok {
 		if err != nil {
 			return nil, err
 		}
 		return nil, invalid("seller transaction signature is invalid")
 	}
-	if ok, err := mp.VerifyArbitratedPoolArbiterSignature(state, details.PoolOutputSatoshis, engine.roles(), arbiterSig); err != nil || !ok {
+	if ok, err := mp.VerifyArbitratedPoolArbiterSignature(state, details.PoolOutputSatoshis, engine.roles(), arbiterSignature); err != nil || !ok {
 		if err != nil {
 			return nil, err
 		}
 		return nil, invalid("arbiter transaction signature is invalid")
 	}
-	merged, err := mp.MergeArbitratedPoolSellerArbiterSignatures(state, details.PoolOutputSatoshis, engine.roles(), sellerSig, arbiterSig)
+	merged, err := mp.MergeArbitratedPoolSellerArbiterSignatures(state, details.PoolOutputSatoshis, engine.roles(), sellerSignature, arbiterSignature)
 	if err != nil {
 		return nil, err
 	}
-	return engine.signedFromTx(merged, unsigned, nil, sellerSig, arbiterSig), nil
+	return engine.signedFromTx(merged, unsigned, nil, sellerSignature, arbiterSignature), nil
 }
 
 // BuildImmediateClose constructs the unsigned final close state from the
@@ -1125,10 +1135,10 @@ func (engine *MultisigPoolEngine) BuildImmediateClose(_ context.Context, input C
 		return nil, invalid("base pool state is already final")
 	}
 	// 目标金额是否低于基准状态属于业务决定；SDK 只验证编码与容量边界。
-	if input.SellerAmountAfterSat > details.PoolOutputSatoshis {
+	if input.SellerAmountAfterSatoshis > details.PoolOutputSatoshis {
 		return nil, invalid("immediate close seller amount exceeds the pool capacity")
 	}
-	if input.SellerAmountAfterSat+input.Base.BuyerAmountSat+input.Base.ArbiterAmountSat > details.PoolOutputSatoshis && input.SellerAmountAfterSat > details.PoolOutputSatoshis-input.Base.ArbiterAmountSat {
+	if input.SellerAmountAfterSatoshis+input.Base.BuyerAmountSatoshis+input.Base.ArbiterAmountSatoshis > details.PoolOutputSatoshis && input.SellerAmountAfterSatoshis > details.PoolOutputSatoshis-input.Base.ArbiterAmountSatoshis {
 		// 输出守恒由 canonical 状态构造保证；这里只拦截明显溢出。
 		return nil, invalid("immediate close seller amount overflows the pool outputs")
 	}
@@ -1138,7 +1148,7 @@ func (engine *MultisigPoolEngine) BuildImmediateClose(_ context.Context, input C
 	}
 	setPoolSource(previous, details.PoolOutputSatoshis, details.PoolLockingScript)
 	locktime := finalPoolSequence
-	state, err := mp.BuildArbitratedPoolFinalState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: finalPoolSequence, LockTime: &locktime, SellerAmount: input.SellerAmountAfterSat, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatPerKB), PaymentProof: nil})
+	state, err := mp.BuildArbitratedPoolFinalState(mp.ArbitratedPoolStateInput{Protocol: mp.Protocol, Version: mp.Version, PreviousRawTx: previous.Bytes(), PreviousSourceOutput: &tx.TransactionOutput{Satoshis: details.PoolOutputSatoshis, LockingScript: script.NewFromBytes(append([]byte(nil), details.PoolLockingScript...))}, Sequence: finalPoolSequence, LockTime: &locktime, SellerAmount: input.SellerAmountAfterSatoshis, ArbiterAmount: 0, PoolAmount: details.PoolOutputSatoshis, Roles: engine.roles(), FeeRate: mp.FeeSatPerKB(input.Opening.MinerFeeRateSatoshisPerKilobyte), PaymentProof: nil})
 	if err != nil {
 		return nil, err
 	}
@@ -1220,14 +1230,14 @@ func (engine *MultisigPoolEngine) verifyComplete(state *PaymentState, proof *Ope
 	if err != nil {
 		return err
 	}
-	if state.RefundTemplateTxID != details.RefundTemplateTxID || state.PaymentSequence != parsed.Inputs[0].SequenceNumber || state.BuyerAmountSat != parsed.Outputs[0].Satoshis || state.SellerAmountSat != parsed.Outputs[1].Satoshis || state.ArbiterAmountSat != parsed.Outputs[2].Satoshis {
+	if state.RefundTemplateTxID != details.RefundTemplateTxID || state.PaymentSequence != parsed.Inputs[0].SequenceNumber || state.BuyerAmountSatoshis != parsed.Outputs[0].Satoshis || state.SellerAmountSatoshis != parsed.Outputs[1].Satoshis || state.ArbiterAmountSatoshis != parsed.Outputs[2].Satoshis {
 		return invalid("payment state metadata does not match transaction outputs")
 	}
 	// 普通 005 状态的仲裁输出必须为零；007 仲裁状态必须向仲裁方支付正数金额。
-	if arbitration && state.ArbiterAmountSat == 0 {
+	if arbitration && state.ArbiterAmountSatoshis == 0 {
 		return invalid("arbitrated payment must carry a positive arbiter amount")
 	}
-	if !arbitration && state.ArbiterAmountSat != 0 {
+	if !arbitration && state.ArbiterAmountSatoshis != 0 {
 		return invalid("non-arbitrated payment cannot pay the arbiter")
 	}
 	if len(parsed.Inputs[0].UnlockingScript.Bytes()) == 0 {
@@ -1259,7 +1269,7 @@ func (engine *MultisigPoolEngine) stateFromTransaction(state *tx.Transaction, pr
 	if err != nil {
 		return nil, err
 	}
-	result := &PaymentState{RefundTemplateTxID: details.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}
+	result := &PaymentState{RefundTemplateTxID: details.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSatoshis: state.Outputs[0].Satoshis, SellerAmountSatoshis: state.Outputs[1].Satoshis, ArbiterAmountSatoshis: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}
 	sigs, err := transactionSignatures(state)
 	if err != nil || len(sigs) != 2 {
 		return nil, invalid("complete payment must contain exactly two signatures")
@@ -1331,10 +1341,10 @@ func (engine *MultisigPoolEngine) signatureRole(unsigned *tx.Transaction, sig []
 }
 
 func unsignedFromTx(state *tx.Transaction, details *OpeningDetails, sequence uint32) *UnsignedPayment {
-	return &UnsignedPayment{RefundTemplateTxID: details.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: sequence, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}
+	return &UnsignedPayment{RefundTemplateTxID: details.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: sequence, BuyerAmountSatoshis: state.Outputs[0].Satoshis, SellerAmountSatoshis: state.Outputs[1].Satoshis, ArbiterAmountSatoshis: state.Outputs[2].Satoshis, PoolOutputSatoshis: details.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), details.PoolLockingScript...)}
 }
 func (engine *MultisigPoolEngine) signedFromTx(state *tx.Transaction, unsigned *UnsignedPayment, buyer, seller, arbiter []byte) *SignedPayment {
-	return &SignedPayment{State: PaymentState{RefundTemplateTxID: unsigned.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSat: state.Outputs[0].Satoshis, SellerAmountSat: state.Outputs[1].Satoshis, ArbiterAmountSat: state.Outputs[2].Satoshis, BuyerTransactionSignature: append([]byte(nil), buyer...), SellerTransactionSignature: append([]byte(nil), seller...), ArbiterTransactionSignature: append([]byte(nil), arbiter...), PoolOutputSatoshis: unsigned.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), unsigned.PoolLockingScript...)}, RawTx: state.Bytes()}
+	return &SignedPayment{State: PaymentState{RefundTemplateTxID: unsigned.RefundTemplateTxID, RawTx: state.Bytes(), PaymentSequence: state.Inputs[0].SequenceNumber, BuyerAmountSatoshis: state.Outputs[0].Satoshis, SellerAmountSatoshis: state.Outputs[1].Satoshis, ArbiterAmountSatoshis: state.Outputs[2].Satoshis, BuyerTransactionSignature: append([]byte(nil), buyer...), SellerTransactionSignature: append([]byte(nil), seller...), ArbiterTransactionSignature: append([]byte(nil), arbiter...), PoolOutputSatoshis: unsigned.PoolOutputSatoshis, PoolLockingScript: append([]byte(nil), unsigned.PoolLockingScript...)}, RawTx: state.Bytes()}
 }
 
 func (engine *MultisigPoolEngine) lockBytes() []byte {

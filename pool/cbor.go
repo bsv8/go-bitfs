@@ -41,14 +41,14 @@ func init() {
 // not the all-zero "unset" sentinel.
 func validatePoolHash32(raw []byte, name string) error {
 	if len(raw) != sha256.Size {
-		return fmt.Errorf("%w: %s must be 32 bytes", ErrInvalidEvidence, name)
+		return protocol.Errorf("pool", protocol.CodeMalformedWire, 0, name, "must be 32 bytes")
 	}
 	for _, b := range raw {
 		if b != 0 {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: %s must not be all zero", ErrInvalidEvidence, name)
+	return protocol.Errorf("pool", protocol.CodeInvalidEvidence, 0, name, "must not be all zero")
 }
 
 func validatePoolHash32Value(value [sha256.Size]byte, name string) error {
@@ -70,10 +70,10 @@ func decodeWireEnvelope(data []byte, wantKind uint64, totalLength int) ([]cbor.R
 	}
 	var version, kind uint64
 	if err := poolDec.Unmarshal(values[0], &version); err != nil || version != protocol.WireVersion {
-		return nil, fmt.Errorf("%w: unsupported wire version", ErrInvalidEvidence)
+		return nil, protocol.Errorf("pool", protocol.CodeUnsupportedVersion, 0, "wire_version", "unsupported wire version")
 	}
 	if err := poolDec.Unmarshal(values[1], &kind); err != nil || kind != wantKind {
-		return nil, fmt.Errorf("%w: unexpected wire kind %d", ErrInvalidEvidence, kind)
+		return nil, protocol.Errorf("pool", protocol.CodeUnsupportedKind, 0, "wire_kind", "unexpected wire kind %d", kind)
 	}
 	return values[2:], nil
 }
@@ -99,7 +99,7 @@ func EncodePaymentUpdate(update *PaymentUpdate) ([]byte, error) {
 func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 	fields, err := decodeWireEnvelope(data, wireKindPaymentUpdate, 4)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode payment update: %v", ErrInvalidEvidence, err)
+		return nil, malformedWire("decode", err)
 	}
 	update := new(PaymentUpdate)
 	if err := poolDec.Unmarshal(fields[0], &update.PaymentAuthorizationID); err != nil {
@@ -116,7 +116,7 @@ func DecodePaymentUpdate(data []byte) (*PaymentUpdate, error) {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: payment update is not deterministically encoded", ErrInvalidEvidence)
+		return nil, nonCanonical("payment update_cbor", "payment update is not deterministically encoded")
 	}
 	return clonePaymentUpdate(update), nil
 }
@@ -144,7 +144,7 @@ func EncodeRefundPresignRequest(request *RefundPresignRequest) ([]byte, error) {
 func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 	fields, err := decodeWireEnvelope(data, wireKindRefundPresignRequest, 8)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode refund presign request: %v", ErrInvalidEvidence, err)
+		return nil, malformedWire("decode", err)
 	}
 	request := new(RefundPresignRequest)
 	if err := poolDec.Unmarshal(fields[0], &request.RefundTemplateRaw); err != nil {
@@ -173,7 +173,7 @@ func DecodeRefundPresignRequest(data []byte) (*RefundPresignRequest, error) {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: refund presign request is not deterministically encoded", ErrInvalidEvidence)
+		return nil, nonCanonical("refund presign request_cbor", "refund presign request is not deterministically encoded")
 	}
 	return cloneRefundPresignRequest(request), nil
 }
@@ -194,7 +194,7 @@ func EncodeRefundPresignResponse(response *RefundPresignResponse) ([]byte, error
 func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 	fields, err := decodeWireEnvelope(data, wireKindRefundPresignResponse, 4)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode refund presign response: %v", ErrInvalidEvidence, err)
+		return nil, malformedWire("decode", err)
 	}
 	response := new(RefundPresignResponse)
 	if err := poolDec.Unmarshal(fields[0], &response.RefundTemplateTxID); err != nil {
@@ -211,7 +211,7 @@ func DecodeRefundPresignResponse(data []byte) (*RefundPresignResponse, error) {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: refund presign response is not deterministically encoded", ErrInvalidEvidence)
+		return nil, nonCanonical("refund presign response_cbor", "refund presign response is not deterministically encoded")
 	}
 	return cloneRefundPresignResponse(response), nil
 }
@@ -232,7 +232,7 @@ func EncodeFundingTransactionDelivery(delivery *FundingTransactionDelivery) ([]b
 func DecodeFundingTransactionDelivery(data []byte) (*FundingTransactionDelivery, error) {
 	fields, err := decodeWireEnvelope(data, wireKindFundingDelivery, 4)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode funding transaction delivery: %v", ErrInvalidEvidence, err)
+		return nil, malformedWire("decode", err)
 	}
 	delivery := new(FundingTransactionDelivery)
 	if err := poolDec.Unmarshal(fields[0], &delivery.RefundTemplateTxID); err != nil {
@@ -249,7 +249,7 @@ func DecodeFundingTransactionDelivery(data []byte) (*FundingTransactionDelivery,
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: funding transaction delivery is not deterministically encoded", ErrInvalidEvidence)
+		return nil, nonCanonical("funding transaction delivery_cbor", "funding transaction delivery is not deterministically encoded")
 	}
 	return cloneFundingTransactionDelivery(delivery), nil
 }
@@ -264,7 +264,7 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 		return nil, err
 	}
 	if len(proof.FundingTransactionRaw) == 0 {
-		return nil, fmt.Errorf("%w: complete funding transaction is required", ErrInvalidEvidence)
+		return nil, invalid("complete funding transaction is required")
 	}
 	return poolEnc.Marshal([]any{
 		proof.RefundTemplateRaw, proof.BuyerPublicKey, proof.SellerPublicKey,
@@ -279,7 +279,7 @@ func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 	values, err := decodePoolArray(data, 8)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode opening proof: %v", ErrInvalidEvidence, err)
+		return nil, malformedWire("decode", err)
 	}
 	proof := new(OpeningProof)
 	if err := poolDec.Unmarshal(values[0], &proof.RefundTemplateRaw); err != nil {
@@ -314,7 +314,7 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: opening proof is not deterministically encoded", ErrInvalidEvidence)
+		return nil, nonCanonical("opening proof_cbor", "opening proof is not deterministically encoded")
 	}
 	return cloneOpeningProof(proof), nil
 }
@@ -326,13 +326,13 @@ func DecodeOpeningProof(data []byte) (*OpeningProof, error) {
 // unsigned state transaction are verified by the receiving workflow.
 func ValidatePaymentUpdate(update *PaymentUpdate) error {
 	if update == nil {
-		return fmt.Errorf("%w: payment update is required", ErrInvalidEvidence)
+		return invalid("payment update is required")
 	}
 	if update.PaymentAuthorizationID.IsZero() {
 		return fmt.Errorf("%w: payment_authorization_id", protocol.ErrZeroIdentifier)
 	}
 	if len(update.BuyerPaymentTransactionSignature) == 0 {
-		return fmt.Errorf("%w: buyer payment transaction signature is required", ErrInvalidEvidence)
+		return invalid("buyer payment transaction signature is required")
 	}
 	return nil
 }
@@ -342,10 +342,10 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 // It does not verify the refund transaction or either signature cryptographically.
 func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	if request == nil {
-		return fmt.Errorf("%w: invalid refund presign request", ErrInvalidEvidence)
+		return invalid("invalid refund presign request")
 	}
 	if len(request.RefundTemplateRaw) == 0 || len(request.BuyerRefundTransactionSignature) == 0 {
-		return fmt.Errorf("%w: incomplete refund presign request", ErrInvalidEvidence)
+		return invalid("incomplete refund presign request")
 	}
 	roles := []struct {
 		name string
@@ -353,7 +353,7 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 	}{{"buyer", request.BuyerPublicKey}, {"seller", request.SellerPublicKey}, {"arbiter", request.ArbiterPublicKey}}
 	for _, role := range roles {
 		if err := protocol.ValidateCompressedPubKey(role.key); err != nil {
-			return fmt.Errorf("%w: %s public key: %v", ErrInvalidEvidence, role.name, err)
+			return protocol.Wrap(fmt.Errorf("%s public key: %v", role.name, err), "pool", protocol.CodeInvalidEvidence, 0, role.name+"_public_key")
 		}
 	}
 	return nil
@@ -364,7 +364,7 @@ func ValidateRefundPresignRequest(request *RefundPresignRequest) error {
 // workflow operation.
 func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 	if response == nil || len(response.SellerRefundTransactionSignature) == 0 {
-		return fmt.Errorf("%w: invalid refund presign response", ErrInvalidEvidence)
+		return invalid("invalid refund presign response")
 	}
 	if err := validatePoolHash32Value(response.RefundTemplateTxID, "refund_template_txid"); err != nil {
 		return err
@@ -377,7 +377,7 @@ func ValidateRefundPresignResponse(response *RefundPresignResponse) error {
 // bytes spend the opening.
 func ValidateFundingTransactionDelivery(delivery *FundingTransactionDelivery) error {
 	if delivery == nil || len(delivery.FundingTransactionRaw) == 0 {
-		return fmt.Errorf("%w: invalid funding transaction delivery", ErrInvalidEvidence)
+		return invalid("invalid funding transaction delivery")
 	}
 	if err := validatePoolHash32Value(delivery.RefundTemplateTxID, "refund_template_txid"); err != nil {
 		return err
@@ -390,10 +390,10 @@ func ValidateFundingTransactionDelivery(delivery *FundingTransactionDelivery) er
 // checks.
 func ValidateOpeningProof(proof *OpeningProof) error {
 	if proof == nil {
-		return fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)
+		return invalid("opening proof is required")
 	}
 	if len(proof.RefundTemplateRaw) == 0 || len(proof.BuyerRefundTransactionSignature) == 0 || len(proof.SellerRefundTransactionSignature) == 0 {
-		return fmt.Errorf("%w: opening proof contains incomplete evidence", ErrInvalidEvidence)
+		return invalid("opening proof contains incomplete evidence")
 	}
 	roles := []struct {
 		name string
@@ -401,7 +401,7 @@ func ValidateOpeningProof(proof *OpeningProof) error {
 	}{{"buyer", proof.BuyerPublicKey}, {"seller", proof.SellerPublicKey}, {"arbiter", proof.ArbiterPublicKey}}
 	for _, role := range roles {
 		if err := protocol.ValidateCompressedPubKey(role.key); err != nil {
-			return fmt.Errorf("%w: %s public key: %v", ErrInvalidEvidence, role.name, err)
+			return protocol.Wrap(fmt.Errorf("%s public key: %v", role.name, err), "pool", protocol.CodeInvalidEvidence, 0, role.name+"_public_key")
 		}
 	}
 	return nil

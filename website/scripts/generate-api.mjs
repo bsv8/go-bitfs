@@ -5,7 +5,7 @@ await rm('generated-api', {recursive: true, force: true});
 await mkdir('generated-api', {recursive: true});
 await writeFile('generated-api/index.md', `---\nid: index\ntitle: API Reference\nsidebar_position: 1\n---\n\nThe API reference is generated from the exported Go packages and English doc comments before every build. It is the English source of truth; translated guides explain usage in each supported language.\n`);
 
-const packages = ['bitfs', 'pool', 'buyer', 'seller', 'arbitration', 'wire'];
+const packages = ['protocol', 'content', 'pool', 'arbitration', 'wire', 'buyer', 'seller', 'arbiter'];
 const run = (pkg) => new Promise((resolve, reject) => {
   const child = spawn('go', ['run', '-mod=mod', 'github.com/princjef/gomarkdoc/cmd/gomarkdoc@v1.1.0', '-o', `generated-api/${pkg}.md`, `github.com/bsv8/go-bitfs/${pkg}`], {stdio: 'inherit', env: {...process.env, GOWORK: 'off', GOFLAGS: ''}});
   child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`gomarkdoc failed for ${pkg} (${code})`)));

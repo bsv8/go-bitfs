@@ -1,19 +1,20 @@
+// Command buyer and seller complete one cumulative payment (BitFS 003→004→005).
+//
+// fixture 作为调用方应用串起完整一轮：买方请求 seed、卖方交付并保存
+// DeliveryCheckpoint、买方验收 payload 并构造整批唯一的最小 Kind 7 凭证，
+// 最后卖方按 PaymentAuthorizationID 取回原始签名 003 并合并签名得到完整付款
+// 交易。双方本地 checkpoint 随后推进到同一确认状态。
 package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/fixture"
-	"github.com/bsv8/go-bitfs/pool"
 )
-
-// blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
-const blockHeight uint32 = 900000
 
 func main() {
 	if err := demoenv.Load(); err != nil {
@@ -26,44 +27,24 @@ func main() {
 	}
 	now := time.Now().UTC()
 	debug("=== Step 005: Cumulative Payment ===")
-	debug("[buyer] AcceptDelivery verifies 004 against caller-held state, prices content, rebuilds the unsigned state locally, and signs the buyer payment")
-	request, delivery, deliveryState, verified, err := f.DeliverAndBuildPayment(ctx, now)
+	debug("[buyer] VerifyDeliveryAndPreparePayment verifies 004 against caller-held state, prices content, rebuilds the unsigned state locally, and signs the buyer payment")
+	round, err := f.RunSeedPurchase(ctx, now)
 	if err != nil {
-		fail(fmt.Errorf("buyer.AcceptDelivery: %w", err))
+		fail(err)
 	}
-	update := verified.Update
-	debug("[payment] PaymentAuthorizationID (application lookup key): %s", hex.EncodeToString(update.PaymentAuthorizationID[:]))
-	debug("[payment] buyer transaction signature: %s", hex.EncodeToString(update.BuyerPaymentTransactionSignature))
+	debug("[payment] PaymentAuthorizationID (application lookup key): %s", round.PaymentID.String())
 	debug("[payment] wire carries no pool ID and no raw transaction; both sides rebuild the exact state transaction locally")
-	// 应用先用 005 携带的 PaymentAuthorizationID 取回保存的精确原始签名 003；
-	// 它是内容
-	// 寻址键，不可解码出池 ID、金额或交易字节。
 	debug("[app] PaymentAuthorizationID lookup retrieves the exact original signed 003 for the minimal credential")
-	authorization, err := f.LookupPaymentAuthorization(update.PaymentAuthorizationID)
-	if err != nil {
+	if _, err := f.LookupPaymentAuthorization(round.PaymentID); err != nil {
 		fail(err)
 	}
-	debug("[seller] seller.AcceptPayment re-verifies the original 003, rebuilds the same unsigned transaction via BuildPaymentUpdate, verifies the buyer signature over it, then co-signs and merges")
-	signed, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, authorization, deliveryState, update, blockHeight)
-	if err != nil {
-		fail(fmt.Errorf("seller.AcceptPayment: %w", err))
-	}
-	accepted := signed.State
-	if update.PaymentAuthorizationID != accepted.PaymentAuthorizationID || update.PaymentAuthorizationID != deliveryState.PaymentAuthorizationID {
-		fail(fmt.Errorf("PaymentAuthorizationID changed across seller acceptance"))
-	}
-	debug("[payment] PaymentAuthorizationID consistent across 003/004/005 and accepted state: true")
-	rawUpdate, err := pool.EncodePaymentUpdate(update)
-	if err != nil {
-		fail(err)
-	}
-	debug("[payment] request terms bytes: %d", len(request.PaymentAuthorizationCBOR))
-	debug("[payment] delivery payload batch bytes: %d", len(delivery.ContentPayloadsCBOR))
+	debug("[seller] seller.CompletePayment re-verifies the original 003, rebuilds the same unsigned transaction, verifies the buyer signature over it, then co-signs and merges")
+	accepted := round.AcceptedTx.State()
 	debug("[accepted] sequence: %d", accepted.PaymentSequence)
 	debug("[accepted] buyer amount: %d satoshis", accepted.BuyerAmountSatoshis)
 	debug("[accepted] seller amount: %d satoshis", accepted.SellerAmountSatoshis)
-	fmt.Printf("PAYMENT_UPDATE_HEX=%s\n", hex.EncodeToString(rawUpdate))
-	fmt.Printf("ACCEPTED_TX_HEX=%s\n", hex.EncodeToString(signed.RawTx))
+	fmt.Printf("PAYMENT_UPDATE_HEX=%x\n", round.Kind7Raw)
+	fmt.Printf("ACCEPTED_TX_HEX=%x\n", round.AcceptedTx.RawTx())
 	debug("=== Cumulative payment complete ===")
 }
 

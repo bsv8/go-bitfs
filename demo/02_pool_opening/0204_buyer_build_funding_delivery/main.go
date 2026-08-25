@@ -1,8 +1,9 @@
 // 0204 是开池流程中公开完整 FundingTransactionRaw 的买方动作。
 //
-// 本命令从 stdin 读取 0203 输出的 REFUND_TEMPLATE_TXID_HEX，按该关联 ID 从买方
-// 自己的 checkpoint 加载已验证的 OpeningProof，显式传给 SDK 构造
-// FundingTransactionDelivery。调用方不能伪造 delivery 字段；SDK 会复核 proof 与 hash。
+// 本命令从 stdin 读取 0203 输出的 REFUND_TEMPLATE_TXID_HEX，按该关联 ID 从买
+// 方自己的 checkpoint 加载已验证的池证据（canonical opening proof + 完整付款
+// 状态 raw tx，经 buyer.RestorePoolCheckpoint 全量重验恢复），显式传给角色 API
+// 构造 Kind 4 资金交付。调用方不能伪造 delivery 字段；SDK 会复核 proof 与 hash。
 package main
 
 import (
@@ -14,7 +15,6 @@ import (
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
 	"github.com/bsv8/go-bitfs/pool"
-	"github.com/bsv8/go-bitfs/wire"
 )
 
 func main() {
@@ -32,7 +32,7 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("derive buyer funding addresses: %w", err))
 	}
-	debug("=== 0204 买方：构造并发送 FundingTransactionDelivery ===")
+	debug("=== 0204 买方：构造并发送资金交付（Kind 4）===")
 	debug("[buyer] selected network: %s", addresses.Network)
 	debug("[buyer] funding address: %s", addresses.SelectedAddress)
 	// 标准输入承接 0203 的 REFUND_TEMPLATE_TXID_HEX。hash 只是定位键；真正的
@@ -41,29 +41,26 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	if len(refundTemplateTxIDRaw) != len(pool.Hash32{}) {
-		fail(fmt.Errorf("refund tx hash must be %d bytes, got %d", len(pool.Hash32{}), len(refundTemplateTxIDRaw)))
+	if len(refundTemplateTxIDRaw) != len(pool.RefundTemplateTxID{}) {
+		fail(fmt.Errorf("refund tx hash must be %d bytes, got %d", len(pool.RefundTemplateTxID{}), len(refundTemplateTxIDRaw)))
 	}
 	var refundTemplateTxID pool.RefundTemplateTxID
 	copy(refundTemplateTxID[:], refundTemplateTxIDRaw)
-	checkpointPath := poolopening.BuyerOpeningProofCheckpointPath()
-	opening, err := poolopening.LoadBuyerOpeningProof(checkpointPath, refundTemplateTxID)
+	checkpointPath := poolopening.BuyerPoolCheckpointPath()
+	poolCheckpoint, err := poolopening.LoadBuyerPoolCheckpoint(checkpointPath, refundTemplateTxID)
 	if err != nil {
-		fail(fmt.Errorf("load buyer opening proof checkpoint (caller state): %w", err))
+		fail(fmt.Errorf("load buyer pool checkpoint (caller state): %w", err))
 	}
-	debug("[buyer] 已按 RefundTemplateTxID 找到本地保存的 opening proof")
-	// BuildFundingTransactionDelivery 复核 proof 的所有权、完整性和 hash 一致性，
-	// 然后从 proof 携带的 FundingTransactionRaw 构造交付报文；它不会重新签名 FundingTransactionRaw。
-	delivery, err := session.Buyer.BuildFundingTransactionDelivery(ctx, opening)
+	debug("[buyer] 已按 RefundTemplateTxID 找到本地保存的池证据")
+	// PrepareFundingDelivery 复核 opening proof 的所有权、完整性和 hash 一致性，
+	// 然后从 proof 携带的 FundingTransactionRaw 构造 exact Kind 4 Artifact；
+	// 它不会重新签名资金交易。广播边界属于应用。
+	deliveryArtifact, err := session.Buyer.PrepareFundingDelivery(poolCheckpoint)
 	if err != nil {
-		fail(fmt.Errorf("buyer.BuildFundingTransactionDelivery: %w", err))
+		fail(fmt.Errorf("buyer.PrepareFundingDelivery: %w", err))
 	}
-	deliveryRaw, err := wire.MarshalFundingTransactionDelivery(delivery)
-	if err != nil {
-		fail(fmt.Errorf("encode FundingTransactionDelivery: %w", err))
-	}
-	debug("[buyer] FundingTransactionRaw bytes: %d", len(delivery.FundingTransactionRaw))
-	debug("[buyer] RefundTemplateTxID (pool correlation ID): %s", hex.EncodeToString(delivery.RefundTemplateTxID[:]))
+	deliveryRaw := deliveryArtifact.Bytes() // 先持久化再发送（demo 以 stdout 表示发送）
+	debug("[buyer] RefundTemplateTxID (pool correlation ID): %s", hex.EncodeToString(refundTemplateTxID[:]))
 	debug("[transport] buyer -> seller: FundingTransactionDelivery (%d bytes)", len(deliveryRaw))
 	// 这是本流程中 FundingTransactionRaw 原文第一次进入 seller-facing 网络报文。
 	// 仍将报文写成 stdout 上的 hex，保持与前几个步骤相同的管道接口。

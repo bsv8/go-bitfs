@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -49,24 +50,60 @@ func WireSignatureInput(wireVersion, wireKind uint64, documentCBOR []byte) ([]by
 	})
 }
 
-// SignWireDocument 用固定单次 SHA-256 + low-S DER 路径签署
-// WireSignatureInput(wireVersion, wireKind, documentCBOR)。它是所有普通消息
-// 签名的唯一入口，禁止跨协议、跨版本、跨 Kind 解释签名。私钥只进入运行时
-// 参数，绝不进入 CBOR、报文、日志或持久化结构。
-func SignWireDocument(privateKey *ec.PrivateKey, wireVersion, wireKind uint64, documentCBOR []byte) ([]byte, error) {
-	if privateKey == nil {
-		return nil, errors.New("private key is required")
-	}
+// WireSignatureDigest 构造普通消息签名的唯一 32 字节摘要：
+// SHA-256(WireSignatureInput(wireVersion, wireKind, documentCBOR))。
+// SDK 是 digest 的唯一构造者；Signer 只接触本返回值。
+func WireSignatureDigest(wireVersion, wireKind uint64, documentCBOR []byte) (Digest32, error) {
 	input, err := WireSignatureInput(wireVersion, wireKind, documentCBOR)
 	if err != nil {
-		return nil, err
+		return Digest32{}, fmt.Errorf("wire signature input: %w", err)
 	}
-	digest := sha256.Sum256(input)
-	signature, err := privateKey.Sign(digest[:])
+	return Digest32(sha256.Sum256(input)), nil
+}
+
+// SignWireDocument 用受约束 Signer 签署普通 wire 报文：SDK 固定构造
+// WireSignatureDigest(1, kind, exact document)，Signer 只对该摘要执行密钥
+// 操作；签名返回后 SDK 用 Signer 固定公钥立即自验（DER、low-S、验签），
+// 失败即拒绝。ctx 只用于取消远程签名；私钥/托管细节绝不进入 CBOR、报文、
+// 日志或持久化结构。
+func SignWireDocument(ctx context.Context, signer Signer, wireVersion, wireKind uint64, documentCBOR []byte) ([]byte, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: protocol.SignWireDocument requires a non-nil context", ErrNilInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, Wrap(err, "protocol.SignWireDocument", CodeCanceled, uint16(wireKind), "")
+	}
+	if signer == nil {
+		return nil, Errorf("protocol.SignWireDocument", CodeSignerUnavailable, uint16(wireKind), "signer", "signer is required")
+	}
+	digest, err := WireSignatureDigest(wireVersion, wireKind, documentCBOR)
 	if err != nil {
 		return nil, err
 	}
-	return signature.ToDER()
+	signature, err := signer.Sign(ctx, SigningRequest{
+		Purpose:  PurposeWireMessage,
+		WireKind: uint16(wireKind),
+		Digest:   digest,
+	})
+	if err != nil {
+		// 取消语义优先：调用方取消/超时永远是 canceled，绝不归类为
+		// signer_unavailable（那意味着托管故障，语义完全不同）。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, Wrap(err, "protocol.SignWireDocument", CodeCanceled, uint16(wireKind), "")
+		}
+		if !errors.Is(err, ErrSignerUnavailable) {
+			err = fmt.Errorf("sign wire document (kind %d): %v", wireKind, err)
+		}
+		return nil, Wrap(err, "protocol.SignWireDocument", CodeSignerUnavailable, uint16(wireKind), "signature")
+	}
+	if len(signature) == 0 {
+		return nil, Errorf("protocol.SignWireDocument", CodeInvalidSignature, uint16(wireKind), "signature", "signer returned an empty signature")
+	}
+	publicKey := signer.PublicKey()
+	if err := VerifyDigestSignature(publicKey, digest, signature); err != nil {
+		return nil, Wrap(fmt.Errorf("self-verify wire signature: %v", err), "protocol.SignWireDocument", CodeInvalidSignature, uint16(wireKind), "signature")
+	}
+	return append([]byte(nil), signature...), nil
 }
 
 // ErrHighSSignature 标记一个 S > N/2 的可延展（high-S）签名。协议只接受
@@ -112,9 +149,29 @@ func VerifyMessageSignature(publicKey, payload, signature []byte) error {
 	return nil
 }
 
-// VerifyWireDocument 验证 SignWireDocument 生成的签名：先用相同外层版本、
-// Kind 与 exact 认证文档重建唯一 WireSignatureInput，再走统一的
-// VerifyMessageSignature 路径（含强制 low-S）。
+// VerifyDigestSignature 是协议固定的摘要级验证入口：直接对 SDK 已构造的
+// 32 字节摘要解析 DER、强制 low-S 并做 ECDSA 验证。交易签名自验与 Signer
+// 返回值检查都使用它；调用方不能替换验证器。
+func VerifyDigestSignature(publicKey PublicKey, digest Digest32, signature []byte) error {
+	key, err := ParseCompressedPubKey(publicKey[:])
+	if err != nil {
+		return err
+	}
+	sig, err := ec.ParseDERSignature(signature)
+	if err != nil {
+		return err
+	}
+	if err := verifyLowS(sig); err != nil {
+		return err
+	}
+	if !sig.Verify(digest[:], key) {
+		return errors.New("signature mismatch")
+	}
+	return nil
+}
+
+// VerifyWireDocument 验证普通 wire 报文签名：用相同外层版本、Kind 与 exact
+// 认证文档重建唯一 WireSignatureInput，做一次 SHA-256 后走统一 low-S 验签。
 func VerifyWireDocument(publicKey []byte, wireVersion, wireKind uint64, documentCBOR, signature []byte) error {
 	input, err := WireSignatureInput(wireVersion, wireKind, documentCBOR)
 	if err != nil {

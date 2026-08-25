@@ -53,21 +53,21 @@ frozen fee before requesting any signature:
 raw Kind 8 received -> strict decode -> evidence verification
   -> application verifies the on-chain UTXO
   -> application prices the fee
-  -> PreparePayment(request, blockHeight, arbiterAmountSat)
+  -> arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
   -> atomic custody persistence (append-only: request, payload, Claim ID,
      fee stay immutable once written)
-  -> SignPreparedPayment
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
   -> persist/send exact Kind 9
 ```
 
 A zero fee fails as invalid evidence before anything is persisted or signed.
 An amount that cannot fit after the Buyer-authorized Seller amount fails with
-`pool.ErrInsufficientBalance`; there is no free or partially-paid fallback.
+the `CodeInsufficientBalance` error category; there is no free or partially-paid fallback.
 
-`PreparePayment` has no transaction-signing side effect. It returns opaque
+`arbiter.PrepareArbitration` has no transaction-signing side effect. It returns opaque
 prepared evidence with deep-copy getters for the Claim ID, frozen fee,
 authorization hash, payloads, deadline, and unsigned candidate. On restart,
-the application re-runs `PreparePayment` from the saved exact raw Kind 8 bytes
+the application re-runs `arbiter.PrepareArbitration` from the saved exact raw Kind 8 bytes
 and saved fee; it must not fabricate the opaque prepared value. Custody
 records are append-only: after signing, the exact canonical Kind 9 bytes are
 attached to the same record without overwriting the request, payload, Claim
@@ -88,7 +88,7 @@ strict-decoding an inbound Kind 8 and deriving its Claim ID:
    alarm that stops automation without overwriting records;
 3. the same exact Claim but a different outer Seller signature or payload
    bundle must first be fully re-validated with the frozen fee via
-   PreparePayment — validation failure rejects the input as invalid evidence
+   arbiter.PrepareArbitration — validation failure rejects the input as invalid evidence
    and never raises a collision alarm, while a fully valid variant is recorded
    as a duplicate-evidence conflict that stops automation;
 4. a different Claim ID creates an independent custody record.

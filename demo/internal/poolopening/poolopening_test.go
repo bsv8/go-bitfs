@@ -184,8 +184,12 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 	if actualFee != funding.FundingFeeSatoshis {
 		t.Fatalf("stored funding fee = %d, actual fee = %d", funding.FundingFeeSatoshis, actualFee)
 	}
-	if session.OpeningInput(funding.RawTx, funding.MinerFeeRateSatoshisPerKilobyte).MinerFeeRateSatoshisPerKilobyte != 100 {
-		t.Fatal("opening input did not use the dynamic miner fee rate")
+	openingCommand, err := session.OpeningCommand(funding.RawTx, uint64(funding.MinerFeeRateSatoshisPerKilobyte))
+	if err != nil {
+		t.Fatalf("build opening command: %v", err)
+	}
+	if openingCommand.MinerFeeRateSatoshisPerKilobyte != 100 {
+		t.Fatal("opening command did not use the dynamic miner fee rate")
 	}
 }
 

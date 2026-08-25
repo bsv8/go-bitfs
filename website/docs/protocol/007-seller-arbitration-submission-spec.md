@@ -110,8 +110,8 @@ LockTime: refund template locktime
 
 Buyer + Seller + Arbiter + refund fee always equals the pool output exactly,
 with overflow-free compare-then-subtract arithmetic. A Seller amount already
-above `spendable`, or a fee above the remaining balance, fails with
-`pool.ErrInsufficientBalance`; a zero fee is rejected as invalid evidence.
+above `spendable`, or a fee above the remaining balance, fails with the
+`CodeInsufficientBalance` error category; a zero fee is rejected as invalid evidence.
 Exhausting the Buyer remainder to exactly zero is a legal boundary as long as
 all three outputs exist.
 
@@ -120,9 +120,9 @@ Arbiter flow is two phase:
 
 ```text
 application computes arbiter_amount_sat from its own fee policy
-PreparePayment(request, blockHeight, arbiterAmountSat)
+arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
   -> application atomically persists exact Kind 8, Claim ID, fee, and payload bundle
-  -> SignPreparedPayment
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
   -> persist/send exact Kind 9
 ```
 

@@ -2,8 +2,16 @@
 // 和演示私有本地 checkpoint。
 //
 // go-bitfs SDK 是无状态协议库：它不加载、不保存、不广播任何状态。本包扮演
-// “调用方应用”，自己持有买方/卖方会话（只含 Signer），并用自己的 JSON
-// checkpoint 按 RefundTemplateTxID 保存跨进程需要的本地角色状态。
+// “调用方应用”，自己持有买方/卖方角色 workflow（只含受约束 Signer），并用
+// 自己的 JSON checkpoint 按 RefundTemplateTxID 保存跨进程需要的 exact 证据：
+//
+//	买方开池 checkpoint   = exact Kind 2 bytes + 私有资金交易原文
+//	                        （buyer.RestoreOpeningCheckpoint 全量重验恢复）
+//	买方池 checkpoint     = canonical opening proof 编码 + 完整付款状态 raw tx
+//	                        （buyer.RestorePoolCheckpoint 全量重验恢复）
+//	卖方预签 checkpoint   = exact Kind 2 request 字节；SDK 不提供第二构造器，
+//	                        恢复时用相同请求重跑 seller.PreparePoolOpening 得到
+//	                        等价的新鲜计算结果（重复请求只得到等价结果）
 //
 // 注意：这里的 checkpoint 只是让多个独立示例命令能够衔接运行的示例实现。
 // 它不是 SDK 能力，不承诺生产安全，不提供文件锁、事务、跨进程并发或崩溃
@@ -31,30 +39,47 @@ import (
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
+	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/buyer"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/demo/internal/junglebus"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
-	"github.com/bsv8/go-bitfs/wire"
 )
 
 const defaultStateDir = "demo/.state"
+
+// blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
+const blockHeight protocol.BlockHeight = 900000
 
 // BuyerSession 是单个 002 命令需要的买方应用组装结果。
 // buyerKey 只留在本包内部用于派生地址和签名；公开的三个 PubKey 字段供
 // 开池交易构造使用。跨进程状态由本包的 checkpoint 函数保存，不经过 SDK。
 type BuyerSession struct {
-	Buyer            *buyer.Workflow
+	Buyer            *buyer.Workflow // 买方角色 API（只持有受约束 Signer）
 	buyerKey         *ec.PrivateKey
+	sellerKey        *ec.PrivateKey
 	BuyerPublicKey   []byte
 	SellerPublicKey  []byte
 	ArbiterPublicKey []byte
+	// offlineQuote 是离线冒烟模式下在进程内自签自验的报价；真实路径的
+	// 报价来自 demo 01 的 exact bytes。
+	offlineQuote *content.VerifiedQuote
 }
 
 // SellerSession 是单个 002 命令需要的卖方应用组装结果。卖方的预签证据等
 // 本地状态同样通过 checkpoint 显式保存和恢复。
 type SellerSession struct {
-	Seller *seller.Workflow
+	Seller *seller.Workflow // 卖方角色 API（只持有受约束 Signer）
+}
+
+func mustPublicKey(compressed []byte) protocol.PublicKey {
+	publicKey, err := protocol.PublicKeyFromBytes(compressed)
+	if err != nil {
+		panic(fmt.Sprintf("poolopening: parse compressed public key: %v", err))
+	}
+	return publicKey
 }
 
 // NewBuyer 创建只含签名能力的买方 workflow，并派生开池交易所需的公钥。
@@ -76,15 +101,19 @@ func NewBuyer(ctx context.Context) (*BuyerSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	buyerWorkflow, err := buyer.NewWorkflow(buyer.WorkflowConfig{PrivateKey: buyerKey})
+	signer, err := protocol.NewPrivateKeySigner(buyerKey)
+	if err != nil {
+		return nil, fmt.Errorf("create buyer signer: %w", err)
+	}
+	buyerWorkflow, err := buyer.NewWorkflow(signer)
 	if err != nil {
 		return nil, fmt.Errorf("create buyer workflow: %w", err)
 	}
-	buyerPubKey := buyerKey.PubKey().Compressed()
 	return &BuyerSession{
 		Buyer:            buyerWorkflow,
 		buyerKey:         buyerKey,
-		BuyerPublicKey:   append([]byte(nil), buyerPubKey...),
+		sellerKey:        sellerKey,
+		BuyerPublicKey:   append([]byte(nil), buyerKey.PubKey().Compressed()...),
 		SellerPublicKey:  append([]byte(nil), sellerKey.PubKey().Compressed()...),
 		ArbiterPublicKey: append([]byte(nil), arbiterKey.PubKey().Compressed()...),
 	}, nil
@@ -100,24 +129,94 @@ func NewSeller(ctx context.Context) (*SellerSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	sellerWorkflow, err := seller.NewWorkflow(seller.WorkflowConfig{PrivateKey: sellerKey})
+	signer, err := protocol.NewPrivateKeySigner(sellerKey)
+	if err != nil {
+		return nil, fmt.Errorf("create seller signer: %w", err)
+	}
+	sellerWorkflow, err := seller.NewWorkflow(signer)
 	if err != nil {
 		return nil, fmt.Errorf("create seller workflow: %w", err)
 	}
 	return &SellerSession{Seller: sellerWorkflow}, nil
 }
 
-// OpeningInput 根据买方已经选定的真实 UTXO 资金交易构造 002 开池输入。
-// 退款有效期设置为当前 UTC 时间后一小时；FundingTransactionRaw 原文只会进入买方自己的
-// 本地 checkpoint，在 0204 之前不会进入发给卖方的报文。
-func (session *BuyerSession) OpeningInput(fundingTx []byte, minerFeeRateSatPerKB uint64) pool.OpeningInput {
-	return pool.OpeningInput{
+// Facts 以给定时刻为唯一时间事实组装一份显式事实集。
+func Facts(at time.Time) protocol.Facts {
+	return protocol.Facts{Now: at.UTC(), BlockHeight: blockHeight}
+}
+
+// OpeningCommand 根据买方已经选定的资金交易构造 002 开池命令输入。
+// 退款有效期设置为当前 UTC 时间后一小时；FundingTransactionRaw 原文只会进入
+// 买方自己的本地 checkpoint，在 0204 之前不会进入发给卖方的报文。
+func (session *BuyerSession) OpeningCommand(fundingTx []byte, minerFeeRateSatPerKB uint64) (buyer.PrepareOpeningCommand, error) {
+	command := buyer.PrepareOpeningCommand{
 		FundingTransactionRaw:           append([]byte(nil), fundingTx...),
-		ExpiryLockTime:                  uint32(time.Now().UTC().Add(time.Hour).Unix()),
-		MinerFeeRateSatoshisPerKilobyte: minerFeeRateSatPerKB,
-		SellerPublicKey:                 append([]byte(nil), session.SellerPublicKey...),
-		ArbiterPublicKey:                append([]byte(nil), session.ArbiterPublicKey...),
+		ExpiryLockTime:                  protocol.RefundLockTime(time.Now().UTC().Add(time.Hour).Unix()),
+		MinerFeeRateSatoshisPerKilobyte: protocol.SatoshisPerKilobyte(minerFeeRateSatPerKB),
+		SellerPublicKey:                 mustPublicKey(session.SellerPublicKey),
+		ArbiterPublicKey:                mustPublicKey(session.ArbiterPublicKey),
 	}
+	if session.offlineQuote != nil {
+		command.Quote = session.offlineQuote
+	}
+	return command, nil
+}
+
+// EnsureOfflineQuote 在离线冒烟模式下于进程内完成一次真实的 001 往返：
+// 卖方 Signer 签出 exact Kind 1，买方立即验收为 VerifiedQuote。它不落盘、
+// 不联网；真实路径必须使用 demo 01 持久化的 exact 报价字节。
+func (session *BuyerSession) EnsureOfflineQuote(ctx context.Context, now time.Time) error {
+	if session == nil || session.sellerKey == nil {
+		return errors.New("buyer session is required")
+	}
+	sellerSigner, err := protocol.NewPrivateKeySigner(session.sellerKey)
+	if err != nil {
+		return fmt.Errorf("create offline seller signer: %w", err)
+	}
+	sellerWf, err := seller.NewWorkflow(sellerSigner)
+	if err != nil {
+		return fmt.Errorf("create offline seller workflow: %w", err)
+	}
+	facts := protocol.Facts{Now: now, BlockHeight: protocol.BlockHeight(900000)}
+	seedHash := masterseed.Sum256(nil).Bytes()
+	arbiters := [][]byte{session.ArbiterPublicKey}
+	supportedCBOR, err := content.EncodeSupportedArbiterPublicKeys(arbiters)
+	if err != nil {
+		return err
+	}
+	qr, err := sellerWf.CreateQuote(ctx, facts, seller.QuoteDraft{
+		SeedHash:                   seedHash,
+		BuyerPublicKey:             mustPublicKey(session.BuyerPublicKey),
+		SeedPriceSatoshis:          protocol.Satoshis(100),
+		FullBlockPriceSatoshis:     protocol.Satoshis(1000),
+		FileSizeBytes:              0,
+		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(now.Add(time.Hour).Unix()),
+		SupportedArbiterPublicKeys: typedKeys(supportedCBOR),
+		RecommendedFilename:        "offline-smoke.bin",
+	})
+	if err != nil {
+		return fmt.Errorf("offline CreateQuote: %w", err)
+	}
+	verified, err := session.Buyer.AcceptQuote(facts, qr.Outbound.Bytes())
+	if err != nil {
+		return fmt.Errorf("offline AcceptQuote: %w", err)
+	}
+	session.offlineQuote = verified
+	return nil
+}
+
+// typedKeys 解码受支持仲裁公钥子文档为强类型公钥列表（离线路径辅助）。
+func typedKeys(encoded []byte) []protocol.PublicKey {
+	keys, _ := content.DecodeSupportedArbiterPublicKeys(encoded)
+	out := make([]protocol.PublicKey, 0, len(keys))
+	for _, raw := range keys {
+		typed, err := protocol.PublicKeyFromBytes(raw)
+		if err != nil {
+			continue
+		}
+		out = append(out, typed)
+	}
+	return out
 }
 
 // FundingAddresses 保存买方 P2PKH 地址的主网和测试网变体。
@@ -171,7 +270,7 @@ type FundingPreparation struct {
 	UTXOs                           []junglebus.UTXO
 	SelectedUTXO                    junglebus.UTXO
 	PoolOutputSatoshis              uint64
-	MinerFeeRateSatoshisPerKilobyte uint64
+	MinerFeeRateSatoshisPerKilobyte protocol.SatoshisPerKilobyte
 	FundingFeeSatoshis              uint64
 	MinerFeeRateSource              string
 	RawTx                           []byte
@@ -242,7 +341,7 @@ func (session *BuyerSession) PrepareFunding(ctx context.Context) (*FundingPrepar
 		UTXOs:                           append([]junglebus.UTXO(nil), utxos...),
 		SelectedUTXO:                    selected,
 		PoolOutputSatoshis:              poolOutputSatoshis,
-		MinerFeeRateSatoshisPerKilobyte: minerFeeRateSatPerKB,
+		MinerFeeRateSatoshisPerKilobyte: protocol.SatoshisPerKilobyte(minerFeeRateSatPerKB),
 		FundingFeeSatoshis:              fundingFeeSatoshis,
 		MinerFeeRateSource:              minerFeeRateSource,
 		RawTx:                           append([]byte(nil), rawTx...),
@@ -256,7 +355,7 @@ var errFundingUTXOTooSmall = errors.New("funding UTXO is too small")
 //
 // 排序后逐个尝试构造交易。某个输出因手续费不足而失败时可以换下一个，只有
 // 非金额类错误才立即返回，避免隐藏交易编码或签名问题。
-func selectAndBuildFundingTx(key *ec.PrivateKey, seller, arbiter []byte, utxos []junglebus.UTXO, poolOutputSatoshis, feeRateSatPerKB uint64, mainnet bool) (junglebus.UTXO, []byte, error) {
+func selectAndBuildFundingTx(key *ec.PrivateKey, sellerPub, arbiterPub []byte, utxos []junglebus.UTXO, poolOutputSatoshis, feeRateSatPerKB uint64, mainnet bool) (junglebus.UTXO, []byte, error) {
 	candidates := make([]junglebus.UTXO, 0, len(utxos))
 	for _, candidate := range utxos {
 		// 每个候选在进入交易构造器前都要独立验证，避免无效 txid 或零金额
@@ -275,7 +374,7 @@ func selectAndBuildFundingTx(key *ec.PrivateKey, seller, arbiter []byte, utxos [
 	for _, candidate := range candidates {
 		// 一个 UTXO 可能能覆盖池输出但不能覆盖指定费率的矿工费，因此需要
 		// 继续尝试后续候选，而不是把第一次构造失败当成全局失败。
-		raw, err := buildFundingTx(key, seller, arbiter, candidate, poolOutputSatoshis, feeRateSatPerKB, mainnet)
+		raw, err := buildFundingTx(key, sellerPub, arbiterPub, candidate, poolOutputSatoshis, feeRateSatPerKB, mainnet)
 		if errors.Is(err, errFundingUTXOTooSmall) {
 			continue
 		}
@@ -308,7 +407,7 @@ func fundingUTXOIsBetter(candidate, current junglebus.UTXO) bool {
 // buildFundingTx 使用所选 UTXO 构造 2-of-3 池输出和可选找零输出，并反复估算
 // 交易大小直到找零稳定。若带找零输出无法覆盖费率，则退化为单输出交易，
 // 把剩余金额全部作为矿工费。
-func buildFundingTx(key *ec.PrivateKey, seller, arbiter []byte, selected junglebus.UTXO, poolOutputSatoshis, feeRateSatPerKB uint64, mainnet bool) ([]byte, error) {
+func buildFundingTx(key *ec.PrivateKey, sellerPub, arbiterPub []byte, selected junglebus.UTXO, poolOutputSatoshis, feeRateSatPerKB uint64, mainnet bool) ([]byte, error) {
 	if key == nil {
 		return nil, errors.New("buyer private key is required")
 	}
@@ -346,8 +445,8 @@ func buildFundingTx(key *ec.PrivateKey, seller, arbiter []byte, selected jungleb
 	}
 	poolLock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{
 		BuyerPublicKey:   key.PubKey().Compressed(),
-		SellerPublicKey:  seller,
-		ArbiterPublicKey: arbiter,
+		SellerPublicKey:  sellerPub,
+		ArbiterPublicKey: arbiterPub,
 	})
 	if err != nil {
 		return nil, err
@@ -494,41 +593,45 @@ func BuyerOpeningCheckpointPath() string {
 	return filepath.Join(stateDir(), "buyer-opening-checkpoint.json")
 }
 
-// BuyerOpeningProofCheckpointPath 返回买方完整 opening proof 的 checkpoint 路径。
-func BuyerOpeningProofCheckpointPath() string {
-	return filepath.Join(stateDir(), "buyer-opening-proof.json")
+// BuyerPoolCheckpointPath 返回买方 0203 完整池证据的 checkpoint 路径。
+func BuyerPoolCheckpointPath() string {
+	return filepath.Join(stateDir(), "buyer-pool-checkpoint.json")
 }
 
-// SellerPresignProofCheckpointPath 返回卖方 0202 预签证据的 checkpoint 路径。
-func SellerPresignProofCheckpointPath() string {
-	return filepath.Join(stateDir(), "seller-presign-proof.json")
+// SellerPresignCheckpointPath 返回卖方 0202 预签证据的 checkpoint 路径。
+func SellerPresignCheckpointPath() string {
+	return filepath.Join(stateDir(), "seller-presign-checkpoint.json")
 }
 
-// buyerOpeningCheckpoint 是 0201 之后买方必须自行保存的私有状态快照。
-// 它包含原 request 和买方私有 FundingTransactionRaw；两者都不会被放进网络报文。
+// ---- 买方开池 checkpoint：exact Kind 2 bytes + 私有资金交易原文 ----
+
 type buyerOpeningCheckpoint struct {
-	RefundTemplateTxID    string `json:"refund_template_txid"`
-	Request               string `json:"request_hex"`
-	FundingTransactionRaw string `json:"funding_tx_hex"`
+	RefundTemplateTxID    string `json:"refund_template_txid"` // 费用池统一关联 ID（hex）
+	RequestArtifact       string `json:"request_artifact_hex"` // exact Kind 2 wire bytes（hex）
+	FundingTransactionRaw string `json:"funding_tx_hex"`       // 买方私有资金交易原文（hex）
 }
 
-// SaveBuyerOpeningState 把 0201 的买方本地状态写入演示 checkpoint。
-// 应用先保存该状态，然后才允许把 Request 发送给卖方。
-func SaveBuyerOpeningState(path string, state *buyer.BuyerOpeningState) error {
-	if state == nil || state.Request == nil {
-		return errors.New("buyer opening state with its request is required")
+// SaveBuyerOpeningCheckpoint 把 0201 的买方本地证据写入演示 checkpoint：
+// exact Kind 2 Artifact 字节与私有资金交易原文。应用先保存该记录，然后才允许
+// 把 Outbound 发送给卖方。
+func SaveBuyerOpeningCheckpoint(path string, prepared *buyer.PrepareOpeningResult) error {
+	if prepared == nil || prepared.Checkpoint == nil {
+		return errors.New("buyer prepare result with its checkpoint is required")
 	}
-	requestRaw, err := encodeRequestForCheckpoint(state.Request)
-	if err != nil {
-		return err
+	requestRaw := prepared.Outbound.Bytes()
+	refundTemplateTxID := prepared.Checkpoint.RefundTemplateTxID()
+	record := buyerOpeningCheckpoint{
+		RefundTemplateTxID:    hex.EncodeToString(refundTemplateTxID[:]),
+		RequestArtifact:       hex.EncodeToString(requestRaw),
+		FundingTransactionRaw: hex.EncodeToString(prepared.Checkpoint.FundingTransactionRaw()),
 	}
-	record := buyerOpeningCheckpoint{RefundTemplateTxID: hex.EncodeToString(state.RefundTemplateTxID[:]), Request: hex.EncodeToString(requestRaw), FundingTransactionRaw: hex.EncodeToString(state.FundingTransactionRaw)}
 	return writeCheckpoint(path, record)
 }
 
-// LoadBuyerOpeningState 按 RefundTemplateTxID 读取买方 0201 私有状态。
-// hash 不匹配时拒绝恢复，交给调用方决定重试或放弃；SDK 侧还会再次派生校验。
-func LoadBuyerOpeningState(path string, refundTemplateTxID pool.RefundTemplateTxID) (*buyer.BuyerOpeningState, error) {
+// LoadBuyerOpeningCheckpoint 按 RefundTemplateTxID 读取买方 0201 私有状态，
+// 并经 buyer.RestoreOpeningCheckpoint 全量重验恢复（重新派生关联 ID，绝不
+// 信任持久化的派生值）。
+func LoadBuyerOpeningCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (*buyer.OpeningCheckpoint, error) {
 	var record buyerOpeningCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
 		return nil, err
@@ -540,48 +643,47 @@ func LoadBuyerOpeningState(path string, refundTemplateTxID pool.RefundTemplateTx
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
 		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
-	requestRaw, err := hex.DecodeString(record.Request)
+	requestRaw, err := hex.DecodeString(record.RequestArtifact)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint request: %w", err)
-	}
-	request, err := decodeRequestFromCheckpoint(requestRaw)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode checkpoint request artifact: %w", err)
 	}
 	fundingTx, err := hex.DecodeString(record.FundingTransactionRaw)
 	if err != nil {
 		return nil, fmt.Errorf("decode checkpoint funding tx: %w", err)
 	}
-	return &buyer.BuyerOpeningState{RefundTemplateTxID: refundTemplateTxID, Request: request, FundingTransactionRaw: fundingTx}, nil
+	return buyer.RestoreOpeningCheckpoint(requestRaw, fundingTx)
 }
 
-// buyerProofCheckpoint 保存买方在 0203 得到的完整 opening proof（含 FundingTransactionRaw），
-// 供独立进程运行的 0204 显式读取。
-type buyerProofCheckpoint struct {
-	RefundTemplateTxID string `json:"refund_template_txid"`
-	OpeningProof       string `json:"opening_proof_hex"`
+// ---- 买方池 checkpoint：canonical opening proof 编码 + 完整付款状态 raw tx ----
+
+type buyerPoolCheckpoint struct {
+	RefundTemplateTxID string `json:"refund_template_txid"` // 费用池统一关联 ID（hex）
+	OpeningProof       string `json:"opening_proof_hex"`    // canonical opening proof 编码（hex）
+	PaymentRawTx       string `json:"payment_raw_tx_hex"`   // 当前付款状态完整交易（hex）
 }
 
-// SaveBuyerOpeningProof 保存买方完整 opening proof 到演示 checkpoint。
-func SaveBuyerOpeningProof(path string, proof *pool.OpeningProof) error {
-	if proof == nil {
-		return errors.New("opening proof is required")
+// SaveBuyerPoolCheckpoint 保存买方 0203 得到的初始池证据到演示 checkpoint。
+func SaveBuyerPoolCheckpoint(path string, poolCheckpoint *buyer.PoolCheckpoint) error {
+	if poolCheckpoint == nil || poolCheckpoint.Opening() == nil || poolCheckpoint.Payment() == nil {
+		return errors.New("buyer pool checkpoint with its evidence is required")
 	}
-	refundTemplateTxID, err := pool.DeriveRefundTemplateTxID(nil, proof)
+	encoded, err := pool.EncodeOpeningProof(poolCheckpoint.Opening())
 	if err != nil {
-		return err
+		return fmt.Errorf("encode canonical opening proof: %w", err)
 	}
-	encoded, err := pool.EncodeOpeningProof(proof)
-	if err != nil {
-		return err
+	refundTemplateTxID := poolCheckpoint.RefundTemplateTxID()
+	record := buyerPoolCheckpoint{
+		RefundTemplateTxID: hex.EncodeToString(refundTemplateTxID[:]),
+		OpeningProof:       hex.EncodeToString(encoded),
+		PaymentRawTx:       hex.EncodeToString(poolCheckpoint.Payment().RawTx),
 	}
-	record := buyerProofCheckpoint{RefundTemplateTxID: hex.EncodeToString(refundTemplateTxID[:]), OpeningProof: hex.EncodeToString(encoded)}
 	return writeCheckpoint(path, record)
 }
 
-// LoadBuyerOpeningProof 按 RefundTemplateTxID 读取买方完整 opening proof。
-func LoadBuyerOpeningProof(path string, refundTemplateTxID pool.RefundTemplateTxID) (*pool.OpeningProof, error) {
-	var record buyerProofCheckpoint
+// LoadBuyerPoolCheckpoint 按 RefundTemplateTxID 读取买方池证据，并经
+// buyer.RestorePoolCheckpoint 全量重验恢复 opening 签名与付款状态。
+func LoadBuyerPoolCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (*buyer.PoolCheckpoint, error) {
+	var record buyerPoolCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
 		return nil, err
 	}
@@ -592,40 +694,39 @@ func LoadBuyerOpeningProof(path string, refundTemplateTxID pool.RefundTemplateTx
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
 		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
-	encoded, err := hex.DecodeString(record.OpeningProof)
+	openingProof, err := hex.DecodeString(record.OpeningProof)
 	if err != nil {
 		return nil, fmt.Errorf("decode checkpoint opening proof: %w", err)
 	}
-	return pool.DecodeOpeningProof(encoded)
+	paymentRawTx, err := hex.DecodeString(record.PaymentRawTx)
+	if err != nil {
+		return nil, fmt.Errorf("decode checkpoint payment raw tx: %w", err)
+	}
+	return buyer.RestorePoolCheckpoint(openingProof, paymentRawTx)
 }
 
-// sellerPresignCheckpoint 保存卖方在 0202 得到的预签证据，供独立进程运行的
-// 0205 显式读取。
+// ---- 卖方预签 checkpoint：exact Kind 2 request 字节（恢复 = 等价重算）----
+
 type sellerPresignCheckpoint struct {
-	RefundTemplateTxID string `json:"refund_template_txid"`
-	OpeningProof       string `json:"opening_proof_hex"`
+	RefundTemplateTxID string `json:"refund_template_txid"` // 从请求派生的关联 ID（hex）
+	RequestArtifact    string `json:"request_artifact_hex"` // 卖方收到的 exact Kind 2 bytes（hex）
 }
 
-// SaveSellerPresignProof 保存卖方预签证据到演示 checkpoint。应用先保存该
-// 证据，然后才允许把 Response 发送给买方。
-func SaveSellerPresignProof(path string, result *seller.SellerPresignResult) error {
-	if result == nil || result.Opening == nil {
-		return errors.New("seller presign result with its opening proof is required")
+// SaveSellerPresignCheckpoint 保存卖方 0202 收到的 exact Kind 2 字节到演示
+// checkpoint。应用先保存该证据，然后才允许把预签响应发送给买方。
+func SaveSellerPresignCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID, requestArtifactRaw []byte) error {
+	record := sellerPresignCheckpoint{
+		RefundTemplateTxID: hex.EncodeToString(refundTemplateTxID[:]),
+		RequestArtifact:    hex.EncodeToString(requestArtifactRaw),
 	}
-	hash, err := pool.DeriveRefundTemplateTxID(nil, result.Opening)
-	if err != nil {
-		return err
-	}
-	encoded, err := pool.EncodeOpeningProof(result.Opening)
-	if err != nil {
-		return err
-	}
-	record := sellerPresignCheckpoint{RefundTemplateTxID: hex.EncodeToString(hash[:]), OpeningProof: hex.EncodeToString(encoded)}
 	return writeCheckpoint(path, record)
 }
 
-// LoadSellerPresignProof 按 RefundTemplateTxID 读取卖方预签证据。
-func LoadSellerPresignProof(path string, refundTemplateTxID pool.RefundTemplateTxID) (*pool.OpeningProof, error) {
+// LoadSellerPresignCheckpoint 按 RefundTemplateTxID 读取卖方预签证据。
+// SDK 的卖方 OpeningCheckpoint 是不透明对象且没有第二构造器；demo 用保存的
+// exact Kind 2 bytes 重跑 seller.PreparePoolOpening——相同的重复请求只会得到
+// 等价的新鲜计算结果，随后 0205 的交叉验证保证它与原始响应一致。
+func LoadSellerPresignCheckpoint(ctx context.Context, session *SellerSession, path string, refundTemplateTxID pool.RefundTemplateTxID) (*seller.OpeningCheckpoint, error) {
 	var record sellerPresignCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
 		return nil, err
@@ -637,11 +738,15 @@ func LoadSellerPresignProof(path string, refundTemplateTxID pool.RefundTemplateT
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
 		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
-	encoded, err := hex.DecodeString(record.OpeningProof)
+	requestRaw, err := hex.DecodeString(record.RequestArtifact)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint opening proof: %w", err)
+		return nil, fmt.Errorf("decode checkpoint request artifact: %w", err)
 	}
-	return pool.DecodeOpeningProof(encoded)
+	prepared, err := session.Seller.PreparePoolOpening(ctx, Facts(time.Now().UTC()), requestRaw)
+	if err != nil {
+		return nil, fmt.Errorf("recompute seller presign checkpoint: %w", err)
+	}
+	return prepared.Checkpoint, nil
 }
 
 func writeCheckpoint(path string, record any) error {
@@ -721,10 +826,9 @@ func DecodeHexText(text, label string) ([]byte, error) {
 			return nil, fmt.Errorf("label %s is missing from hex input", label)
 		}
 		text = found
-	} else if key, value, ok := strings.Cut(text, "="); ok {
+	} else if _, value, ok := strings.Cut(text, "="); ok {
 		// 不要求 key 的具体名称，但仍只按第一个等号取值，兼容临时手工
 		// 传入的单字段 artifact。
-		_ = key
 		text = strings.TrimSpace(value)
 	}
 	decoded, err := hex.DecodeString(text)
@@ -767,12 +871,56 @@ func loadKey(name string) (*ec.PrivateKey, error) {
 	return key, nil
 }
 
-// encodeRequestForCheckpoint 把 0201 request 编码为规范 wire 字节保存。
-func encodeRequestForCheckpoint(request *pool.RefundPresignRequest) ([]byte, error) {
-	return wire.MarshalRefundPresignRequest(request)
+// PrepareFundingOffline 构造一笔确定性的内存资金交易（零哈希输入占位 +
+// 单一池输出），供离线冒烟验收使用。它绝不访问 JungleBus；真实资金路径
+// 仍由 PrepareFunding 提供。
+func (session *BuyerSession) PrepareFundingOffline() (*FundingPreparation, error) {
+	if session == nil || session.buyerKey == nil {
+		return nil, errors.New("buyer session is required")
+	}
+	poolOutputSatoshis, err := envUint64("DEMO_02_POOL_OUTPUT_SAT", 20000)
+	if err != nil {
+		return nil, err
+	}
+	// 离线冒烟使用与 fixture 相同的低费率，保证 20000 池输出可容纳退款模板。
+	feeRate, err := envUint64("DEMO_02_FEE_SAT_PER_KB", 1)
+	if err != nil {
+		return nil, err
+	}
+	rawTx, fundingFee, err := session.buildDeterministicFundingTx(session.buyerKey.PubKey().Compressed(), poolOutputSatoshis)
+	if err != nil {
+		return nil, err
+	}
+	return &FundingPreparation{
+		RawTx:                           rawTx,
+		PoolOutputSatoshis:              poolOutputSatoshis,
+		MinerFeeRateSatoshisPerKilobyte: protocol.SatoshisPerKilobyte(feeRate),
+		FundingFeeSatoshis:              fundingFee,
+	}, nil
 }
 
-// decodeRequestFromCheckpoint 从 checkpoint 字节恢复 0201 request。
-func decodeRequestFromCheckpoint(raw []byte) (*pool.RefundPresignRequest, error) {
-	return wire.UnmarshalRefundPresignRequest(raw)
+// buildDeterministicFundingTx 用零哈希输入占位构造单一池输出资金交易；
+// 仅用于离线冒烟：它不代表可花费 UTXO。
+func (session *BuyerSession) buildDeterministicFundingTx(buyerPubKey []byte, poolOutputSatoshis uint64) ([]byte, uint64, error) {
+	lockBytes, err := pool.Build2of3LockingScript(session.demoLockKeys(buyerPubKey))
+	if err != nil {
+		return nil, 0, err
+	}
+	funding := tx.NewTransaction()
+	var zeroSource chainhash.Hash
+	for i := range zeroSource {
+		zeroSource[i] = 1
+	}
+	funding.AddInput(&tx.TransactionInput{SourceTXID: &zeroSource, SequenceNumber: tx.DefaultSequenceNumber})
+	funding.AddOutput(&tx.TransactionOutput{Satoshis: poolOutputSatoshis, LockingScript: script.NewFromBytes(lockBytes)})
+	return funding.Bytes(), 0, nil
+}
+
+// demoLockKeys 组装 2-of-3 角色公钥输入（三方均来自会话密钥）。
+func (session *BuyerSession) demoLockKeys(buyerPubKey []byte) pool.MultisigPoolPublicKeys {
+	return pool.MultisigPoolPublicKeys{
+		BuyerPublicKey:   buyerPubKey,
+		SellerPublicKey:  append([]byte(nil), session.SellerPublicKey...),
+		ArbiterPublicKey: append([]byte(nil), session.ArbiterPublicKey...),
+	}
 }

@@ -1,4 +1,4 @@
-package bitfs
+package content
 
 import (
 	"fmt"

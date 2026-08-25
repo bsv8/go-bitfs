@@ -3,30 +3,41 @@
 // tracks monotonic payment state, and exposes pure transaction construction,
 // parsing, signing, and verification capabilities; it deliberately does not
 // import BitFS quote or content types and performs no storage, network, or
-// node side effects.
+// node side effects. All signing capability enters through the constrained
+// protocol.Signer port; all time/height judgments arrive as explicit facts.
 package pool
 
 import (
 	"crypto/sha256"
-	"errors"
-	"fmt"
 
-	"github.com/bsv8/go-bitfs/internal/refundlock"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
-var (
-	// ErrInvalidEvidence is returned when pool evidence fails structural or protocol validation.
-	ErrInvalidEvidence = errors.New("invalid pool evidence")
-	// ErrStalePaymentSequence indicates that an update does not extend current state.
-	ErrStalePaymentSequence = errors.New("stale payment sequence")
-	// ErrInsufficientBalance indicates that a payment exceeds the pool balance.
-	ErrInsufficientBalance = errors.New("insufficient pool balance")
-	// ErrNotExpired is the internal refundlock sentinel re-exported so callers
-	// matching it via errors.Is observe the "not yet matured" condition.
-	ErrNotExpired = refundlock.ErrNotExpired
-)
+// invalid 构造本包统一的 invalid_evidence 结构化错误；message 只携带安全的
+// 字段路径与类别，不回显私钥、完整 payload、签名 preimage 或 raw transaction。
+func invalid(message string) error {
+	return protocol.Errorf("pool", protocol.CodeInvalidEvidence, 0, "", "%s", message)
+}
 
-func invalid(message string) error { return fmt.Errorf("%w: %s", ErrInvalidEvidence, message) }
+// malformedWire 构造结构畸形错误。
+func malformedWire(field string, cause error) error {
+	return protocol.Wrap(cause, "pool", protocol.CodeMalformedWire, 0, field)
+}
+
+// nonCanonical 构造非规范编码错误。
+func nonCanonical(field string, message string) error {
+	return protocol.Errorf("pool", protocol.CodeNonCanonical, 0, field, "%s", message)
+}
+
+// staleSequence 构造序号陈旧/状态冲突错误。
+func staleSequence(message string) error {
+	return protocol.Errorf("pool", protocol.CodeStateConflict, 0, "payment_sequence", "%s", message)
+}
+
+// insufficientBalance 构造余额不足错误。
+func insufficientBalance() error {
+	return protocol.Errorf("pool", protocol.CodeInsufficientBalance, 0, "seller_amount_after_satoshis", "payment exceeds the pool balance")
+}
 
 func hash32FromBytes(raw []byte) Hash32 {
 	var result Hash32

@@ -10,12 +10,11 @@ package arbitration
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 
-	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/fxamacker/cbor/v2"
@@ -25,9 +24,9 @@ const (
 	wireKindContentRetrievalRequest  uint64 = 10
 	wireKindContentRetrievalResponse uint64 = 11
 
-	// RetrievalNonceBytes is the fixed width of the caller-generated replay
-	// key. The nonce must come from the application's cryptographic random
-	// source; the SDK never generates, stores, or deduplicates nonces.
+	// RetrievalNonceBytes is the fixed width of the replay key. 默认入口由
+	// SDK 用 crypto/rand 经 protocol.GenerateRetrievalNonce 生成；显式 nonce
+	// 的底层入口只服务测试与恢复路径。
 	RetrievalNonceBytes = sha256.Size
 
 	// MinContentRetrievalSignatureBytes is the lower bound of the DER buyer
@@ -61,7 +60,7 @@ const (
 	// MaxContentRetrievalAvailableBytes is derived from the five-element
 	// available branch shape [1, 11, result(3+70), signature(3+256),
 	// payloads(uint32 head + bundle)]. It is not an independent quota.
-	MaxContentRetrievalAvailableBytes = 1 + 1 + 1 + maxSignatureBstrOverhead + maxContentRetrievalResultDocBytes + maxSignatureBstrOverhead + MaxArbitrationSignatureBytes + 5 + bitfs.MaxContentPayloadsCBORBytes
+	MaxContentRetrievalAvailableBytes = 1 + 1 + 1 + maxSignatureBstrOverhead + maxContentRetrievalResultDocBytes + maxSignatureBstrOverhead + MaxArbitrationSignatureBytes + 5 + content.MaxContentPayloadsCBORBytes
 
 	// MaxContentRetrievalResponseBytes is the single pre-allocation guard used
 	// before the branch discriminator is known; the unavailable branch is
@@ -96,11 +95,6 @@ const (
 	// was deleted under the public retention policy.
 	RetrievalCustodyGone ContentRetrievalUnavailableReason = 2
 )
-
-// ErrContentUnavailable marks a verified Kind 11 whose arbiter answered with
-// the unavailable branch. It never implies that the seller will never
-// arbitrate, and it produces no refund, close, or payment state change.
-var ErrContentUnavailable = errors.New("arbitrated content is currently unavailable")
 
 // ContentRetrievalRequest is the exact four-element Kind 10 message. It
 // carries no Buyer public key, OpeningProof, payment authorization, Claim
@@ -154,8 +148,12 @@ type VerifiedContentRetrievalResult struct {
 	// ContentRetrievalRequestID 是已验证绑定的请求 ID（等于买方请求文档哈希）。
 	ContentRetrievalRequestID protocol.ContentRetrievalRequestID
 	// Available 报告分支结果：true 为可交付；false 表示 unavailable 分支，
-	// 此时 Payloads/PayloadsCBOR 均为空且不产生任何付款状态变化。
+	// 此时 Payloads/PayloadsCBOR 均为空且不产生任何付款状态变化。valid
+	// unavailable 是协议结果，不是 transport/parser error。
 	Available bool
+	// UnavailableReason 仅 Available == false 时有意义：仲裁方给出的诚实原因，
+	// 应用据此决定生成新 nonce、等待或终止。
+	UnavailableReason ContentRetrievalUnavailableReason
 	// PayloadsCBOR 是 exact content_payloads_cbor 字节；仅 available 分支非空。
 	PayloadsCBOR []byte
 	// Payloads 是按授权顺序深拷贝的 payload 内容；仅 available 分支非空。
@@ -186,7 +184,7 @@ type VerifiedCustodiedContent struct {
 // constraints.
 func EncodeContentRetrievalRequestDocument(claimID protocol.ArbitrationClaimID, nonce []byte) ([]byte, error) {
 	if claimID.IsZero() {
-		return nil, fmt.Errorf("%w: content retrieval Claim ID", protocol.ErrZeroIdentifier)
+		return nil, protocol.Errorf("arbitration.EncodeContentRetrievalRequestDocument", protocol.CodeInvalidEvidence, 10, "arbitration_claim_id", "%w", protocol.ErrZeroIdentifier)
 	}
 	if err := validateRetrievalNonce(nonce); err != nil {
 		return nil, err
@@ -197,12 +195,13 @@ func EncodeContentRetrievalRequestDocument(claimID protocol.ArbitrationClaimID, 
 // DecodeContentRetrievalRequestDocument strictly decodes the child document
 // and returns deep copies of its Claim ID and nonce.
 func DecodeContentRetrievalRequestDocument(data []byte) (protocol.ArbitrationClaimID, []byte, error) {
+	const op = "arbitration.DecodeContentRetrievalRequestDocument"
 	if err := requireWireSize(data, maxContentRetrievalRequestDocBytes, "content retrieval request document"); err != nil {
 		return protocol.ArbitrationClaimID{}, nil, err
 	}
 	values, err := decodeArray(data, 2)
 	if err != nil {
-		return protocol.ArbitrationClaimID{}, nil, fmt.Errorf("%w: decode content retrieval request document: %v", pool.ErrInvalidEvidence, err)
+		return protocol.ArbitrationClaimID{}, nil, protocol.Wrap(err, op, protocol.CodeMalformedWire, 10, "content_retrieval_request_cbor")
 	}
 	var claimIDBytes, nonce []byte
 	if err := arbitrationDec.Unmarshal(values[0], &claimIDBytes); err != nil {
@@ -213,7 +212,7 @@ func DecodeContentRetrievalRequestDocument(data []byte) (protocol.ArbitrationCla
 	}
 	claimID := claimIDBytes
 	if len(claimID) != sha256.Size {
-		return protocol.ArbitrationClaimID{}, nil, fmt.Errorf("%w: content retrieval Claim ID must be 32 bytes", pool.ErrInvalidEvidence)
+		return protocol.ArbitrationClaimID{}, nil, protocol.Errorf(op, protocol.CodeMalformedWire, 10, "arbitration_claim_id", "must be 32 bytes")
 	}
 	if err := validateRetrievalNonce(nonce); err != nil {
 		return protocol.ArbitrationClaimID{}, nil, err
@@ -225,26 +224,30 @@ func DecodeContentRetrievalRequestDocument(data []byte) (protocol.ArbitrationCla
 		return protocol.ArbitrationClaimID{}, nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return protocol.ArbitrationClaimID{}, nil, fmt.Errorf("%w: content retrieval request document is not deterministically encoded", pool.ErrInvalidEvidence)
+		return protocol.ArbitrationClaimID{}, nil, protocol.Errorf(op, protocol.CodeNonCanonical, 10, "content_retrieval_request_cbor", "not deterministically encoded")
 	}
 	return typedClaimID, append([]byte(nil), nonce...), nil
 }
 
 // NewContentRetrievalRequest builds and signs a complete Kind 10 through the
-// unified SignWireDocument(1, 10, ...) helper and self-verifies the result.
-// The nonce must be 32 bytes of cryptographic randomness generated by the
-// calling application.
-func NewContentRetrievalRequest(claimID protocol.ArbitrationClaimID, nonce []byte, buyerKey *ec.PrivateKey) (*ContentRetrievalRequest, error) {
-	if buyerKey == nil {
-		return nil, errors.New("buyer private key is required")
+// unified SignWireDocument(1, 10, ...) helper with the supplied constrained
+// Signer and self-verifies the result. 这是显式 nonce 的底层入口：nonce 必须是
+// SDK 生成的 typed 随机数（测试/恢复路径）；普通角色 API 不接受任意 []byte。
+func NewContentRetrievalRequest(ctx context.Context, claimID protocol.ArbitrationClaimID, nonce protocol.RetrievalNonce, signer protocol.Signer) (*ContentRetrievalRequest, error) {
+	const op = "arbitration.NewContentRetrievalRequest"
+	if ctx == nil {
+		return nil, protocol.Errorf(op, protocol.CodeCanceled, 0, "ctx", "a non-nil context is required")
 	}
-	requestCBOR, err := EncodeContentRetrievalRequestDocument(claimID, nonce)
+	if signer == nil {
+		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "buyer signer is required")
+	}
+	requestCBOR, err := EncodeContentRetrievalRequestDocument(claimID, nonce[:])
 	if err != nil {
 		return nil, err
 	}
-	signature, err := protocol.SignWireDocument(buyerKey, protocol.WireVersion, wireKindContentRetrievalRequest, requestCBOR)
+	signature, err := protocol.SignWireDocument(ctx, signer, protocol.WireVersion, wireKindContentRetrievalRequest, requestCBOR)
 	if err != nil {
-		return nil, fmt.Errorf("sign content retrieval request: %w", err)
+		return nil, err
 	}
 	request := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: append([]byte(nil), requestCBOR...), BuyerContentRetrievalRequestSignature: append([]byte(nil), signature...)}
 	if _, err := MarshalContentRetrievalRequest(request); err != nil {
@@ -255,28 +258,29 @@ func NewContentRetrievalRequest(claimID protocol.ArbitrationClaimID, nonce []byt
 
 func validateRetrievalNonce(nonce []byte) error {
 	if len(nonce) != RetrievalNonceBytes {
-		return fmt.Errorf("%w: retrieval nonce must be 32 bytes", pool.ErrInvalidEvidence)
+		return protocol.Errorf("arbitration", protocol.CodeInvalidEvidence, 10, "retrieval_nonce", "must be 32 bytes")
 	}
 	for _, value := range nonce {
 		if value != 0 {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: retrieval nonce must not be all zero", pool.ErrInvalidEvidence)
+	return protocol.Errorf("arbitration", protocol.CodeInvalidEvidence, 10, "retrieval_nonce", "must not be all zero")
 }
 
 // ValidateContentRetrievalRequest enforces the fixed Kind 10 shapes: a
 // canonical 32-byte Claim ID plus non-zero nonce inside the child document,
 // and a bounded DER signature over exactly that document.
 func ValidateContentRetrievalRequest(request *ContentRetrievalRequest) error {
+	const op = "arbitration.ValidateContentRetrievalRequest"
 	if request == nil || len(request.ContentRetrievalRequestCBOR) == 0 || len(request.BuyerContentRetrievalRequestSignature) == 0 {
-		return fmt.Errorf("%w: content retrieval request is incomplete", pool.ErrInvalidEvidence)
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 10, "request", "content retrieval request is incomplete")
 	}
 	if _, _, err := DecodeContentRetrievalRequestDocument(request.ContentRetrievalRequestCBOR); err != nil {
 		return err
 	}
 	if len(request.BuyerContentRetrievalRequestSignature) < MinContentRetrievalSignatureBytes || len(request.BuyerContentRetrievalRequestSignature) > MaxArbitrationSignatureBytes {
-		return fmt.Errorf("%w: buyer retrieval signature exceeds %d bytes", pool.ErrInvalidEvidence, MaxArbitrationSignatureBytes)
+		return protocol.Errorf(op, protocol.CodeMalformedWire, 10, "buyer_content_retrieval_request_signature", "exceeds %d bytes", MaxArbitrationSignatureBytes)
 	}
 	return nil
 }
@@ -300,20 +304,21 @@ func MarshalContentRetrievalRequest(request *ContentRetrievalRequest) ([]byte, e
 // strict shape, version/kind checks, validation, then deterministic round-trip
 // equality.
 func UnmarshalContentRetrievalRequest(data []byte) (*ContentRetrievalRequest, error) {
+	const op = "arbitration.UnmarshalContentRetrievalRequest"
 	if err := requireWireSize(data, MaxContentRetrievalRequestBytes, "content retrieval request"); err != nil {
 		return nil, err
 	}
 	values, err := decodeArray(data, 4)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode content retrieval request: %v", pool.ErrInvalidEvidence, err)
+		return nil, protocol.Wrap(err, op, protocol.CodeMalformedWire, 10, "wire")
 	}
 	request := new(ContentRetrievalRequest)
 	var version, kind uint64
 	if err := arbitrationDec.Unmarshal(values[0], &version); err != nil || version != protocol.WireVersion {
-		return nil, fmt.Errorf("%w: unsupported content retrieval request wire version", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedVersion, 10, "wire_version", "unsupported content retrieval request wire version")
 	}
 	if err := arbitrationDec.Unmarshal(values[1], &kind); err != nil || kind != wireKindContentRetrievalRequest {
-		return nil, fmt.Errorf("%w: content retrieval request kind must be 10", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedKind, 10, "wire_kind", "content retrieval request kind must be 10")
 	}
 	if err := arbitrationDec.Unmarshal(values[2], &request.ContentRetrievalRequestCBOR); err != nil {
 		return nil, err
@@ -329,7 +334,7 @@ func UnmarshalContentRetrievalRequest(data []byte) (*ContentRetrievalRequest, er
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: content retrieval request is not deterministically encoded", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 10, "wire", "content retrieval request is not deterministically encoded")
 	}
 	return cloneRetrievalRequest(request), nil
 }
@@ -338,28 +343,29 @@ func UnmarshalContentRetrievalRequest(data []byte) (*ContentRetrievalRequest, er
 // content_retrieval_result_cbor for either branch. The discriminator decides
 // the meaning of the third element; callers cannot mix branches.
 func EncodeContentRetrievalResultDocument(requestID protocol.ContentRetrievalRequestID, result ContentRetrievalResult, branchValue []byte) ([]byte, error) {
+	const op = "arbitration.EncodeContentRetrievalResultDocument"
 	if requestID.IsZero() {
-		return nil, fmt.Errorf("%w: content_retrieval_request_id", protocol.ErrZeroIdentifier)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_retrieval_request_id", "%w", protocol.ErrZeroIdentifier)
 	}
 	switch result {
 	case ContentRetrievalUnavailable:
 		if len(branchValue) != 1 {
-			return nil, fmt.Errorf("%w: unavailable branch requires the reason scalar", pool.ErrInvalidEvidence)
+			return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "branch_value", "unavailable branch requires the reason scalar")
 		}
 		reason := ContentRetrievalUnavailableReason(branchValue[0])
 		switch reason {
 		case RetrievalSellerArbitrationNotReceived, RetrievalSellerArbitrationNotReady, RetrievalCustodyGone:
 		default:
-			return nil, fmt.Errorf("%w: unknown content retrieval unavailable reason %d", pool.ErrInvalidEvidence, reason)
+			return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "unavailable_reason", "unknown content retrieval unavailable reason %d", reason)
 		}
 		return arbitrationEnc.Marshal([]any{bstr(requestID[:]), uint64(result), uint64(reason)})
 	case ContentRetrievalAvailable:
 		if len(branchValue) != sha256.Size {
-			return nil, fmt.Errorf("%w: available branch requires the 32-byte content_payloads_id", pool.ErrInvalidEvidence)
+			return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_payloads_id", "available branch requires the 32-byte content_payloads_id")
 		}
 		return arbitrationEnc.Marshal([]any{bstr(requestID[:]), uint64(result), bstr(branchValue)})
 	default:
-		return nil, fmt.Errorf("%w: unknown content retrieval result %d", pool.ErrInvalidEvidence, result)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "result", "unknown content retrieval result %d", result)
 	}
 }
 
@@ -368,19 +374,20 @@ func EncodeContentRetrievalResultDocument(requestID protocol.ContentRetrievalReq
 // else; unknown results and wrong shapes are rejected without presence
 // guessing.
 func DecodeContentRetrievalResultDocument(data []byte) (*DecodedContentRetrievalResult, error) {
+	const op = "arbitration.DecodeContentRetrievalResultDocument"
 	if err := requireWireSize(data, maxContentRetrievalResultDocBytes, "content retrieval result document"); err != nil {
 		return nil, err
 	}
 	values, err := decodeArray(data, 3)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode content retrieval result document: %v", pool.ErrInvalidEvidence, err)
+		return nil, protocol.Wrap(err, op, protocol.CodeMalformedWire, 11, "content_retrieval_result_cbor")
 	}
 	result := new(DecodedContentRetrievalResult)
 	if err := arbitrationDec.Unmarshal(values[0], &result.ContentRetrievalRequestID); err != nil {
 		return nil, err
 	}
 	if len(result.ContentRetrievalRequestID) != sha256.Size {
-		return nil, fmt.Errorf("%w: content_retrieval_request_id must be 32 bytes", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 11, "content_retrieval_request_id", "must be 32 bytes")
 	}
 	var discriminator uint64
 	if err := arbitrationDec.Unmarshal(values[1], &discriminator); err != nil {
@@ -395,7 +402,7 @@ func DecodeContentRetrievalResultDocument(data []byte) (*DecodedContentRetrieval
 		switch ContentRetrievalUnavailableReason(reason) {
 		case RetrievalSellerArbitrationNotReceived, RetrievalSellerArbitrationNotReady, RetrievalCustodyGone:
 		default:
-			return nil, fmt.Errorf("%w: unknown content retrieval unavailable reason %d", pool.ErrInvalidEvidence, reason)
+			return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "unavailable_reason", "unknown content retrieval unavailable reason %d", reason)
 		}
 		result.Result = ContentRetrievalUnavailable
 		result.UnavailableReason = ContentRetrievalUnavailableReason(reason)
@@ -405,19 +412,19 @@ func DecodeContentRetrievalResultDocument(data []byte) (*DecodedContentRetrieval
 			return nil, err
 		}
 		if len(payloadsIDBytes) != sha256.Size {
-			return nil, fmt.Errorf("%w: content_payloads_id must be 32 bytes", pool.ErrInvalidEvidence)
+			return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 11, "content_payloads_id", "must be 32 bytes")
 		}
 		copy(result.ContentPayloadsID[:], payloadsIDBytes)
 		result.Result = ContentRetrievalAvailable
 	default:
-		return nil, fmt.Errorf("%w: unknown content retrieval result %d", pool.ErrInvalidEvidence, discriminator)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedKind, 11, "result", "unknown content retrieval result %d", discriminator)
 	}
 	canonical, err := EncodeContentRetrievalResultDocument(result.ContentRetrievalRequestID, result.Result, branchValueForResult(result))
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: content retrieval result document is not deterministically encoded", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 11, "content_retrieval_result_cbor", "not deterministically encoded")
 	}
 	// ContentRetrievalRequestID / ContentPayloadsID 均为值类型数组，无需再深拷贝。
 	return result, nil
@@ -431,47 +438,51 @@ func branchValueForResult(result *DecodedContentRetrievalResult) []byte {
 }
 
 // BuildContentRetrievalUnavailable constructs and signs the negative Kind 11
-// branch. The caller supplies only the structurally valid request ID and the
-// honest reason; the signed response carries no Claim, role key, payload, or
-// record metadata.
-func BuildContentRetrievalUnavailable(requestID protocol.ContentRetrievalRequestID, reason ContentRetrievalUnavailableReason, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error) {
-	return buildContentRetrievalResult(requestID, ContentRetrievalUnavailable, []byte{byte(reason)}, nil, arbiterKey)
+// branch through the supplied constrained Signer. The caller supplies only
+// the structurally valid request ID and the honest reason; the signed response
+// carries no Claim, role key, payload, or record metadata.
+func BuildContentRetrievalUnavailable(ctx context.Context, requestID protocol.ContentRetrievalRequestID, reason ContentRetrievalUnavailableReason, signer protocol.Signer) (*ContentRetrievalResponse, error) {
+	return buildContentRetrievalResult(ctx, requestID, ContentRetrievalUnavailable, []byte{byte(reason)}, nil, signer)
 }
 
 // BuildContentRetrievalAvailable constructs and signs the positive Kind 11
 // branch. The payload bundle is canonically encoded here so the signed
 // content_payloads_id always binds the exact attached bytes.
-func BuildContentRetrievalAvailable(requestID protocol.ContentRetrievalRequestID, payloads [][]byte, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error) {
-	payloadsCBOR, err := bitfs.EncodeContentPayloads(payloads)
+func BuildContentRetrievalAvailable(ctx context.Context, requestID protocol.ContentRetrievalRequestID, payloads [][]byte, signer protocol.Signer) (*ContentRetrievalResponse, error) {
+	payloadsCBOR, err := content.EncodeContentPayloads(payloads)
 	if err != nil {
 		return nil, err
 	}
 	payloadsID := sha256.Sum256(payloadsCBOR)
-	return buildContentRetrievalResult(requestID, ContentRetrievalAvailable, payloadsID[:], payloadsCBOR, arbiterKey)
+	return buildContentRetrievalResult(ctx, requestID, ContentRetrievalAvailable, payloadsID[:], payloadsCBOR, signer)
 }
 
 // BuildContentRetrievalAvailableRaw is the raw-bytes variant of
 // BuildContentRetrievalAvailable for applications that persist the exact
 // canonical payload bundle. The bundle must already be canonical.
-func BuildContentRetrievalAvailableRaw(requestID protocol.ContentRetrievalRequestID, payloadsCBOR []byte, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error) {
-	if _, err := bitfs.DecodeContentPayloads(payloadsCBOR); err != nil {
+func BuildContentRetrievalAvailableRaw(ctx context.Context, requestID protocol.ContentRetrievalRequestID, payloadsCBOR []byte, signer protocol.Signer) (*ContentRetrievalResponse, error) {
+	if _, err := content.DecodeContentPayloads(payloadsCBOR); err != nil {
 		return nil, err
 	}
 	payloadsID := sha256.Sum256(payloadsCBOR)
-	return buildContentRetrievalResult(requestID, ContentRetrievalAvailable, payloadsID[:], append([]byte(nil), payloadsCBOR...), arbiterKey)
+	return buildContentRetrievalResult(ctx, requestID, ContentRetrievalAvailable, payloadsID[:], append([]byte(nil), payloadsCBOR...), signer)
 }
 
-func buildContentRetrievalResult(requestID protocol.ContentRetrievalRequestID, result ContentRetrievalResult, branchValue, payloadsCBOR []byte, arbiterKey *ec.PrivateKey) (*ContentRetrievalResponse, error) {
-	if arbiterKey == nil {
-		return nil, errors.New("arbiter private key is required")
+func buildContentRetrievalResult(ctx context.Context, requestID protocol.ContentRetrievalRequestID, result ContentRetrievalResult, branchValue, payloadsCBOR []byte, signer protocol.Signer) (*ContentRetrievalResponse, error) {
+	const op = "arbitration.buildContentRetrievalResult"
+	if ctx == nil {
+		return nil, protocol.Errorf(op, protocol.CodeCanceled, 0, "ctx", "a non-nil context is required")
+	}
+	if signer == nil {
+		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "arbiter signer is required")
 	}
 	resultCBOR, err := EncodeContentRetrievalResultDocument(requestID, result, branchValue)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := protocol.SignWireDocument(arbiterKey, protocol.WireVersion, wireKindContentRetrievalResponse, resultCBOR)
+	signature, err := protocol.SignWireDocument(ctx, signer, protocol.WireVersion, wireKindContentRetrievalResponse, resultCBOR)
 	if err != nil {
-		return nil, fmt.Errorf("sign content retrieval result: %w", err)
+		return nil, err
 	}
 	response := &ContentRetrievalResponse{
 		ContentRetrievalResultCBOR:             append([]byte(nil), resultCBOR...),
@@ -489,8 +500,9 @@ func buildContentRetrievalResult(requestID protocol.ContentRetrievalRequestID, r
 // ValidateContentRetrievalResponse enforces branch-consistent structure: the
 // discriminator inside ContentRetrievalResultCBOR decides whether an attachment may exist.
 func ValidateContentRetrievalResponse(response *ContentRetrievalResponse) error {
+	const op = "arbitration.ValidateContentRetrievalResponse"
 	if response == nil || len(response.ContentRetrievalResultCBOR) == 0 || len(response.ArbiterContentRetrievalResultSignature) == 0 {
-		return fmt.Errorf("%w: content retrieval response is incomplete", pool.ErrInvalidEvidence)
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "response", "content retrieval response is incomplete")
 	}
 	decoded, err := DecodeContentRetrievalResultDocument(response.ContentRetrievalResultCBOR)
 	if err != nil {
@@ -499,13 +511,13 @@ func ValidateContentRetrievalResponse(response *ContentRetrievalResponse) error 
 	switch decoded.Result {
 	case ContentRetrievalUnavailable:
 		if response.ContentPayloadsCBOR != nil {
-			return fmt.Errorf("%w: unavailable branch must not carry content payloads", pool.ErrInvalidEvidence)
+			return protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_payloads_cbor", "unavailable branch must not carry content payloads")
 		}
 	case ContentRetrievalAvailable:
 		if len(response.ContentPayloadsCBOR) == 0 {
-			return fmt.Errorf("%w: available branch requires content payloads", pool.ErrInvalidEvidence)
+			return protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_payloads_cbor", "available branch requires content payloads")
 		}
-		if _, err := bitfs.DecodeContentPayloads(response.ContentPayloadsCBOR); err != nil {
+		if _, err := content.DecodeContentPayloads(response.ContentPayloadsCBOR); err != nil {
 			return err
 		}
 	}
@@ -542,23 +554,24 @@ func MarshalContentRetrievalResponse(response *ContentRetrievalResponse) ([]byte
 // length for that branch. Any mismatch, trailing field, unknown reason, or
 // non-canonical encoding is rejected.
 func UnmarshalContentRetrievalResponse(data []byte) (*ContentRetrievalResponse, error) {
+	const op = "arbitration.UnmarshalContentRetrievalResponse"
 	if err := requireWireSize(data, MaxContentRetrievalResponseBytes, "content retrieval response"); err != nil {
 		return nil, err
 	}
 	rawValues, err := decodePoolStyleArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode content retrieval response: %v", pool.ErrInvalidEvidence, err)
+		return nil, protocol.Wrap(err, op, protocol.CodeMalformedWire, 11, "wire")
 	}
 	if len(rawValues) < 4 || len(rawValues) > 5 {
-		return nil, fmt.Errorf("%w: content retrieval response array length is %d, want 4 or 5", pool.ErrInvalidEvidence, len(rawValues))
+		return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 11, "wire", "content retrieval response array length is %d, want 4 or 5", len(rawValues))
 	}
 	response := new(ContentRetrievalResponse)
 	var version, kind uint64
 	if err := arbitrationDec.Unmarshal(rawValues[0], &version); err != nil || version != protocol.WireVersion {
-		return nil, fmt.Errorf("%w: unsupported content retrieval response wire version", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedVersion, 11, "wire_version", "unsupported content retrieval response wire version")
 	}
 	if err := arbitrationDec.Unmarshal(rawValues[1], &kind); err != nil || kind != wireKindContentRetrievalResponse {
-		return nil, fmt.Errorf("%w: content retrieval response kind must be 11", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedKind, 11, "wire_kind", "content retrieval response kind must be 11")
 	}
 	if err := arbitrationDec.Unmarshal(rawValues[2], &response.ContentRetrievalResultCBOR); err != nil {
 		return nil, err
@@ -574,11 +587,11 @@ func UnmarshalContentRetrievalResponse(data []byte) (*ContentRetrievalResponse, 
 	switch decoded.Result {
 	case ContentRetrievalUnavailable:
 		if len(rawValues) != 4 {
-			return nil, fmt.Errorf("%w: unavailable branch must not carry attachments", pool.ErrInvalidEvidence)
+			return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 11, "wire", "unavailable branch must not carry attachments")
 		}
 	case ContentRetrievalAvailable:
 		if len(rawValues) != 5 {
-			return nil, fmt.Errorf("%w: available branch requires the content payload attachment", pool.ErrInvalidEvidence)
+			return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 11, "wire", "available branch requires the content payload attachment")
 		}
 		if err := arbitrationDec.Unmarshal(rawValues[4], &response.ContentPayloadsCBOR); err != nil {
 			return nil, err
@@ -592,7 +605,7 @@ func UnmarshalContentRetrievalResponse(data []byte) (*ContentRetrievalResponse, 
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: content retrieval response is not deterministically encoded", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 11, "wire", "content retrieval response is not deterministically encoded")
 	}
 	return cloneRetrievalResponse(response), nil
 }
@@ -613,8 +626,10 @@ func decodePoolStyleArray(data []byte) ([]cbor.RawMessage, error) {
 // SHA-256(exact_request_cbor), the arbiter signature must verify through the
 // unified helper over the exact result document, and the available branch must
 // additionally bind its payload attachment through content_payloads_id. It
-// performs no clock read and no payment state change.
+// performs no clock read and no payment state change. valid unavailable 作为
+// 已验签协议结果返回（Available=false），绝不作为普通 error。
 func VerifyContentRetrievalResponse(request *ContentRetrievalRequest, arbiterPublicKey []byte, response *ContentRetrievalResponse) (*VerifiedContentRetrievalResult, error) {
+	const op = "arbitration.VerifyContentRetrievalResponse"
 	if err := ValidateContentRetrievalRequest(request); err != nil {
 		return nil, err
 	}
@@ -627,20 +642,22 @@ func VerifyContentRetrievalResponse(request *ContentRetrievalRequest, arbiterPub
 		return nil, err
 	}
 	if decoded.ContentRetrievalRequestID != requestID {
-		return nil, fmt.Errorf("%w: content retrieval result does not answer the supplied request", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_retrieval_request_id", "content retrieval result does not answer the supplied request")
 	}
 	if err := protocol.VerifyWireDocument(arbiterPublicKey, protocol.WireVersion, wireKindContentRetrievalResponse, response.ContentRetrievalResultCBOR, response.ArbiterContentRetrievalResultSignature); err != nil {
-		return nil, fmt.Errorf("%w: arbiter content retrieval result signature invalid: %v", pool.ErrInvalidEvidence, err)
+		return nil, protocol.Wrap(fmt.Errorf("arbiter content retrieval result signature invalid: %v", err), op, protocol.CodeInvalidSignature, 11, "arbiter_content_retrieval_result_signature")
 	}
 	verified := &VerifiedContentRetrievalResult{ContentRetrievalRequestID: requestID}
 	if decoded.Result == ContentRetrievalUnavailable {
+		verified.Available = false
+		verified.UnavailableReason = decoded.UnavailableReason
 		return verified, nil
 	}
 	payloadsID := sha256.Sum256(response.ContentPayloadsCBOR)
 	if protocol.ContentPayloadsID(payloadsID) != decoded.ContentPayloadsID {
-		return nil, fmt.Errorf("%w: content payloads do not match the signed content_payloads_id", pool.ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 11, "content_payloads_id", "content payloads do not match the signed content_payloads_id")
 	}
-	payloads, err := bitfs.DecodeContentPayloads(response.ContentPayloadsCBOR)
+	payloads, err := content.DecodeContentPayloads(response.ContentPayloadsCBOR)
 	if err != nil {
 		return nil, err
 	}
@@ -650,69 +667,13 @@ func VerifyContentRetrievalResponse(request *ContentRetrievalRequest, arbiterPub
 	return verified, nil
 }
 
-// VerifyCustodiedContent performs the complete time-independent custody
-// evidence verification over one stored record pair: strict decoding of both
-// messages, Seller Claim signature, Buyer authorization signature, payload
-// count, order, and hashes, Claim ID recomputation against the Receipt,
-// Arbiter receipt signature, candidate rebuild with the Receipt fee, and
-// Arbiter transaction signature. Applications use it while deciding which
-// Kind 11 branch a stored record supports. It never reads the clock and never
-// applies deadline or refund-maturity gates: those were enforced before Kind 9
-// was signed.
-func VerifyCustodiedContent(arbitrationRequest *ArbitrationRequest, arbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error) {
-	if arbitrationRequest == nil || arbitrationResponse == nil {
-		return nil, fmt.Errorf("%w: custodied evidence pair is required", pool.ErrInvalidEvidence)
-	}
-	// 先克隆再做外壳校验：调用方传入的 Go struct 必须与 wire decoder 走同一
-	// 套版本/kind/尺寸约束，错误版本或超限子文档在这里被拒绝。
-	localRequest := cloneRequest(arbitrationRequest)
-	localResponse := cloneResponse(arbitrationResponse)
-	if err := ValidateRequest(localRequest); err != nil {
-		return nil, err
-	}
-	if err := ValidateResponse(localResponse); err != nil {
-		return nil, err
-	}
-	receipt, err := UnmarshalReceipt(localResponse.ArbitrationReceiptCBOR)
-	if err != nil {
-		return nil, err
-	}
-	claim, _, payloads, unsigned, claimID, _, keys, err := validateRequestEvidence(localRequest, receipt.ArbiterAmountSatoshis)
-	if err != nil {
-		return nil, err
-	}
-	if receipt.ArbitrationClaimID != claimID {
-		return nil, fmt.Errorf("%w: receipt Claim ID does not match the custody Claim ID", pool.ErrInvalidEvidence)
-	}
-	if err := protocol.VerifyWireDocument(keys.ArbiterPublicKey, protocol.WireVersion, wireKindArbitrationResponse, localResponse.ArbitrationReceiptCBOR, localResponse.ArbiterArbitrationReceiptSignature); err != nil {
-		return nil, fmt.Errorf("%w: arbiter receipt signature invalid: %v", pool.ErrInvalidEvidence, err)
-	}
-	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(claim.PoolOutputLockingScript)
-	if err != nil {
-		return nil, err
-	}
-	if err := engine.VerifyArbitrationArbiterPayment(unsigned, receipt.ArbiterPaymentTransactionSignature); err != nil {
-		return nil, fmt.Errorf("%w: arbiter transaction signature invalid over the rebuilt candidate: %v", pool.ErrInvalidEvidence, err)
-	}
-	return &VerifiedCustodiedContent{
-		ArbitrationClaimID: claimID,
-		PayloadsCBOR:       append([]byte(nil), localRequest.ContentPayloadsCBOR...),
-		Payloads:           cloneByteSlices(payloads),
-		Receipt:            cloneReceipt(receipt),
-		Request:            localRequest,
-		Response:           localResponse,
-	}, nil
-}
-
 // AuthenticateContentRetrievalRequest 只依赖已持久化的 Kind 8 完成 Buyer 鉴权，
-// 不要求 Kind 9 已存在。它用于 not_ready / gone 分支：先从 Claim 的资金池锁定
-// 脚本恢复角色公钥，确认 Claim 归属本 Arbiter，再通过统一 helper 验证 Buyer
-// 对精确 content_retrieval_request_cbor 的签名。任何其他 Claim ID、nonce 或
+// 不要求 Kind 9 已存在。它是时间无关纯函数：先从 Claim 的资金池锁定脚本恢复
+// 角色公钥，确认 Claim 归属目标 Arbiter 公钥，再通过统一 helper 验证 Buyer 对
+// 精确 content_retrieval_request_cbor 的签名。任何其他 Claim ID、nonce 或
 // Kind 域下的有效签名都不可能通过。
-func (workflow *Workflow) AuthenticateContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest) error {
-	if workflow == nil {
-		return errors.New("arbitration workflow is required")
-	}
+func AuthenticateContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest, arbiterPublicKey []byte) error {
+	const op = "arbitration.AuthenticateContentRetrievalRequest"
 	localRetrieval := cloneRetrievalRequest(retrievalRequest)
 	if err := ValidateContentRetrievalRequest(localRetrieval); err != nil {
 		return err
@@ -729,8 +690,8 @@ func (workflow *Workflow) AuthenticateContentRetrievalRequest(retrievalRequest *
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(keys.ArbiterPublicKey, workflow.publicKey) {
-		return fmt.Errorf("%w: custody Claim names another arbiter", pool.ErrInvalidEvidence)
+	if !bytes.Equal(keys.ArbiterPublicKey, arbiterPublicKey) {
+		return protocol.Errorf(op, protocol.CodeUnauthorized, 10, "arbiter_public_key", "custody Claim names another arbiter")
 	}
 	storedClaimID, err := ArbitrationClaimID(localStored.ArbitrationClaimCBOR)
 	if err != nil {
@@ -741,34 +702,22 @@ func (workflow *Workflow) AuthenticateContentRetrievalRequest(retrievalRequest *
 		return err
 	}
 	if requestClaimID != storedClaimID {
-		return fmt.Errorf("%w: retrieval Claim ID does not match the custody record", pool.ErrInvalidEvidence)
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 10, "arbitration_claim_id", "retrieval Claim ID does not match the custody record")
 	}
 	if err := protocol.VerifyWireDocument(keys.BuyerPublicKey, protocol.WireVersion, wireKindContentRetrievalRequest, localRetrieval.ContentRetrievalRequestCBOR, localRetrieval.BuyerContentRetrievalRequestSignature); err != nil {
-		return fmt.Errorf("%w: buyer retrieval signature invalid: %v", pool.ErrInvalidEvidence, err)
+		return protocol.Wrap(fmt.Errorf("buyer retrieval signature invalid: %v", err), op, protocol.CodeInvalidSignature, 10, "buyer_content_retrieval_request_signature")
 	}
 	return nil
 }
 
-// VerifyContentRetrievalRequest authenticates one Kind 10 against a stored
-// custody record pair: full custody evidence verification first, then the same
-// claim-binding and buyer-signature checks as
-// AuthenticateContentRetrievalRequest over the verified evidence.
-func (workflow *Workflow) VerifyContentRetrievalRequest(retrievalRequest *ContentRetrievalRequest, storedArbitrationRequest *ArbitrationRequest, storedArbitrationResponse *ArbitrationResponse) (*VerifiedCustodiedContent, error) {
-	if workflow == nil {
-		return nil, errors.New("arbitration workflow is required")
-	}
-	localRetrieval := cloneRetrievalRequest(retrievalRequest)
-	if err := ValidateContentRetrievalRequest(localRetrieval); err != nil {
-		return nil, err
-	}
-	verified, err := VerifyCustodiedContent(storedArbitrationRequest, storedArbitrationResponse)
-	if err != nil {
-		return nil, err
-	}
-	if err := workflow.AuthenticateContentRetrievalRequest(localRetrieval, verified.Request); err != nil {
-		return nil, err
-	}
-	return verified, nil
+// CloneContentRetrievalRequest 返回深拷贝的 Kind 10（跨包防御性复制边界）。
+func CloneContentRetrievalRequest(request *ContentRetrievalRequest) *ContentRetrievalRequest {
+	return cloneRetrievalRequest(request)
+}
+
+// CloneContentRetrievalResponse 返回深拷贝的 Kind 11（跨包防御性复制边界）。
+func CloneContentRetrievalResponse(response *ContentRetrievalResponse) *ContentRetrievalResponse {
+	return cloneRetrievalResponse(response)
 }
 
 func cloneRetrievalRequest(request *ContentRetrievalRequest) *ContentRetrievalRequest {
@@ -787,4 +736,15 @@ func cloneRetrievalResponse(response *ContentRetrievalResponse) *ContentRetrieva
 		cloned.ContentPayloadsCBOR = append([]byte(nil), response.ContentPayloadsCBOR...)
 	}
 	return cloned
+}
+
+func cloneByteSlices(values [][]byte) [][]byte {
+	if values == nil {
+		return nil
+	}
+	result := make([][]byte, len(values))
+	for index := range values {
+		result[index] = append([]byte(nil), values[index]...)
+	}
+	return result
 }

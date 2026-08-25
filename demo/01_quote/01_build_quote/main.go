@@ -1,7 +1,9 @@
 // Command seller builds a signed BitFS 001 file quote.
 //
-// All binary input and output values use hex. The seller private key is read
-// from SELLER_PRIVATE_KEY_HEX and is never printed.
+// 全部二进制输入输出使用 hex。卖方私钥从 SELLER_PRIVATE_KEY_HEX 读取且绝不
+// 打印。新角色 API：protocol.NewPrivateKeySigner → seller.NewWorkflow →
+// CreateQuote(QuoteDraft)，返回待发送的 exact Kind 1 Artifact；应用先持久化
+// 其字节再发送（demo 中以 stdout hex 表示“发送”）。
 package main
 
 import (
@@ -18,9 +20,14 @@ import (
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
+	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/seller"
 )
+
+// blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
+const blockHeight protocol.BlockHeight = 900000
 
 func main() {
 	if err := demoenv.Load(); err != nil {
@@ -75,9 +82,10 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 		return fmt.Errorf("create MasterSeed: %w", err)
 	}
 	seed := seedOutput.Bytes()
-	seedHash := masterseed.Sum256(seed)
+	seedHash := masterseed.Sum256(seed).Bytes()
 	debugf("[seed] MasterSeed size    : %d bytes", len(seed))
-	debugf("[seed] SeedHash            : %s", hex.EncodeToString(seedHash.Bytes()))
+	debugf("[seed] SeedHash            : %s", hex.EncodeToString(seedHash))
+
 	buyerPrivateKey, err := ec.PrivateKeyFromHex(strings.TrimSpace(os.Getenv("BUYER_PRIVATE_KEY_HEX")))
 	if err != nil {
 		return fmt.Errorf("derive buyer public key from BUYER_PRIVATE_KEY_HEX: %w", err)
@@ -88,49 +96,68 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 	if err != nil {
 		return fmt.Errorf("derive arbiter public key from ARBITER_PRIVATE_KEY_HEX: %w", err)
 	}
-	arbiterPubkeys := [][]byte{arbiterPrivateKey.PubKey().Compressed()}
-	debugf("[key] arbiter public key  : %s", hex.EncodeToString(arbiterPubkeys[0]))
-	arbiterCBOR, err := bitfs.EncodeSupportedArbiterPublicKeys(arbiterPubkeys)
-	if err != nil {
-		return fmt.Errorf("encode supported arbiters: %w", err)
+	arbiterPubkeyBytes := [][]byte{arbiterPrivateKey.PubKey().Compressed()}
+	debugf("[key] arbiter public key  : %s", hex.EncodeToString(arbiterPubkeyBytes[0]))
+	arbiterPubkeys := make([]protocol.PublicKey, 0, len(arbiterPubkeyBytes))
+	for _, rawKey := range arbiterPubkeyBytes {
+		typed, err := protocol.PublicKeyFromBytes(rawKey)
+		if err != nil {
+			return fmt.Errorf("parse arbiter public key: %w", err)
+		}
+		arbiterPubkeys = append(arbiterPubkeys, typed)
 	}
 
-	expiresAt := time.Now().UTC().Add(validFor).Unix()
-	debugf("[quote] created at UTC    : %s", time.Now().UTC().Format(time.RFC3339))
+	// 显式事实：Now 是本操作唯一时间事实，BlockHeight 是唯一高度事实；
+	// SDK 不读系统时钟、不查节点。
+	now := time.Now().UTC()
+	facts := protocol.Facts{Now: now, BlockHeight: blockHeight}
+	expiresAt := now.Add(validFor).Unix()
+	debugf("[quote] created at UTC    : %s", now.Format(time.RFC3339))
 	debugf("[quote] expires at UTC    : %s", time.Unix(expiresAt, 0).UTC().Format(time.RFC3339))
-	terms := &bitfs.FileQuoteTerms{
-		SeedHash:                       seedHash.Bytes(),
-		BuyerPublicKey:                 buyerPubkey,
-		SeedPriceSatoshis:              seedPrice,
-		FullBlockPriceSatoshis:         blockPrice,
-		FileSizeBytes:                  uint64(len(fileBytes)),
-		QuoteExpiresAtUnixSeconds:      expiresAt,
-		SupportedArbiterPublicKeysCBOR: arbiterCBOR,
-	}
-	// 官方 BSV 私钥直接传入 SDK：SDK 内部做一次 SHA-256 并用固定 verifier 自校验。
-	quote, err := bitfs.NewSignedFileQuote(terms, privateKey, filename)
-	if err != nil {
-		return fmt.Errorf("build signed file quote: %w", err)
-	}
-	debugf("[quote] deterministic terms CBOR (%d bytes): %s", len(quote.FileQuoteTermsCBOR), hex.EncodeToString(quote.FileQuoteTermsCBOR))
-	debugf("[quote] terms signature  : %s", hex.EncodeToString(quote.SellerFileQuoteTermsSignature))
 
-	// This is the canonical SignedFileQuote CBOR, represented as transport-safe hex.
-	rawQuote, err := bitfs.EncodeSignedFileQuote(quote)
+	// 角色 workflow 只持有受约束 Signer；QuoteDraft 是唯一的条款来源，
+	// SDK 先 sanitize 文件名再编码并签署。
+	signer, err := protocol.NewPrivateKeySigner(privateKey)
 	if err != nil {
-		return fmt.Errorf("encode signed file quote: %w", err)
+		return fmt.Errorf("create seller signer: %w", err)
 	}
-	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
+	sellerWorkflow, err := seller.NewWorkflow(signer)
 	if err != nil {
-		return fmt.Errorf("calculate FileQuoteTermsID: %w", err)
+		return fmt.Errorf("create seller workflow: %w", err)
 	}
-	debugf("[quote] FileQuoteTermsID : %s", hex.EncodeToString(quoteID[:]))
-	debugf("[quote] complete CBOR size: %d bytes", len(rawQuote))
-	debugf("[output] canonical quote hex is written to stdout")
+	quoteResult, err := sellerWorkflow.CreateQuote(context.Background(), facts, seller.QuoteDraft{
+		SeedHash:                   seedHash,
+		BuyerPublicKey:             mustPublicKey(buyerPubkey),
+		SeedPriceSatoshis:          protocol.Satoshis(seedPrice),
+		FullBlockPriceSatoshis:     protocol.Satoshis(blockPrice),
+		FileSizeBytes:              uint64(len(fileBytes)),
+		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(expiresAt),
+		SupportedArbiterPublicKeys: arbiterPubkeys,
+		RecommendedFilename:        filename,
+	})
+	if err != nil {
+		return fmt.Errorf("seller.CreateQuote: %w", err)
+	}
+
+	rawQuote := quoteResult.Outbound.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
+	// QuoteResult.Terms 是最终规范化并已签署的条款快照（展示实际签署值）。
+	debugf("[quote] recommended name (signed): %q", quoteResult.Terms.RecommendedFilename)
+	debugf("[quote] expires at (signed)      : %d", quoteResult.Terms.QuoteExpiresAtUnixSeconds)
+	debugf("[quote] seed price / block price : %d / %d satoshis", quoteResult.Terms.SeedPriceSatoshis, quoteResult.Terms.FullBlockPriceSatoshis)
+	debugf("[quote] complete Kind 1 artifact : %d bytes", len(rawQuote))
+	debugf("[output] exact Kind 1 artifact hex is written to stdout")
 	debugf("[output] debug information is written to stderr")
 	debugf("=== Seller quote build complete ===")
 	fmt.Println(hex.EncodeToString(rawQuote))
 	return nil
+}
+
+func mustPublicKey(compressed []byte) protocol.PublicKey {
+	publicKey, err := protocol.PublicKeyFromBytes(compressed)
+	if err != nil {
+		panic(fmt.Sprintf("parse compressed public key: %v", err))
+	}
+	return publicKey
 }
 
 func debugf(format string, values ...any) {

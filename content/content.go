@@ -1,4 +1,4 @@
-package bitfs
+package content
 
 import (
 	"bytes"
@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	masterseed "github.com/bsv8/MasterSeed"
-	"github.com/bsv8/go-bitfs/internal/protoclock"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
@@ -78,12 +76,22 @@ type SignedContentDelivery struct {
 	ContentPayloadsCBOR []byte
 }
 
+// invalidEvidence 构造本包统一的 invalid_evidence 结构化错误。
+func invalidEvidence(op string, cause error) error {
+	return protocol.Wrap(cause, op, protocol.CodeInvalidEvidence, 0, "")
+}
+
+// malformed 构造本包统一的 malformed_wire 结构化错误。
+func malformed(op string, field string, cause error) error {
+	return protocol.Wrap(cause, op, protocol.CodeMalformedWire, 0, field)
+}
+
 // EncodeContentHashes returns the sole canonical representation of the 003
 // content_hashes child document: an array of 1..MaxContentBatchItems unique,
 // ordered 32-byte hashes encoded as a deterministic CBOR byte string.
 func EncodeContentHashes(hashes [][]byte) ([]byte, error) {
 	if err := validateContentHashes(hashes); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence("content.EncodeContentHashes", err)
 	}
 	return canonicalEnc.Marshal(cloneByteSlices(hashes))
 }
@@ -94,19 +102,20 @@ func EncodeContentHashes(hashes [][]byte) ([]byte, error) {
 // requiring byte equality with the deterministic re-encoding. The returned
 // slices are deep copies owned by the caller.
 func DecodeContentHashes(raw []byte) ([][]byte, error) {
+	const op = "content.DecodeContentHashes"
 	var hashes [][]byte
 	if err := strictDec.Unmarshal(raw, &hashes); err != nil {
-		return nil, fmt.Errorf("%w: decode content hashes: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "content_hashes_cbor", err)
 	}
 	if err := validateContentHashes(hashes); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, err)
 	}
 	canonical, err := canonicalEnc.Marshal(hashes)
 	if err != nil {
-		return nil, err
+		return nil, malformed(op, "content_hashes_cbor", err)
 	}
 	if !bytes.Equal(canonical, raw) {
-		return nil, fmt.Errorf("%w: content hashes are not deterministically encoded", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 0, "content_hashes_cbor", "content hashes are not deterministically encoded")
 	}
 	return cloneByteSlices(hashes), nil
 }
@@ -116,7 +125,7 @@ func DecodeContentHashes(raw []byte) ([][]byte, error) {
 // non-empty payloads, each at most masterseed.BlockSize bytes.
 func EncodeContentPayloads(payloads [][]byte) ([]byte, error) {
 	if err := validateContentPayloads(payloads); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence("content.EncodeContentPayloads", err)
 	}
 	return canonicalEnc.Marshal(cloneByteSlices(payloads))
 }
@@ -127,22 +136,23 @@ func EncodeContentPayloads(payloads [][]byte) ([]byte, error) {
 // are rejected before decoding so a hostile length cannot bypass the item
 // count limit. The returned slices are deep copies owned by the caller.
 func DecodeContentPayloads(raw []byte) ([][]byte, error) {
+	const op = "content.DecodeContentPayloads"
 	if len(raw) == 0 || len(raw) > MaxContentPayloadsCBORBytes {
-		return nil, fmt.Errorf("%w: content payloads exceed the protocol size limit", ErrInvalidEvidence)
+		return nil, invalidEvidence(op, fmt.Errorf("content payloads exceed the protocol size limit"))
 	}
 	var payloads [][]byte
 	if err := strictDec.Unmarshal(raw, &payloads); err != nil {
-		return nil, fmt.Errorf("%w: decode content payloads: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "content_payloads_cbor", err)
 	}
 	if err := validateContentPayloads(payloads); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, err)
 	}
 	canonical, err := canonicalEnc.Marshal(payloads)
 	if err != nil {
-		return nil, err
+		return nil, malformed(op, "content_payloads_cbor", err)
 	}
 	if !bytes.Equal(canonical, raw) {
-		return nil, fmt.Errorf("%w: content payloads are not deterministically encoded", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 0, "content_payloads_cbor", "content payloads are not deterministically encoded")
 	}
 	return cloneByteSlices(payloads), nil
 }
@@ -183,7 +193,7 @@ func validateContentPayloads(payloads [][]byte) error {
 // content_delivery_cbor authentication document: [payment_authorization_id].
 func EncodeContentDeliveryDocument(paymentAuthorizationID protocol.PaymentAuthorizationID) ([]byte, error) {
 	if paymentAuthorizationID.IsZero() {
-		return nil, fmt.Errorf("%w: payment_authorization_id", ErrZeroIdentifier)
+		return nil, protocol.Errorf("content.EncodeContentDeliveryDocument", protocol.CodeInvalidEvidence, 0, "payment_authorization_id", "%w", protocol.ErrZeroIdentifier)
 	}
 	return canonicalEnc.Marshal([]any{bstr(paymentAuthorizationID[:])})
 }
@@ -192,7 +202,7 @@ func EncodeContentDeliveryDocument(paymentAuthorizationID protocol.PaymentAuthor
 // by the buyer for a Kind 5 request: the six-element business-field array.
 func EncodePaymentAuthorization(authorization *PaymentAuthorization) ([]byte, error) {
 	if err := ValidatePaymentAuthorization(authorization); err != nil {
-		return nil, fmt.Errorf("%w: payment authorization: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence("content.EncodePaymentAuthorization", err)
 	}
 	return canonicalEnc.Marshal([]any{
 		bstr(authorization.FileQuoteTermsID[:]),
@@ -206,46 +216,47 @@ func EncodePaymentAuthorization(authorization *PaymentAuthorization) ([]byte, er
 
 // DecodePaymentAuthorization accepts only canonical six-element Kind 5
 // authentication documents. Legacy versions, inner kinds, single-hash
-// requests, missing or extra fields, and non-canonical encodings all return
-// ErrInvalidEvidence.
+// requests, missing or extra fields, and non-canonical encodings all return a
+// structured malformed_wire/non_canonical/invalid_evidence error.
 func DecodePaymentAuthorization(data []byte) (*PaymentAuthorization, error) {
+	const op = "content.DecodePaymentAuthorization"
 	values, err := decodeArray(data, 6)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode payment authorization: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "payment_authorization_cbor", err)
 	}
 	authorization := new(PaymentAuthorization)
 	var fileQuoteTermsID []byte
 	if err := decode(values[0], &fileQuoteTermsID); err != nil {
-		return nil, fmt.Errorf("%w: file_quote_terms_id: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "file_quote_terms_id", err)
 	}
 	if len(fileQuoteTermsID) != sha256.Size {
-		return nil, fmt.Errorf("%w: file_quote_terms_id must be 32 bytes", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeMalformedWire, 0, "file_quote_terms_id", "must be 32 bytes")
 	}
 	copy(authorization.FileQuoteTermsID[:], fileQuoteTermsID)
 	if err := decode(values[1], &authorization.RefundTemplateTxID); err != nil {
-		return nil, fmt.Errorf("%w: refund_template_txid: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "refund_template_txid", err)
 	}
 	if err := decode(values[2], &authorization.PaymentSequence); err != nil {
-		return nil, fmt.Errorf("%w: payment_sequence: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "payment_sequence", err)
 	}
 	if err := decode(values[3], &authorization.SellerAmountAfterSatoshis); err != nil {
-		return nil, fmt.Errorf("%w: seller_amount_after_satoshis: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "seller_amount_after_satoshis", err)
 	}
 	if err := decode(values[4], &authorization.ContentHashesCBOR); err != nil {
-		return nil, fmt.Errorf("%w: content_hashes_cbor: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "content_hashes_cbor", err)
 	}
 	if err := decode(values[5], &authorization.DeliveryDeadlineUnixSeconds); err != nil {
-		return nil, fmt.Errorf("%w: delivery_deadline_unix_seconds: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "delivery_deadline_unix_seconds", err)
 	}
 	if err := ValidatePaymentAuthorization(authorization); err != nil {
-		return nil, fmt.Errorf("%w: payment authorization: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, err)
 	}
 	canonical, err := EncodePaymentAuthorization(authorization)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: payment authorization is not deterministically encoded", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 0, "payment_authorization_cbor", "payment authorization is not deterministically encoded")
 	}
 	return clonePaymentAuthorization(authorization), nil
 }
@@ -254,32 +265,41 @@ func DecodePaymentAuthorization(data []byte) (*PaymentAuthorization, error) {
 // returns its SHA-256 digest. It is defined exclusively over the exact
 // payment_authorization_cbor and shares its namespace with that document.
 func PaymentAuthorizationID(paymentAuthorizationCBOR []byte) (protocol.PaymentAuthorizationID, error) {
-	if _, err := DecodePaymentAuthorization(paymentAuthorizationCBOR); err != nil {
-		return protocol.PaymentAuthorizationID{}, err
+	id, err := rawPaymentAuthorizationID(paymentAuthorizationCBOR)
+	if err != nil {
+		return id, err
 	}
 	digest := sha256.Sum256(paymentAuthorizationCBOR)
 	return protocol.PaymentAuthorizationID(digest), nil
 }
 
+// rawPaymentAuthorizationID 只做结构验证并返回零值 ID（内部辅助）。
+func rawPaymentAuthorizationID(paymentAuthorizationCBOR []byte) (protocol.PaymentAuthorizationID, error) {
+	if _, err := DecodePaymentAuthorization(paymentAuthorizationCBOR); err != nil {
+		return protocol.PaymentAuthorizationID{}, err
+	}
+	return protocol.PaymentAuthorizationID{}, nil
+}
+
 // NewSignedContentRequest deterministically encodes the payment authorization
 // and signs those exact bytes through the unified SignWireDocument(1, 5, ...)
-// helper. The signature is later verified against the BuyerPublicKey restored
-// from the referenced OpeningProof; the private key never enters any wire
-// message, local result, log, or persisted structure.
-func NewSignedContentRequest(authorization *PaymentAuthorization, buyerKey *ec.PrivateKey) (*SignedContentRequest, error) {
-	if buyerKey == nil {
-		return nil, errors.New("buyer private key is required")
+// helper with the supplied constrained Signer. The signature is immediately
+// self-verified against the Signer's fixed public key; the private key never
+// enters any wire message, local result, log, or persisted structure.
+func NewSignedContentRequest(ctx context.Context, authorization *PaymentAuthorization, signer protocol.Signer) (*SignedContentRequest, error) {
+	if ctx == nil {
+		return nil, protocol.Errorf("content.NewSignedContentRequest", protocol.CodeCanceled, 0, "ctx", "a non-nil context is required")
+	}
+	if signer == nil {
+		return nil, protocol.Errorf("content.NewSignedContentRequest", protocol.CodeSignerUnavailable, 0, "signer", "buyer signer is required")
 	}
 	authorizationCBOR, err := EncodePaymentAuthorization(authorization)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := protocol.SignWireDocument(buyerKey, protocol.WireVersion, contentRequestWireKind, authorizationCBOR)
+	signature, err := protocol.SignWireDocument(ctx, signer, protocol.WireVersion, contentRequestWireKind, authorizationCBOR)
 	if err != nil {
-		return nil, fmt.Errorf("sign payment authorization: %w", err)
-	}
-	if len(signature) == 0 {
-		return nil, errors.New("buyer payment authorization signature is required")
+		return nil, err
 	}
 	return &SignedContentRequest{
 		PaymentAuthorizationCBOR:           append([]byte(nil), authorizationCBOR...),
@@ -290,8 +310,9 @@ func NewSignedContentRequest(authorization *PaymentAuthorization, buyerKey *ec.P
 // EncodeSignedContentRequest encodes the complete Kind 5 wire message:
 // [1, 5, payment_authorization_cbor, buyer_payment_authorization_signature].
 func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
+	const op = "content.EncodeSignedContentRequest"
 	if request == nil || len(request.BuyerPaymentAuthorizationSignature) == 0 {
-		return nil, errors.New("signed content request and buyer payment authorization signature are required")
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "request", "signed content request and buyer payment authorization signature are required")
 	}
 	if _, err := DecodePaymentAuthorization(request.PaymentAuthorizationCBOR); err != nil {
 		return nil, err
@@ -308,30 +329,31 @@ func EncodeSignedContentRequest(request *SignedContentRequest) ([]byte, error) {
 // rejects malformed array shapes, outer version/kind pairs, and byte fields
 // before returning a copy.
 func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
+	const op = "content.DecodeSignedContentRequest"
 	values, err := decodeArray(data, 4)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode signed content request: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "wire", err)
 	}
 	request := new(SignedContentRequest)
 	var version, kind uint64
 	if err := decode(values[0], &version); err != nil || version != protocol.WireVersion {
-		return nil, fmt.Errorf("%w: unsupported signed content request wire version", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedVersion, 5, "wire_version", "unsupported signed content request wire version")
 	}
 	if err := decode(values[1], &kind); err != nil || kind != contentRequestWireKind {
-		return nil, fmt.Errorf("%w: signed content request wire kind must be 5", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedKind, 5, "wire_kind", "signed content request wire kind must be 5")
 	}
 	if err := decode(values[2], &request.PaymentAuthorizationCBOR); err != nil {
-		return nil, fmt.Errorf("%w: payment authorization: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "payment_authorization_cbor", err)
 	}
 	if err := decode(values[3], &request.BuyerPaymentAuthorizationSignature); err != nil {
-		return nil, fmt.Errorf("%w: buyer payment authorization signature: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "buyer_payment_authorization_signature", err)
 	}
 	canonical, err := EncodeSignedContentRequest(request)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: signed content request is not deterministically encoded", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 5, "wire", "signed content request is not deterministically encoded")
 	}
 	return cloneSignedContentRequest(request), nil
 }
@@ -341,9 +363,12 @@ func DecodeSignedContentRequest(data []byte) (*SignedContentRequest, error) {
 // SignWireDocument(1, 6, ...) helper, and attaches the canonically encoded
 // payload batch. Callers must fully verify the referenced 003, the quote, the
 // opening proof, and every payload before invoking this constructor.
-func NewSignedContentDelivery(paymentAuthorizationID protocol.PaymentAuthorizationID, payloads [][]byte, sellerKey *ec.PrivateKey) (*SignedContentDelivery, error) {
-	if sellerKey == nil {
-		return nil, errors.New("seller private key is required")
+func NewSignedContentDelivery(ctx context.Context, paymentAuthorizationID protocol.PaymentAuthorizationID, payloads [][]byte, signer protocol.Signer) (*SignedContentDelivery, error) {
+	if ctx == nil {
+		return nil, protocol.Errorf("content.NewSignedContentDelivery", protocol.CodeCanceled, 0, "ctx", "a non-nil context is required")
+	}
+	if signer == nil {
+		return nil, protocol.Errorf("content.NewSignedContentDelivery", protocol.CodeSignerUnavailable, 0, "signer", "seller signer is required")
 	}
 	payloadsCBOR, err := EncodeContentPayloads(payloads)
 	if err != nil {
@@ -353,12 +378,9 @@ func NewSignedContentDelivery(paymentAuthorizationID protocol.PaymentAuthorizati
 	if err != nil {
 		return nil, err
 	}
-	signature, err := protocol.SignWireDocument(sellerKey, protocol.WireVersion, contentDeliveryWireKind, deliveryCBOR)
+	signature, err := protocol.SignWireDocument(ctx, signer, protocol.WireVersion, contentDeliveryWireKind, deliveryCBOR)
 	if err != nil {
-		return nil, fmt.Errorf("sign content delivery: %w", err)
-	}
-	if len(signature) == 0 {
-		return nil, errors.New("seller content delivery signature is required")
+		return nil, err
 	}
 	return &SignedContentDelivery{
 		ContentDeliveryCBOR:            append([]byte(nil), deliveryCBOR...),
@@ -370,25 +392,29 @@ func NewSignedContentDelivery(paymentAuthorizationID protocol.PaymentAuthorizati
 // DecodeContentDeliveryDocument strictly decodes a content_delivery_cbor and
 // returns the payment authorization ID it commits to.
 func DecodeContentDeliveryDocument(data []byte) (protocol.PaymentAuthorizationID, error) {
+	const op = "content.DecodeContentDeliveryDocument"
 	values, err := decodeArray(data, 1)
 	if err != nil {
-		return protocol.PaymentAuthorizationID{}, fmt.Errorf("%w: decode content delivery document: %v", ErrInvalidEvidence, err)
+		return protocol.PaymentAuthorizationID{}, malformed(op, "content_delivery_cbor", err)
 	}
 	var paymentAuthorizationIDBytes []byte
 	if err := decode(values[0], &paymentAuthorizationIDBytes); err != nil {
-		return protocol.PaymentAuthorizationID{}, fmt.Errorf("%w: payment_authorization_id: %v", ErrInvalidEvidence, err)
+		return protocol.PaymentAuthorizationID{}, malformed(op, "payment_authorization_id", err)
 	}
 	if len(paymentAuthorizationIDBytes) != sha256.Size {
-		return protocol.PaymentAuthorizationID{}, fmt.Errorf("%w: payment_authorization_id must be 32 bytes", ErrInvalidEvidence)
+		return protocol.PaymentAuthorizationID{}, protocol.Errorf(op, protocol.CodeMalformedWire, 0, "payment_authorization_id", "must be 32 bytes")
 	}
 	var paymentAuthorizationID protocol.PaymentAuthorizationID
 	copy(paymentAuthorizationID[:], paymentAuthorizationIDBytes)
+	if paymentAuthorizationID.IsZero() {
+		return protocol.PaymentAuthorizationID{}, protocol.Errorf(op, protocol.CodeInvalidEvidence, 0, "payment_authorization_id", "%w", protocol.ErrZeroIdentifier)
+	}
 	canonical, err := EncodeContentDeliveryDocument(paymentAuthorizationID)
 	if err != nil {
 		return protocol.PaymentAuthorizationID{}, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return protocol.PaymentAuthorizationID{}, fmt.Errorf("%w: content delivery document is not deterministically encoded", ErrInvalidEvidence)
+		return protocol.PaymentAuthorizationID{}, protocol.Errorf(op, protocol.CodeNonCanonical, 0, "content_delivery_cbor", "content delivery document is not deterministically encoded")
 	}
 	return paymentAuthorizationID, nil
 }
@@ -397,8 +423,9 @@ func DecodeContentDeliveryDocument(data []byte) (protocol.PaymentAuthorizationID
 // [1, 6, content_delivery_cbor, seller_content_delivery_signature,
 // content_payloads_cbor].
 func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error) {
+	const op = "content.EncodeSignedContentDelivery"
 	if delivery == nil || len(delivery.SellerContentDeliverySignature) == 0 {
-		return nil, errors.New("signed content delivery and seller signature are required")
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "delivery", "signed content delivery and seller signature are required")
 	}
 	if _, err := DecodeContentDeliveryDocument(delivery.ContentDeliveryCBOR); err != nil {
 		return nil, err
@@ -417,33 +444,34 @@ func EncodeSignedContentDelivery(delivery *SignedContentDelivery) ([]byte, error
 
 // DecodeSignedContentDelivery decodes canonical Kind 6 wire message bytes.
 func DecodeSignedContentDelivery(data []byte) (*SignedContentDelivery, error) {
+	const op = "content.DecodeSignedContentDelivery"
 	values, err := decodeArray(data, 5)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode signed content delivery: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "wire", err)
 	}
 	delivery := new(SignedContentDelivery)
 	var version, kind uint64
 	if err := decode(values[0], &version); err != nil || version != protocol.WireVersion {
-		return nil, fmt.Errorf("%w: unsupported signed content delivery wire version", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedVersion, 6, "wire_version", "unsupported signed content delivery wire version")
 	}
 	if err := decode(values[1], &kind); err != nil || kind != contentDeliveryWireKind {
-		return nil, fmt.Errorf("%w: signed content delivery wire kind must be 6", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeUnsupportedKind, 6, "wire_kind", "signed content delivery wire kind must be 6")
 	}
 	if err := decode(values[2], &delivery.ContentDeliveryCBOR); err != nil {
-		return nil, fmt.Errorf("%w: content delivery document: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "content_delivery_cbor", err)
 	}
 	if err := decode(values[3], &delivery.SellerContentDeliverySignature); err != nil {
-		return nil, fmt.Errorf("%w: seller content delivery signature: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "seller_content_delivery_signature", err)
 	}
 	if err := decode(values[4], &delivery.ContentPayloadsCBOR); err != nil {
-		return nil, fmt.Errorf("%w: content_payloads_cbor: %v", ErrInvalidEvidence, err)
+		return nil, malformed(op, "content_payloads_cbor", err)
 	}
 	canonical, err := EncodeSignedContentDelivery(delivery)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(canonical, data) {
-		return nil, fmt.Errorf("%w: signed content delivery is not deterministically encoded", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeNonCanonical, 6, "wire", "signed content delivery is not deterministically encoded")
 	}
 	return cloneSignedContentDelivery(delivery), nil
 }
@@ -466,11 +494,12 @@ type PoolOpeningEvidence interface {
 // signature through VerifyWireDocument(1, 5, ...) against the opening's buyer
 // key. Quote, content, and timing facts are intentionally out of scope here.
 func VerifySignedContentRequestForOpening(request *SignedContentRequest, opening PoolOpeningEvidence) (*PaymentAuthorization, error) {
+	const op = "content.VerifySignedContentRequestForOpening"
 	if request == nil || len(request.BuyerPaymentAuthorizationSignature) == 0 {
-		return nil, fmt.Errorf("%w: signed content request is required", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "request", "signed content request is required")
 	}
 	if opening == nil {
-		return nil, fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "opening", "opening proof is required")
 	}
 	authorization, err := DecodePaymentAuthorization(request.PaymentAuthorizationCBOR)
 	if err != nil {
@@ -478,10 +507,10 @@ func VerifySignedContentRequestForOpening(request *SignedContentRequest, opening
 	}
 	derived := opening.OpeningRefundTemplateTxID()
 	if len(derived) != sha256.Size || !bytes.Equal(derived, authorization.RefundTemplateTxID) {
-		return nil, fmt.Errorf("%w: content request is not bound to supplied opening proof", ErrInvalidEvidence)
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "refund_template_txid", "content request is not bound to supplied opening proof")
 	}
 	if err := protocol.VerifyWireDocument(opening.OpeningBuyerPublicKey(), protocol.WireVersion, contentRequestWireKind, request.PaymentAuthorizationCBOR, request.BuyerPaymentAuthorizationSignature); err != nil {
-		return nil, fmt.Errorf("%w: buyer payment authorization signature invalid: %v", ErrInvalidEvidence, err)
+		return nil, protocol.Wrap(fmt.Errorf("buyer payment authorization signature invalid: %v", err), op, protocol.CodeInvalidSignature, 5, "buyer_payment_authorization_signature")
 	}
 	return authorization, nil
 }
@@ -489,73 +518,101 @@ func VerifySignedContentRequestForOpening(request *SignedContentRequest, opening
 // VerifyContentRequestEvidence 是时间无关的 003 完整证据验证：报价证据与
 // 卖方签名、池绑定、买方统一签名、FileQuoteTermsID 比对以及
 // Buyer/Seller/Arbiter 与开池证据的绑定。它不检查报价过期或交付截止时间；
-// 角色工作流用它保证整个操作只读取一次系统 UTC，再对返回值自行做时间比较。
+// 角色工作流用它保证整个操作只使用调用方显式传入的一份时间事实。
 func VerifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*PaymentAuthorization, *FileQuoteTerms, error) {
-	return verifyContentRequestEvidence(request, quote, opening)
+	const op = "content.VerifyContentRequestEvidence"
+	quoteTerms, err := VerifyFileQuoteEvidence(quote)
+	if err != nil {
+		return nil, nil, err
+	}
+	authorization, err := VerifySignedContentRequestForOpening(request, opening)
+	if err != nil {
+		return nil, nil, err
+	}
+	quoteID, err := FileQuoteTermsID(quote.FileQuoteTermsCBOR)
+	if err != nil {
+		return nil, nil, err
+	}
+	if authorization.FileQuoteTermsID != quoteID {
+		return nil, nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "file_quote_terms_id", "request does not reference supplied quote")
+	}
+	if !bytes.Equal(opening.OpeningBuyerPublicKey(), quoteTerms.BuyerPublicKey) || !bytes.Equal(opening.OpeningSellerPublicKey(), quote.SellerPublicKey) {
+		return nil, nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "participant_public_keys", "request participant keys do not match supplied quote")
+	}
+	if !containsArbiterPublicKey(quoteTerms.SupportedArbiterPublicKeysCBOR, opening.OpeningArbiterPublicKey()) {
+		return nil, nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "supported_arbiter_public_keys", "opening arbiter is not allowed by quote")
+	}
+	return authorization, quoteTerms, nil
 }
 
-// VerifySignedContentRequest verifies the quote binding, pool participants,
-// buyer signature, quote expiry, and request deadline. It reads system UTC
-// exactly once at entry and uses only the fixed SDK verifiers.
-func VerifySignedContentRequest(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*PaymentAuthorization, error) {
-	at := protoclock.Now()
-	authorization, quoteTerms, err := verifyContentRequestEvidence(request, quote, opening)
-	if err != nil {
-		return nil, err
+// CheckContentRequestTiming 应用 003 请求的两项显式时间比较：报价过期与交付
+// 截止。at 是调用方显式传入的本操作唯一时间事实。
+func CheckContentRequestTiming(authorization *PaymentAuthorization, quoteTerms *FileQuoteTerms, at time.Time) error {
+	const op = "content.CheckContentRequestTiming"
+	if !at.Before(time.Unix(quoteTerms.QuoteExpiresAtUnixSeconds, 0)) {
+		return protocol.Errorf(op, protocol.CodeExpired, 5, "quote_expires_at_unix_seconds", "file quote is expired")
 	}
-	if err := checkContentRequestTiming(authorization, quoteTerms, at); err != nil {
-		return nil, err
+	if !at.Before(time.Unix(authorization.DeliveryDeadlineUnixSeconds, 0)) {
+		return protocol.Errorf(op, protocol.CodeExpired, 5, "delivery_deadline_unix_seconds", "delivery deadline has passed")
 	}
-	return authorization, nil
+	if authorization.DeliveryDeadlineUnixSeconds > quoteTerms.QuoteExpiresAtUnixSeconds {
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "delivery_deadline_unix_seconds", "delivery deadline exceeds quote expiry")
+	}
+	return nil
 }
 
-// VerifySignedContentRequestWithSeed additionally proves that every requested
-// block hash is present in the quote-bound seed and derives each item's
-// protocol expected length. It reads system UTC once at entry like every other
-// public verification entry point.
-func VerifySignedContentRequestWithSeed(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence, seed []byte) (*PaymentAuthorization, error) {
-	at := protoclock.Now()
-	authorization, quoteTerms, err := verifyContentRequestEvidence(request, quote, opening)
+// containsArbiterPublicKey 报告编码的仲裁公钥数组是否包含目标公钥。
+func containsArbiterPublicKey(encodedPublicKeys []byte, wanted []byte) bool {
+	publicKeys, err := DecodeSupportedArbiterPublicKeys(encodedPublicKeys)
 	if err != nil {
-		return nil, err
+		return false
 	}
-	hashes, err := DecodeContentHashes(authorization.ContentHashesCBOR)
-	if err != nil {
-		return nil, err
+	for _, publicKey := range publicKeys {
+		if bytes.Equal(publicKey, wanted) {
+			return true
+		}
 	}
-	if _, err := classifyContentHashes(context.Background(), quoteTerms, hashes, seed); err != nil {
-		return nil, err
+	return false
+}
+
+// mapMasterSeedError 把 MasterSeed 依赖错误映射到统一分类：取消原样透传，
+// 块不在 seed 中映射为 invalid_evidence 并保留底层原因。
+func mapMasterSeedError(err error) error {
+	if err == nil {
+		return nil
 	}
-	if err := checkContentRequestTiming(authorization, quoteTerms, at); err != nil {
-		return nil, err
+	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeCanceled, 0, "")
 	}
-	return authorization, nil
+	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
+		return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeInvalidEvidence, 0, "payload")
+	}
+	return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeInvalidEvidence, 0, "")
 }
 
 // VerifyContentPayloadsContext 验证交付批次：数量严格等于授权哈希数量、顺序
 // 一一对应、逐项 SHA-256、seed/block 归属与协议期望长度。当批次内携带与报价
 // SeedHash 对应的 seed payload 时，先完整验证它，再用它做块成员校验；返回值
-// 是实际用于成员校验的 seed 深复制，调用方可用它继续计算聚合价格。
+// 是实际用于成员校验的 seed 深复制，调用方可用它继续计算聚合价格。ctx 仅用
+// 于可取消的大 payload 计算。
 func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	const op = "content.VerifyContentPayloadsContext"
 	// 导出入口自身 fail-closed：外部直接调用时同样强制协议数组约束
 	//（1..64、32 字节宽度、不重复；payload 非空且不超过一个块长）。
 	if err := validateContentHashes(contentHashes); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, err)
 	}
 	if err := validateContentPayloads(payloads); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, err)
 	}
 	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
-		return nil, fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence(op, fmt.Errorf("quote terms: %v", err))
 	}
 	if len(contentHashes) == 0 || len(contentHashes) > MaxContentBatchItems {
-		return nil, fmt.Errorf("%w: authorized content hash count must be between 1 and %d", ErrInvalidEvidence, MaxContentBatchItems)
+		return nil, invalidEvidence(op, fmt.Errorf("authorized content hash count must be between 1 and %d", MaxContentBatchItems))
 	}
 	if len(payloads) != len(contentHashes) {
-		return nil, fmt.Errorf("%w: payload count %d does not match authorized hash count %d", ErrInvalidEvidence, len(payloads), len(contentHashes))
+		return nil, invalidEvidence(op, fmt.Errorf("payload count %d does not match authorized hash count %d", len(payloads), len(contentHashes)))
 	}
 	digests := make([]masterseed.Digest, len(contentHashes))
 	seedItemIndex := -1
@@ -568,7 +625,7 @@ func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerm
 		digests[index] = digest
 		payloadDigest := masterseed.Sum256(payloads[index])
 		if !bytes.Equal(payloadDigest.Bytes(), hash) {
-			return nil, fmt.Errorf("%w: payload #%d does not match authorized content hash", ErrInvalidEvidence, index+1)
+			return nil, invalidEvidence(op, fmt.Errorf("payload #%d does not match authorized content hash", index+1))
 		}
 		if bytes.Equal(hash, quoteTerms.SeedHash) {
 			if _, err := masterseed.VerifySeedForSourceSize(ctx, bytes.NewReader(payloads[index]), digest, quoteTerms.FileSizeBytes); err != nil {
@@ -584,7 +641,7 @@ func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerm
 		effectiveSeed = append([]byte(nil), payloads[seedItemIndex]...)
 	}
 	if requiresBlocks && len(effectiveSeed) == 0 {
-		return nil, fmt.Errorf("%w: a verified seed is required to validate block payloads", ErrContentNotInSeed)
+		return nil, invalidEvidence(op, errors.New("a verified seed is required to validate block payloads"))
 	}
 	if requiresBlocks {
 		seedDigest, err := masterseed.DigestFromBytes(quoteTerms.SeedHash)
@@ -609,11 +666,6 @@ func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerm
 	return append([]byte(nil), effectiveSeed...), nil
 }
 
-// VerifyContentPayloads is the context-free wrapper of VerifyContentPayloadsContext.
-func VerifyContentPayloads(quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
-	return VerifyContentPayloadsContext(context.Background(), quoteTerms, contentHashes, payloads, seed)
-}
-
 // classifiedContent records the evidence-derived kind and expected protocol
 // length of one requested content hash. The kind is never sender-declared.
 type classifiedContent struct {
@@ -629,12 +681,12 @@ type classifiedContent struct {
 // ambiguous-evidence conflict and reject the whole batch.
 func classifyContentHashes(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes [][]byte, seed []byte) ([]classifiedContent, error) {
 	if err := ValidateFileQuoteTerms(quoteTerms); err != nil {
-		return nil, fmt.Errorf("%w: quote terms: %v", ErrInvalidEvidence, err)
+		return nil, invalidEvidence("content.classifyContentHashes", fmt.Errorf("quote terms: %v", err))
 	}
 	result := make([]classifiedContent, len(contentHashes))
 	for index, hash := range contentHashes {
 		if len(hash) != sha256.Size {
-			return nil, fmt.Errorf("%w: content hash #%d must be %d bytes", ErrInvalidEvidence, index+1, sha256.Size)
+			return nil, invalidEvidence("content.classifyContentHashes", fmt.Errorf("content hash #%d must be %d bytes", index+1, sha256.Size))
 		}
 		if bytes.Equal(hash, quoteTerms.SeedHash) {
 			result[index] = classifiedContent{IsSeed: true}
@@ -653,7 +705,7 @@ func classifyContentHashes(ctx context.Context, quoteTerms *FileQuoteTerms, cont
 			return nil, mapMasterSeedError(err)
 		}
 		if firstSize != lastSize {
-			return nil, fmt.Errorf("%w: content hash #%d matches positions with conflicting expected lengths", ErrInvalidEvidence, index+1)
+			return nil, invalidEvidence("content.classifyContentHashes", fmt.Errorf("content hash #%d matches positions with conflicting expected lengths", index+1))
 		}
 		result[index] = classifiedContent{BlockSize: firstSize}
 	}
@@ -666,7 +718,7 @@ func classifyContentHashes(ctx context.Context, quoteTerms *FileQuoteTerms, cont
 func findBlockMatches(ctx context.Context, quoteTerms *FileQuoteTerms, blockHash, seed []byte) (masterseed.BlockMatches, error) {
 	var result masterseed.BlockMatches
 	if len(seed) == 0 {
-		return result, fmt.Errorf("%w: the verified seed is required for block content", ErrContentNotInSeed)
+		return result, invalidEvidence("content.findBlockMatches", errors.New("the verified seed is required for block content"))
 	}
 	digest, err := masterseed.DigestFromBytes(blockHash)
 	if err != nil {
@@ -681,7 +733,7 @@ func findBlockMatches(ctx context.Context, quoteTerms *FileQuoteTerms, blockHash
 		return result, mapMasterSeedError(err)
 	}
 	if result.MatchCount == 0 {
-		return result, ErrContentNotInSeed
+		return result, invalidEvidence("content.findBlockMatches", errors.New("block hash is not listed by the verified seed"))
 	}
 	return result, nil
 }
@@ -701,99 +753,29 @@ func refundTemplateTxIDIsZero(raw []byte) bool {
 // target payment sequence bounds, canonical content-hash batch, and delivery
 // deadline before signing.
 func ValidatePaymentAuthorization(authorization *PaymentAuthorization) error {
+	const op = "content.ValidatePaymentAuthorization"
 	if authorization == nil {
-		return errors.New("payment authorization is required")
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "authorization", "payment authorization is required")
 	}
 	if authorization.FileQuoteTermsID.IsZero() {
-		return fmt.Errorf("%w: file_quote_terms_id", ErrZeroIdentifier)
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "file_quote_terms_id", "%w", protocol.ErrZeroIdentifier)
 	}
 	if len(authorization.RefundTemplateTxID) != sha256.Size {
-		return errors.New("refund_template_txid must be 32 bytes")
+		return protocol.Errorf(op, protocol.CodeMalformedWire, 5, "refund_template_txid", "must be 32 bytes")
 	}
 	if refundTemplateTxIDIsZero(authorization.RefundTemplateTxID) {
-		return errors.New("refund_template_txid must not be all zero")
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "refund_template_txid", "must not be all zero")
 	}
 	if authorization.PaymentSequence == 0 || authorization.PaymentSequence > ^uint32(0)-1 {
-		return errors.New("payment_sequence must be between 1 and 4294967294")
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "payment_sequence", "must be between 1 and 4294967294")
 	}
 	if _, err := DecodeContentHashes(authorization.ContentHashesCBOR); err != nil {
 		return err
 	}
 	if authorization.DeliveryDeadlineUnixSeconds <= 0 {
-		return errors.New("delivery_deadline_unix_seconds is required")
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "delivery_deadline_unix_seconds", "is required")
 	}
 	return nil
-}
-
-// checkContentRequestTiming 应用 003 请求的两项当前时间比较：报价过期与交付
-// 截止。at 必须是公开入口唯一一次读取的时间；跨包调用方用返回值自行
-// 做同样的纯比较（见 buyer/seller 包内同名逻辑）。
-func checkContentRequestTiming(authorization *PaymentAuthorization, quoteTerms *FileQuoteTerms, at time.Time) error {
-	if !at.Before(time.Unix(quoteTerms.QuoteExpiresAtUnixSeconds, 0)) {
-		return fmt.Errorf("%w: file quote is expired", ErrQuoteExpired)
-	}
-	if !at.Before(time.Unix(authorization.DeliveryDeadlineUnixSeconds, 0)) {
-		return fmt.Errorf("%w: delivery deadline has passed", ErrDeliveryDeadline)
-	}
-	if authorization.DeliveryDeadlineUnixSeconds > quoteTerms.QuoteExpiresAtUnixSeconds {
-		return fmt.Errorf("%w: delivery deadline exceeds quote expiry", ErrDeliveryDeadline)
-	}
-	return nil
-}
-
-func containsBytes(encodedPublicKeys []byte, wanted []byte) bool {
-	publicKeys, err := DecodeSupportedArbiterPublicKeys(encodedPublicKeys)
-	if err != nil {
-		return false
-	}
-	for _, publicKey := range publicKeys {
-		if bytes.Equal(publicKey, wanted) {
-			return true
-		}
-	}
-	return false
-}
-
-func invalidEvidence(err error) error { return errors.Join(ErrInvalidEvidence, err) }
-
-func mapMasterSeedError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
-		return errors.Join(ErrContentNotInSeed, err)
-	}
-	return errors.Join(ErrInvalidEvidence, err)
-}
-
-// verifyContentRequestEvidence 是时间无关的 003 纯证据验证：结构、池绑定、
-// 报价绑定、参与方一致性与买方统一签名。它不检查报价过期或交付截止时间。
-func verifyContentRequestEvidence(request *SignedContentRequest, quote *SignedFileQuote, opening PoolOpeningEvidence) (*PaymentAuthorization, *FileQuoteTerms, error) {
-	quoteTerms, err := VerifyFileQuoteEvidence(quote)
-	if err != nil {
-		return nil, nil, err
-	}
-	authorization, err := VerifySignedContentRequestForOpening(request, opening)
-	if err != nil {
-		return nil, nil, err
-	}
-	quoteID, err := FileQuoteTermsID(quote.FileQuoteTermsCBOR)
-	if err != nil {
-		return nil, nil, err
-	}
-	if authorization.FileQuoteTermsID != quoteID {
-		return nil, nil, fmt.Errorf("%w: request does not reference supplied quote", ErrInvalidEvidence)
-	}
-	if !bytes.Equal(opening.OpeningBuyerPublicKey(), quoteTerms.BuyerPublicKey) || !bytes.Equal(opening.OpeningSellerPublicKey(), quote.SellerPublicKey) {
-		return nil, nil, fmt.Errorf("%w: request participant keys do not match supplied quote", ErrInvalidEvidence)
-	}
-	if !containsBytes(quoteTerms.SupportedArbiterPublicKeysCBOR, opening.OpeningArbiterPublicKey()) {
-		return nil, nil, fmt.Errorf("%w: opening arbiter is not allowed by quote", ErrInvalidEvidence)
-	}
-	return authorization, quoteTerms, nil
 }
 
 func clonePaymentAuthorization(authorization *PaymentAuthorization) *PaymentAuthorization {

@@ -1,10 +1,9 @@
-package bitfs
+package content
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"errors"
 	"strings"
 	"testing"
 
@@ -62,7 +61,7 @@ func mustSeededQuote(t *testing.T, source []byte) (*SignedFileQuote, []byte, *Fi
 	terms := quoteTestTerms(t)
 	terms.FileSizeBytes = uint64(len(source))
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
-	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "file.bin")
+	quote, err := NewSignedFileQuote(context.Background(), terms, constructorSigner(t, quoteTestKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +72,7 @@ func TestContentRequestAndDeliveryBatchRoundTrip(t *testing.T) {
 	source := []byte("block")
 	quote, _, _ := mustSeededQuote(t, source)
 	seedHash := masterseed.Sum256(createTestSeed(t, source))
-	request, err := NewSignedContentRequest(contentBatchRequestTerms(t, quote, [][]byte{seedHash.Bytes()}, 3, 10), quoteTestKey())
+	request, err := NewSignedContentRequest(context.Background(), contentBatchRequestTerms(t, quote, [][]byte{seedHash.Bytes()}, 3, 10), constructorSigner(t, quoteTestKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +88,8 @@ func TestContentRequestAndDeliveryBatchRoundTrip(t *testing.T) {
 		t.Fatal("request changed after round trip")
 	}
 	opening := contentBatchOpening(quote, bytes.Repeat([]byte{0x09}, sha256.Size))
-	if _, err := VerifySignedContentRequest(decodedRequest, quote, opening); err != nil {
-		t.Fatalf("VerifySignedContentRequest() error = %v", err)
+	if _, _, err := VerifyContentRequestEvidence(decodedRequest, quote, opening); err != nil {
+		t.Fatalf("VerifyContentRequestEvidence() error = %v", err)
 	}
 	authID, err := PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
@@ -100,7 +99,7 @@ func TestContentRequestAndDeliveryBatchRoundTrip(t *testing.T) {
 		t.Fatal("authorization hash is not the SHA-256 of the exact terms CBOR")
 	}
 
-	delivery, err := NewSignedContentDelivery(authID, [][]byte{createTestSeed(t, source)}, mustSellerDeliveryKey(t))
+	delivery, err := NewSignedContentDelivery(context.Background(), authID, [][]byte{createTestSeed(t, source)}, constructorSigner(t, mustSellerDeliveryKey(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +156,7 @@ func TestDecodeContentRequestTermsRejectsLegacyShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodePaymentAuthorization(legacyRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(legacyRaw); !protocol.IsCode(err, protocol.CodeMalformedWire) {
 		t.Fatalf("legacy thirteen-element terms decoded: %v", err)
 	}
 	innerVersion := append([]any{uint64(4)},
@@ -168,7 +167,7 @@ func TestDecodeContentRequestTermsRejectsLegacyShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodePaymentAuthorization(innerVersionRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(innerVersionRaw); !protocol.IsCode(err, protocol.CodeMalformedWire) {
 		t.Fatalf("terms with an inner version decoded: %v", err)
 	}
 	legacySingleHash, err := canonicalEnc.Marshal([]any{
@@ -177,7 +176,7 @@ func TestDecodeContentRequestTermsRejectsLegacyShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodePaymentAuthorization(legacySingleHash); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(legacySingleHash); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("legacy single-hash terms decoded: %v", err)
 	}
 	sevenRaw, err := canonicalEnc.Marshal([]any{
@@ -186,7 +185,7 @@ func TestDecodeContentRequestTermsRejectsLegacyShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodePaymentAuthorization(sevenRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodePaymentAuthorization(sevenRaw); !protocol.IsCode(err, protocol.CodeMalformedWire) {
 		t.Fatalf("seven-element terms decoded: %v", err)
 	}
 }
@@ -201,7 +200,7 @@ func TestDecodeSignedContentDeliveryRejectsLegacyShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeSignedContentDelivery(legacyRaw); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := DecodeSignedContentDelivery(legacyRaw); !protocol.IsCode(err, protocol.CodeMalformedWire) {
 		t.Fatalf("legacy three-element delivery decoded: %v", err)
 	}
 }
@@ -313,50 +312,59 @@ func TestVerifyContentRequestRejectsWrongPoolOrParticipants(t *testing.T) {
 	source := []byte("block")
 	quote, _, _ := mustSeededQuote(t, source)
 	seedHash := masterseed.Sum256(createTestSeed(t, source)).Bytes()
-	request, err := NewSignedContentRequest(contentBatchRequestTerms(t, quote, [][]byte{seedHash}, 3, 10), quoteTestKey())
+	request, err := NewSignedContentRequest(context.Background(), contentBatchRequestTerms(t, quote, [][]byte{seedHash}, 3, 10), constructorSigner(t, quoteTestKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	goodTxID := bytes.Repeat([]byte{0x09}, sha256.Size)
-	if _, err := VerifySignedContentRequest(request, quote, contentBatchOpening(quote, goodTxID)); err != nil {
+	if _, _, err := VerifyContentRequestEvidence(request, quote, contentBatchOpening(quote, goodTxID)); err != nil {
 		t.Fatalf("valid request rejected: %v", err)
 	}
 	wrongPool := contentBatchOpening(quote, bytes.Repeat([]byte{0x08}, sha256.Size))
-	if _, err := VerifySignedContentRequest(request, quote, wrongPool); err == nil {
+	if _, _, err := VerifyContentRequestEvidence(request, quote, wrongPool); err == nil {
 		t.Fatal("request bound to another pool was accepted")
 	}
 	wrongBuyer := contentBatchOpening(quote, goodTxID)
 	wrongBuyer.buyer = quoteTestOtherArbiterPubkey()
-	if _, err := VerifySignedContentRequest(request, quote, wrongBuyer); err == nil {
+	if _, _, err := VerifyContentRequestEvidence(request, quote, wrongBuyer); err == nil {
 		t.Fatal("buyer key mismatch was accepted")
 	}
 	wrongArbiter := contentBatchOpening(quote, goodTxID)
 	wrongArbiter.arbiter = quoteTestOtherArbiterPubkey()
-	if _, err := VerifySignedContentRequest(request, quote, wrongArbiter); err == nil {
+	if _, _, err := VerifyContentRequestEvidence(request, quote, wrongArbiter); err == nil {
 		t.Fatal("arbiter outside the quote whitelist was accepted")
 	}
 }
 
-func TestVerifyContentRequestWithSeedChecksMembership(t *testing.T) {
+func TestPayloadVerificationChecksSeedMembership(t *testing.T) {
 	source := []byte("committed block content")
 	quote, seed, _ := mustSeededQuote(t, source)
 	blockHash := masterseed.Sum256(source).Bytes()
-	request, err := NewSignedContentRequest(contentBatchRequestTerms(t, quote, [][]byte{blockHash}, 3, 10), quoteTestKey())
-	if err != nil {
-		t.Fatal(err)
-	}
+	terms := batchTerms(t, quote)
 	opening := contentBatchOpening(quote, bytes.Repeat([]byte{0x09}, sha256.Size))
-	if _, err := VerifySignedContentRequestWithSeed(request, quote, opening, seed); err != nil {
+	if _, _, err := VerifyContentRequestEvidence(mustCommittedBlockRequest(t, quote, blockHash), quote, opening); err != nil {
+		t.Fatalf("valid request rejected: %v", err)
+	}
+	// 已提交块在提供 seed 时通过 payload 校验。
+	if _, err := VerifyContentPayloadsContext(context.Background(), terms, [][]byte{blockHash}, [][]byte{append([]byte(nil), source...)}, seed); err != nil {
 		t.Fatalf("committed block rejected: %v", err)
 	}
 	otherHash := masterseed.Sum256([]byte("uncommitted")).Bytes()
-	uncommitted, err := NewSignedContentRequest(contentBatchRequestTerms(t, quote, [][]byte{otherHash}, 3, 10), quoteTestKey())
+	// 未提交内容不在 seed 中：映射为 invalid_evidence 并保留 BlockNotInSeed 原因。
+	_, err := VerifyContentPayloadsContext(context.Background(), terms, [][]byte{otherHash}, [][]byte{[]byte("uncommitted")}, seed)
+	assertMasterSeedCode(t, err, masterseed.BlockNotInSeed)
+	if !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+		t.Fatalf("uncommitted block error class = %v", err)
+	}
+}
+
+func mustCommittedBlockRequest(t *testing.T, quote *SignedFileQuote, hashes ...[]byte) *SignedContentRequest {
+	t.Helper()
+	request, err := NewSignedContentRequest(context.Background(), contentBatchRequestTerms(t, quote, hashes, 3, 10), constructorSigner(t, quoteTestKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedContentRequestWithSeed(uncommitted, quote, opening, seed); !errors.Is(err, ErrContentNotInSeed) {
-		t.Fatalf("uncommitted block error = %v", err)
-	}
+	return request
 }
 
 func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
@@ -367,7 +375,7 @@ func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
 	seedHash := quoteSeedHash(t, quote)
 	batch := [][]byte{seedHash, masterseed.Sum256(blockZero).Bytes(), masterseed.Sum256(tail).Bytes()}
 	payloads := [][]byte{seed, blockZero, tail}
-	effective, err := VerifyContentPayloads(batchTerms(t, quote), batch, payloads, seed)
+	effective, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads, seed)
 	if err != nil {
 		t.Fatalf("valid mixed batch rejected: %v", err)
 	}
@@ -375,36 +383,37 @@ func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
 		t.Fatal("effective seed does not match the caller-provided verified seed")
 	}
 	// 批次内自带 seed 时，纯块批次可以不传调用方 seed，但成员校验仍必须完成。
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch, payloads, nil); err != nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads, nil); err != nil {
 		t.Fatalf("batch-carried seed rejected: %v", err)
 	}
 	// 错序整批拒绝。
 	swapped := [][]byte{payloads[1], payloads[0], payloads[2]}
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch, swapped, seed); err == nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, swapped, seed); err == nil {
 		t.Fatal("reordered payload batch accepted")
 	}
 	// 数量不符整批拒绝。
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch, payloads[:2], seed); err == nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads[:2], seed); err == nil {
 		t.Fatal("missing payload accepted")
 	}
 	extra := append(append([][]byte(nil), payloads...), []byte("extra"))
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch, extra, seed); err == nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, extra, seed); err == nil {
 		t.Fatal("extra payload accepted")
 	}
 	// 篡改单项整批拒绝。
 	tampered := append([][]byte(nil), payloads...)
 	tampered[2] = append([]byte(nil), tampered[2]...)
 	tampered[2][0] ^= 0xff
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch, tampered, seed); err == nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, tampered, seed); err == nil {
 		t.Fatal("tampered payload accepted")
 	}
-	// 无 seed 且批次不含 seed 时拒绝块校验。
+	// 无 seed 且批次不含 seed 时拒绝块校验（fail-closed：缺 verified seed）。
 	blockOnly := batch[1:2]
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), blockOnly, payloads[1:2], nil); !errors.Is(err, ErrContentNotInSeed) {
+	_, err = VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), blockOnly, payloads[1:2], nil)
+	if !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("block-only batch without seed error = %v", err)
 	}
 	// 纯 seed 批次不需要调用方 seed。
-	if _, err := VerifyContentPayloads(batchTerms(t, quote), batch[:1], payloads[:1], nil); err != nil {
+	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch[:1], payloads[:1], nil); err != nil {
 		t.Fatalf("pure-seed batch rejected: %v", err)
 	}
 }
@@ -441,23 +450,23 @@ func TestContentHashesPriceSatAggregation(t *testing.T) {
 	terms.FullBlockPriceSatoshis = 1000
 
 	seedOnly := [][]byte{masterseed.Sum256(seed).Bytes()}
-	price, err := ContentHashesPriceSatoshis(terms, seedOnly, nil)
+	price, err := ContentHashesPriceSatoshis(context.Background(), terms, seedOnly, nil)
 	if err != nil || price != 100 {
 		t.Fatalf("seed price = %d, %v", price, err)
 	}
 	fullBatch := [][]byte{masterseed.Sum256(fullBlock).Bytes(), masterseed.Sum256(secondBlock).Bytes()}
-	price, err = ContentHashesPriceSatoshis(terms, fullBatch, seed)
+	price, err = ContentHashesPriceSatoshis(context.Background(), terms, fullBatch, seed)
 	if err != nil || price != 2000 {
 		t.Fatalf("full blocks price = %d, %v", price, err)
 	}
 	mixed := append(append([][]byte(nil), seedOnly...), fullBatch...)
-	price, err = ContentHashesPriceSatoshis(terms, mixed, seed)
+	price, err = ContentHashesPriceSatoshis(context.Background(), terms, mixed, seed)
 	if err != nil || price != 2100 {
 		t.Fatalf("mixed batch price = %d, %v", price, err)
 	}
 	tailBatch := [][]byte{masterseed.Sum256(tailBlock).Bytes()}
 	expectedTail := tailPriceSat(1000, 10)
-	price, err = ContentHashesPriceSatoshis(terms, tailBatch, seed)
+	price, err = ContentHashesPriceSatoshis(context.Background(), terms, tailBatch, seed)
 	if err != nil || price != expectedTail {
 		t.Fatalf("tail price = %d, want %d, %v", price, expectedTail, err)
 	}
@@ -467,7 +476,7 @@ func TestContentHashesPriceSatAggregation(t *testing.T) {
 	zeroSeed := createTestSeed(t, zeroSource)
 	zeroPrice.FileSizeBytes = masterseed.BlockSize
 	zeroPrice.SeedHash = masterseed.Sum256(zeroSeed).Bytes()
-	price, err = ContentHashesPriceSatoshis(zeroPrice, [][]byte{masterseed.Sum256(zeroSource).Bytes()}, zeroSeed)
+	price, err = ContentHashesPriceSatoshis(context.Background(), zeroPrice, [][]byte{masterseed.Sum256(zeroSource).Bytes()}, zeroSeed)
 	if err != nil || price != 0 {
 		t.Fatalf("zero-price tail = %d, %v", price, err)
 	}
@@ -481,7 +490,7 @@ func TestContentHashesPriceSatAggregation(t *testing.T) {
 	overflow.FullBlockPriceSatoshis = ^uint64(0)
 	overflow.FileSizeBytes = 2 * masterseed.BlockSize
 	overflow.SeedHash = masterseed.Sum256(overflowSeed).Bytes()
-	_, err = ContentHashesPriceSatoshis(overflow, [][]byte{
+	_, err = ContentHashesPriceSatoshis(context.Background(), overflow, [][]byte{
 		masterseed.Sum256(firstOverflowBlock).Bytes(),
 		masterseed.Sum256(secondOverflowBlock).Bytes(),
 	}, overflowSeed)
@@ -513,24 +522,24 @@ func TestExportedBatchEntriesFailClosedOnNonProtocolInput(t *testing.T) {
 	terms.SeedHash = masterseed.Sum256(seed).Bytes()
 
 	duplicate := masterseed.Sum256(source).Bytes()
-	if _, err := ContentHashesPriceSatoshis(terms, [][]byte{append([]byte(nil), duplicate...), append([]byte(nil), duplicate...)}, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := ContentHashesPriceSatoshis(context.Background(), terms, [][]byte{append([]byte(nil), duplicate...), append([]byte(nil), duplicate...)}, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("pricing accepted duplicate hashes: %v", err)
 	}
 	tooMany := make([][]byte, MaxContentBatchItems+1)
 	for index := range tooMany {
 		tooMany[index] = bytes.Repeat([]byte{byte(index + 1)}, sha256.Size)
 	}
-	if _, err := ContentHashesPriceSatoshis(terms, tooMany, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := ContentHashesPriceSatoshis(context.Background(), terms, tooMany, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("pricing accepted an oversized batch: %v", err)
 	}
 	payloads := [][]byte{source[:10], source[10:20]}
 	hashes := [][]byte{masterseed.Sum256(payloads[0]).Bytes(), masterseed.Sum256(payloads[0]).Bytes()}
-	if _, err := VerifyContentPayloads(terms, hashes, payloads, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := VerifyContentPayloadsContext(context.Background(), terms, hashes, payloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("payload verification accepted duplicate hashes: %v", err)
 	}
 	emptyPayloads := [][]byte{nil}
 	singleHash := [][]byte{duplicate}
-	if _, err := VerifyContentPayloads(terms, singleHash, emptyPayloads, seed); !errors.Is(err, ErrInvalidEvidence) {
+	if _, err := VerifyContentPayloadsContext(context.Background(), terms, singleHash, emptyPayloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("payload verification accepted an empty payload: %v", err)
 	}
 }
@@ -547,7 +556,7 @@ func TestDuplicateHashPositionsArePricedOnceAndConflictsRejected(t *testing.T) {
 	ambiguousSeed := bytes.Repeat(duplicate, 3)
 	ambiguous.SeedHash = masterseed.Sum256(ambiguousSeed).Bytes()
 	ambiguous.FullBlockPriceSatoshis = 500
-	if _, err := ContentHashesPriceSatoshis(ambiguous, [][]byte{append([]byte(nil), duplicate...)}, ambiguousSeed); err == nil {
+	if _, err := ContentHashesPriceSatoshis(context.Background(), ambiguous, [][]byte{append([]byte(nil), duplicate...)}, ambiguousSeed); err == nil {
 		t.Fatal("conflicting expected lengths accepted")
 	}
 	consistent := quoteTestTerms(t)
@@ -555,7 +564,7 @@ func TestDuplicateHashPositionsArePricedOnceAndConflictsRejected(t *testing.T) {
 	consistentSeed := bytes.Repeat(duplicate, 2)
 	consistent.SeedHash = masterseed.Sum256(consistentSeed).Bytes()
 	consistent.FullBlockPriceSatoshis = 400
-	price, err := ContentHashesPriceSatoshis(consistent, [][]byte{append([]byte(nil), duplicate...)}, consistentSeed)
+	price, err := ContentHashesPriceSatoshis(context.Background(), consistent, [][]byte{append([]byte(nil), duplicate...)}, consistentSeed)
 	if err != nil || price != 400 {
 		t.Fatalf("duplicate positions priced = %d, %v; want single charge of 400", price, err)
 	}
@@ -572,7 +581,7 @@ func TestMasterSeedErrorsMapToBitFSCategories(t *testing.T) {
 	hashMismatch.SeedHash = bytes.Repeat([]byte{0x99}, masterseed.DigestSize)
 	_, err := findBlockMatches(context.Background(), hashMismatch, masterseed.Sum256(source).Bytes(), seed)
 	assertMasterSeedCode(t, err, masterseed.SeedHashMismatch)
-	if !errors.Is(err, ErrInvalidEvidence) {
+	if !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("seed hash mismatch does not map to ErrInvalidEvidence: %v", err)
 	}
 
@@ -586,11 +595,8 @@ func TestMasterSeedErrorsMapToBitFSCategories(t *testing.T) {
 	blockTerms.FileSizeBytes = uint64(len(source))
 	blockTerms.SeedHash = seedHash.Bytes()
 	other := []byte("uncommitted")
-	_, err = VerifyContentPayloads(blockTerms, [][]byte{masterseed.Sum256(other).Bytes()}, [][]byte{append([]byte(nil), other...)}, seed)
+	_, err = VerifyContentPayloadsContext(context.Background(), blockTerms, [][]byte{masterseed.Sum256(other).Bytes()}, [][]byte{append([]byte(nil), other...)}, seed)
 	assertMasterSeedCode(t, err, masterseed.BlockNotInSeed)
-	if !errors.Is(err, ErrContentNotInSeed) {
-		t.Fatalf("block-not-in-seed does not map to ErrContentNotInSeed: %v", err)
-	}
 }
 
 func TestMasterSeedContextCancellationIsNotInvalidEvidence(t *testing.T) {
@@ -605,7 +611,7 @@ func TestMasterSeedContextCancellationIsNotInvalidEvidence(t *testing.T) {
 	cancel()
 	_, err := findBlockMatches(ctx, terms, blockHash.Bytes(), seed)
 	assertMasterSeedCode(t, err, masterseed.Aborted)
-	if errors.Is(err, ErrInvalidEvidence) {
+	if protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("context cancellation was classified as invalid evidence: %v", err)
 	}
 }

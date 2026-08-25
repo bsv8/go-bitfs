@@ -1,16 +1,13 @@
-// Package bitfs implements the protocol layer for BitFS 001, 003, and 004.
-// It owns canonical CBOR, signed quote/content credentials, hashes, and
-// payload validation. It does not store files, open pools, or submit network
-// transactions; buyer and seller workflows inject those capabilities.
-package bitfs
+package content
 
 import masterseed "github.com/bsv8/MasterSeed"
 
+// BlockSize 与 DigestSize 是 MasterSeed 依赖库拥有的协议常量；本包仅按
+// 协议引用它们。
 const (
-	// BlockSize is retained as a compatibility alias. MasterSeed is the
-	// authoritative owner of seed protocol constants.
+	// BlockSize 是一个完整内容块的字节数（256 KiB）。
 	BlockSize uint64 = masterseed.BlockSize
-	// DigestSize is the byte width of a seed digest.
+	// DigestSize 是 seed 摘要的字节宽度。
 	DigestSize = masterseed.DigestSize
 )
 

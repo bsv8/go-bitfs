@@ -1,12 +1,14 @@
-package bitfs
+package content
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"testing"
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
@@ -22,8 +24,9 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 		FileSizeBytes:                  BlockSize + 7,
 		QuoteExpiresAtUnixSeconds:      quoteTestFutureUnix(),
 		SupportedArbiterPublicKeysCBOR: arbiters,
+		RecommendedFilename:            "report.bin",
 	}
-	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "report.bin")
+	quote, err := NewSignedFileQuote(context.Background(), terms, quoteTestSigner())
 	if err != nil {
 		t.Fatalf("NewSignedFileQuote() error = %v", err)
 	}
@@ -35,7 +38,7 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeSignedFileQuote() error = %v", err)
 	}
-	verified, err := VerifySignedFileQuote(decoded)
+	verified, err := VerifySignedFileQuote(decoded, time.Unix(quoteTestFutureUnix()-60, 0))
 	if err != nil {
 		t.Fatalf("VerifySignedFileQuote() error = %v", err)
 	}
@@ -53,7 +56,8 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 
 func TestRecommendedFilenameIsSignedInsideTerms(t *testing.T) {
 	terms := quoteTestTerms(t)
-	quote, err := NewSignedFileQuote(terms, quoteTestKey(), "original.bin")
+	terms.RecommendedFilename = "original.bin"
+	quote, err := NewSignedFileQuote(context.Background(), terms, quoteTestSigner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +69,9 @@ func TestRecommendedFilenameIsSignedInsideTerms(t *testing.T) {
 		t.Fatalf("signed recommended filename = %q", decoded.RecommendedFilename)
 	}
 	// 文件名不同的两份报价必须产生不同的 file_quote_terms_id。
-	otherQuote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "renamed-by-seller.bin")
+	renamed := quoteTestTerms(t)
+	renamed.RecommendedFilename = "renamed-by-seller.bin"
+	otherQuote, err := NewSignedFileQuote(context.Background(), renamed, quoteTestSigner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +107,7 @@ func TestSanitizeRecommendedFilename(t *testing.T) {
 }
 
 func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
-	quote, err := NewSignedFileQuote(quoteTestTerms(t), quoteTestKey(), "f")
+	quote, err := NewSignedFileQuote(context.Background(), quoteTestTerms(t), quoteTestSigner())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +120,7 @@ func TestSignedFileQuoteRejectsChangedTerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifySignedFileQuote(quote); err == nil {
+	if _, err := VerifySignedFileQuote(quote, time.Unix(quoteTestFutureUnix()-60, 0)); err == nil {
 		t.Fatal("VerifySignedFileQuote() accepted changed terms")
 	}
 }
@@ -186,6 +192,15 @@ func quoteTestKey() *ec.PrivateKey {
 		panic(err)
 	}
 	return key
+}
+
+// quoteTestSigner 把报价测试私钥包装成受约束 Signer（新构造器唯一入口）。
+func quoteTestSigner() *protocol.PrivateKeySigner {
+	signer, err := protocol.NewPrivateKeySigner(quoteTestKey())
+	if err != nil {
+		panic(err)
+	}
+	return signer
 }
 
 func quoteTestPubkey() []byte { return quoteTestKey().PubKey().Compressed() }

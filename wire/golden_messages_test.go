@@ -1,19 +1,22 @@
-package wire
+package wire_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 	"github.com/bsv8/go-bitfs/arbitration"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/wire"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -32,13 +35,23 @@ func mustGoldenKey(t *testing.T, repeat string) *ec.PrivateKey {
 	return key
 }
 
-func goldenQuote(t *testing.T) *bitfs.SignedFileQuote {
+// mustGoldenSigner 把 golden 私钥包装成受约束 Signer。
+func mustGoldenSigner(t *testing.T, repeat string) *protocol.PrivateKeySigner {
 	t.Helper()
-	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{mustGoldenKey(t, "33").PubKey().Compressed()})
+	signer, err := protocol.NewPrivateKeySigner(mustGoldenKey(t, repeat))
 	if err != nil {
 		t.Fatal(err)
 	}
-	terms := &bitfs.FileQuoteTerms{
+	return signer
+}
+
+func goldenQuote(t *testing.T) *content.SignedFileQuote {
+	t.Helper()
+	arbiters, err := content.EncodeSupportedArbiterPublicKeys([][]byte{mustGoldenKey(t, "33").PubKey().Compressed()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms := &content.FileQuoteTerms{
 		SeedHash:                       bytes.Repeat([]byte{1}, 32),
 		BuyerPublicKey:                 mustGoldenKey(t, "44").PubKey().Compressed(),
 		SeedPriceSatoshis:              100,
@@ -46,17 +59,24 @@ func goldenQuote(t *testing.T) *bitfs.SignedFileQuote {
 		FileSizeBytes:                  4096,
 		QuoteExpiresAtUnixSeconds:      2000000000,
 		SupportedArbiterPublicKeysCBOR: arbiters,
+		RecommendedFilename:            "file.bin",
 	}
-	quote, err := bitfs.NewSignedFileQuote(terms, mustGoldenKey(t, "22"), "file.bin")
+	quote, err := content.NewSignedFileQuote(context.Background(), terms, mustGoldenSigner(t, "22"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return quote
 }
 
+// mustGoldenFacts 是 golden 测试的显式事实（早于全部 fixture 的退款锁定与
+// 交付截止，且晚于报价创建时刻）。
+func mustGoldenFacts() protocol.Facts {
+	return protocol.Facts{Now: time.Unix(1999999000, 0).UTC(), BlockHeight: 900000}
+}
+
 func goldenContentHashes(t *testing.T, values ...[]byte) []byte {
 	t.Helper()
-	raw, err := bitfs.EncodeContentHashes(values)
+	raw, err := content.EncodeContentHashes(values)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,24 +85,29 @@ func goldenContentHashes(t *testing.T, values ...[]byte) []byte {
 
 func TestGoldenWireBytes001(t *testing.T) {
 	quote := goldenQuote(t)
-	raw, err := MarshalFileQuote(quote)
+	artifact, err := wire.EncodeFileQuote(quote)
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw := artifact.Bytes()
 	got := hex.EncodeToString(raw)
 	const want = "85010188582001010101010101010101010101010101010101010101010101010101010101015821032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e66868099118641903e81910001a773594005824815821023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1582102466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f276866696c652e62696e582103ac435f4ead58a30a049b9e7b1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b458473045022100GOLDEN001SIG"
 	if got != want && !goldenPending(t, "001", got) {
 		return
 	}
-	decoded, err := UnmarshalFileQuote(raw)
+	parsed, err := wire.ParseAs(wire.FileQuote, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := MarshalFileQuote(decoded)
+	decoded, err := wire.DecodeFileQuote(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw, again) {
+	againArtifact, err := wire.EncodeFileQuote(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, againArtifact.Bytes()) {
 		t.Fatal("001 decode/encode round trip changed bytes")
 	}
 }
@@ -124,7 +149,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalContentRequest(legacyRequestShell); err == nil {
+	if _, err := wire.ParseAs(wire.ContentRequest, legacyRequestShell); err == nil {
 		t.Fatal("legacy thirteen-element 003 terms were accepted")
 	}
 	// 旧 v4 四元 004 外壳（裸授权哈希签名）。
@@ -132,7 +157,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalContentDelivery(legacyDeliveryShell); err == nil {
+	if _, err := wire.ParseAs(wire.ContentDelivery, legacyDeliveryShell); err == nil {
 		t.Fatal("legacy four-element v4 004 shell was accepted")
 	}
 	// 旧 v4 三元最小 005。
@@ -140,7 +165,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalPaymentUpdate(legacyUpdate); err == nil {
+	if _, err := wire.ParseAs(wire.PaymentUpdate, legacyUpdate); err == nil {
 		t.Fatal("pre-switch three-element v4 005 was accepted")
 	}
 	// 旧 v4 内嵌 Kind 13 的四元 0202 响应。
@@ -149,7 +174,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalRefundPresignResponse(legacyPresignResponse); err == nil {
+	if _, err := wire.ParseAs(wire.RefundPresignResponse, legacyPresignResponse); err == nil {
 		t.Fatal("legacy inner-kind 13 presign response was accepted")
 	}
 	// 旧 v4 内嵌 Kind 14 的四元 0203 交付。
@@ -158,7 +183,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalFundingTransactionDelivery(legacyFundingDelivery); err == nil {
+	if _, err := wire.ParseAs(wire.FundingTransactionDelivery, legacyFundingDelivery); err == nil {
 		t.Fatal("legacy inner-kind 14 funding delivery was accepted")
 	}
 	// 旧 v4 五元 007 请求外壳。
@@ -167,7 +192,7 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalArbitrationRequest(legacyArbitrationRequest); err == nil {
+	if _, err := wire.ParseAs(wire.ArbitrationRequest, legacyArbitrationRequest); err == nil {
 		t.Fatal("legacy five-element v4 Kind 8 was accepted")
 	}
 	// 旧 v4 内嵌 exact Kind 8/9 的四元 Kind 11。
@@ -176,18 +201,18 @@ func TestGoldenWireBytesRejectLegacyV4Shapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnmarshalContentRetrievalResponse(legacyRetrievalResponse); err == nil {
+	if _, err := wire.ParseAs(wire.ContentRetrievalResponse, legacyRetrievalResponse); err == nil {
 		t.Fatal("legacy evidence-pair Kind 11 was accepted")
 	}
 }
 
 func TestGoldenWireBytes003(t *testing.T) {
-	quoteID, err := bitfs.FileQuoteTermsID(goldenQuote(t).FileQuoteTermsCBOR)
+	quoteID, err := content.FileQuoteTermsID(goldenQuote(t).FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	contentHash := bytes.Repeat([]byte{5}, 32)
-	authorization := &bitfs.PaymentAuthorization{
+	authorization := &content.PaymentAuthorization{
 		FileQuoteTermsID:            quoteID,
 		RefundTemplateTxID:          bytes.Repeat([]byte{9}, 32),
 		PaymentSequence:             3,
@@ -195,11 +220,15 @@ func TestGoldenWireBytes003(t *testing.T) {
 		ContentHashesCBOR:           goldenContentHashes(t, contentHash),
 		DeliveryDeadlineUnixSeconds: 1999999000,
 	}
-	request, err := bitfs.NewSignedContentRequest(authorization, mustGoldenKey(t, "44"))
+	request, err := content.NewSignedContentRequest(context.Background(), authorization, mustGoldenSigner(t, "44"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := MarshalContentRequest(request)
+	requestArtifact, err := wire.EncodeContentRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := requestArtifact.Bytes()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,25 +237,29 @@ func TestGoldenWireBytes003(t *testing.T) {
 	if got != want && !goldenPending(t, "003", got) {
 		return
 	}
-	decoded, err := UnmarshalContentRequest(raw)
+	parsed, err := wire.ParseAs(wire.ContentRequest, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := MarshalContentRequest(decoded)
+	decoded, err := wire.DecodeContentRequest(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw, again) {
+	againArtifact, err := wire.EncodeContentRequest(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, againArtifact.Bytes()) {
 		t.Fatal("003 decode/encode round trip changed bytes")
 	}
 }
 
 func TestGoldenWireBytes004(t *testing.T) {
-	quoteID, err := bitfs.FileQuoteTermsID(goldenQuote(t).FileQuoteTermsCBOR)
+	quoteID, err := content.FileQuoteTermsID(goldenQuote(t).FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization := &bitfs.PaymentAuthorization{
+	authorization := &content.PaymentAuthorization{
 		FileQuoteTermsID:            quoteID,
 		RefundTemplateTxID:          bytes.Repeat([]byte{9}, 32),
 		PaymentSequence:             3,
@@ -234,36 +267,41 @@ func TestGoldenWireBytes004(t *testing.T) {
 		ContentHashesCBOR:           goldenContentHashes(t, bytes.Repeat([]byte{6}, 32)),
 		DeliveryDeadlineUnixSeconds: 1999999000,
 	}
-	request, err := bitfs.NewSignedContentRequest(authorization, mustGoldenKey(t, "44"))
+	request, err := content.NewSignedContentRequest(context.Background(), authorization, mustGoldenSigner(t, "44"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
+	authID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(authID, [][]byte{[]byte("seed-payload")}, mustGoldenKey(t, "22"))
+	delivery, err := content.NewSignedContentDelivery(context.Background(), authID, [][]byte{[]byte("seed-payload")}, mustGoldenSigner(t, "22"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := MarshalContentDelivery(delivery)
+	deliveryArtifact, err := wire.EncodeContentDelivery(delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw := deliveryArtifact.Bytes()
 	got := hex.EncodeToString(raw)
 	const want = "85010658238158208490bba36ee525567fef7b8728715fae7a61c7702d39b7839b5088ef7307cdf6584630440220238edf7cbfa7d16577bfcb12f3d08052f244c171a2fc6b4d141a0b9c7f1a6026022027064e96265c371f222c296ae316dc6c216163b4d81c730168ab804d3f4934874e814c736565642d7061796c6f6164"
 	if got != want && !goldenPending(t, "004", got) {
 		return
 	}
-	decoded, err := UnmarshalContentDelivery(raw)
+	parsed, err := wire.ParseAs(wire.ContentDelivery, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := MarshalContentDelivery(decoded)
+	decoded, err := wire.DecodeContentDelivery(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw, again) {
+	againArtifact, err := wire.EncodeContentDelivery(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, againArtifact.Bytes()) {
 		t.Fatal("004 decode/encode round trip changed bytes")
 	}
 }
@@ -276,27 +314,28 @@ func TestGoldenWireBytes005(t *testing.T) {
 		PaymentAuthorizationID:           protocol.PaymentAuthorizationID(bytes.Repeat([]byte{1}, 32)),
 		BuyerPaymentTransactionSignature: []byte{5, 6},
 	}
-	raw, err := MarshalPaymentUpdate(update)
+	updateArtifact, err := wire.EncodePaymentUpdate(update)
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw := updateArtifact.Bytes()
 	got := hex.EncodeToString(raw)
 	const want = "84010758200101010101010101010101010101010101010101010101010101010101010101420506"
 	if got != want {
 		t.Fatalf("golden 005 mismatch:\n got %s\nwant %s", got, want)
 	}
-	decoded, err := UnmarshalPaymentUpdate(raw)
+	decoded, err := wire.DecodePaymentUpdate(updateArtifact)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decoded.PaymentAuthorizationID != update.PaymentAuthorizationID || !bytes.Equal(decoded.BuyerPaymentTransactionSignature, update.BuyerPaymentTransactionSignature) {
 		t.Fatal("005 round trip changed fields")
 	}
-	again, err := MarshalPaymentUpdate(decoded)
+	againArtifact, err := wire.EncodePaymentUpdate(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw, again) {
+	if !bytes.Equal(raw, againArtifact.Bytes()) {
 		t.Fatal("005 decode/encode round trip changed bytes")
 	}
 }
@@ -315,16 +354,25 @@ func TestGoldenWireBytes007(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawRequest, err := MarshalArbitrationRequest(request)
+	requestRaw, err := arbitration.MarshalRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+	requestArtifact, err := wire.ParseAs(wire.ArbitrationRequest, requestRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawRequest := requestArtifact.Bytes()
 	const arbitrationFeeSatoshis = uint64(500)
-	prepared, err := arbiter.PreparePayment(nil, request, 900000, arbitrationFeeSatoshis)
+	prepared, err := arbiter.PrepareArbitration(mustGoldenFacts(), rawRequest, protocol.Satoshis(arbitrationFeeSatoshis))
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := arbiter.SignPreparedPayment(nil, prepared)
+	responseArtifact, err := arbiter.SignPreparedArbitration(context.Background(), mustGoldenFacts(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := arbitration.UnmarshalResponse(responseArtifact.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,21 +384,31 @@ func TestGoldenWireBytes007(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawResponse, err := MarshalArbitrationResponse(response)
+	rawResponse, err := arbitration.MarshalResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsigned := prepared.UnsignedPayment()
+	// 新 API 不再暴露 prepared 的可变 candidate：测试按生产路径从 Claim
+	// primitives 独立重建同一 unsigned candidate（金额来自已签回执）。
+	authorization, err := content.DecodePaymentAuthorization(claim.PaymentAuthorizationCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned, err := pool.BuildArbitrationPaymentFromClaim(claim.PoolOutputSatoshis, claim.PoolOutputLockingScript, claim.RefundTemplateRaw, authorization.PaymentSequence, authorization.SellerAmountAfterSatoshis, receipt.ArbiterAmountSatoshis)
+	if err != nil {
+		t.Fatal(err)
+	}
 	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(claim.PoolOutputLockingScript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sellerKey := mustGoldenKey(t, "22")
-	sellerSignature, err := engine.SignArbitrationSellerPayment(nil, unsigned, sellerKey)
+	_ = sellerKey
+	sellerSignature, err := engine.SignArbitrationSellerPayment(context.Background(), unsigned, mustGoldenSigner(t, "22"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterSignature, err := engine.SignArbitrationArbiterPayment(nil, unsigned, mustGoldenKey(t, "33"))
+	arbiterSignature, err := engine.SignArbitrationArbiterPayment(context.Background(), unsigned, mustGoldenSigner(t, "33"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,16 +487,21 @@ func TestGoldenWireBytes008(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const arbitrationFeeSatoshis = uint64(500)
-	prepared, err := arbiter.PreparePayment(nil, request, 900000, arbitrationFeeSatoshis)
+	requestKind8Raw, err := arbitration.MarshalRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := arbiter.SignPreparedPayment(nil, prepared); err != nil {
+	const arbitrationFeeSatoshis = uint64(500)
+	prepared, err := arbiter.PrepareArbitration(mustGoldenFacts(), requestKind8Raw, protocol.Satoshis(arbitrationFeeSatoshis))
+	if err != nil {
 		t.Fatal(err)
 	}
-	nonce := bytes.Repeat([]byte{0xa7}, 32)
-	retrievalRequest, err := arbitration.NewContentRetrievalRequest(claimID, nonce, mustGoldenKey(t, "55"))
+	if _, err := arbiter.SignPreparedArbitration(context.Background(), mustGoldenFacts(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	var nonce protocol.RetrievalNonce
+	copy(nonce[:], bytes.Repeat([]byte{0xa7}, 32))
+	retrievalRequest, err := arbitration.NewContentRetrievalRequest(context.Background(), claimID, nonce, mustGoldenSigner(t, "55"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,26 +510,29 @@ func TestGoldenWireBytes008(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestIDHash := sha256.Sum256(retrievalRequest.ContentRetrievalRequestCBOR)
-	unavailable, err := arbitration.BuildContentRetrievalUnavailable(protocol.ContentRetrievalRequestID(requestIDHash), arbitration.RetrievalSellerArbitrationNotReady, mustGoldenKey(t, "33"))
+	unavailable, err := arbitration.BuildContentRetrievalUnavailable(context.Background(), protocol.ContentRetrievalRequestID(requestIDHash), arbitration.RetrievalSellerArbitrationNotReady, mustGoldenSigner(t, "33"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawUnavailable, err := MarshalContentRetrievalResponse(unavailable)
+	unavailableArtifact, err := wire.EncodeContentRetrievalResponse(unavailable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	available, err := arbitration.BuildContentRetrievalAvailableRaw(protocol.ContentRetrievalRequestID(requestIDHash), request.ContentPayloadsCBOR, mustGoldenKey(t, "33"))
+	rawUnavailable := unavailableArtifact.Bytes()
+	available, err := arbitration.BuildContentRetrievalAvailableRaw(context.Background(), protocol.ContentRetrievalRequestID(requestIDHash), request.ContentPayloadsCBOR, mustGoldenSigner(t, "33"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawAvailable, err := MarshalContentRetrievalResponse(available)
+	availableArtifact, err := wire.EncodeContentRetrievalResponse(available)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawRequest, err := MarshalContentRetrievalRequest(retrievalRequest)
+	rawAvailable := availableArtifact.Bytes()
+	retrieval10Artifact, err := wire.EncodeContentRetrievalRequest(retrievalRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rawRequest := retrieval10Artifact.Bytes()
 	want := map[string]string{
 		"claimID":     "e5ef723ee56fd177e13447af4775046946954890b054795fb3555623022fd5ba",
 		"requestDoc":  "825820e5ef723ee56fd177e13447af4775046946954890b054795fb3555623022fd5ba5820a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
@@ -501,21 +567,33 @@ func TestGoldenWireBytes008(t *testing.T) {
 	if pending {
 		t.Skip("golden 008 fixtures not frozen yet; see log output")
 	}
-	decodedRequest, err := UnmarshalContentRetrievalRequest(rawRequest)
+	parsed10, err := wire.ParseAs(wire.ContentRetrievalRequest, rawRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedRequest, err := wire.DecodeContentRetrievalRequest(parsed10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(decodedRequest.ContentRetrievalRequestCBOR, retrievalRequest.ContentRetrievalRequestCBOR) || !bytes.Equal(decodedRequest.BuyerContentRetrievalRequestSignature, retrievalRequest.BuyerContentRetrievalRequestSignature) {
 		t.Fatal("Kind 10 round trip changed fields")
 	}
-	decodedUnavailable, err := UnmarshalContentRetrievalResponse(rawUnavailable)
+	parsedUnavailable, err := wire.ParseAs(wire.ContentRetrievalResponse, rawUnavailable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedUnavailable, err := wire.DecodeContentRetrievalResponse(parsedUnavailable)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decodedUnavailable.ContentPayloadsCBOR != nil {
 		t.Fatal("unavailable branch carried an attachment")
 	}
-	decodedAvailable, err := UnmarshalContentRetrievalResponse(rawAvailable)
+	parsedAvailable, err := wire.ParseAs(wire.ContentRetrievalResponse, rawAvailable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedAvailable, err := wire.DecodeContentRetrievalResponse(parsedAvailable)
 	if err != nil {
 		t.Fatal(err)
 	}

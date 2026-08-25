@@ -2,10 +2,10 @@ package pool
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv8/go-bitfs/protocol"
 )
 
 // DeriveRefundTemplateTxID returns the stable pool correlation ID: the
@@ -14,9 +14,9 @@ import (
 // transaction parser; applications do not supply a calculator. The merged,
 // broadcastable refund transaction has a different on-chain txid; that final
 // txid is a submission result and never replaces RefundTemplateTxID.
-func DeriveRefundTemplateTxID(_ context.Context, proof *OpeningProof) (RefundTemplateTxID, error) {
+func DeriveRefundTemplateTxID(proof *OpeningProof) (RefundTemplateTxID, error) {
 	if proof == nil {
-		return RefundTemplateTxID{}, fmt.Errorf("%w: opening proof is required", ErrInvalidEvidence)
+		return RefundTemplateTxID{}, invalid("opening proof is required")
 	}
 	if err := ValidateOpeningProof(proof); err != nil {
 		return RefundTemplateTxID{}, err
@@ -31,8 +31,8 @@ func DeriveRefundTemplateTxID(_ context.Context, proof *OpeningProof) (RefundTem
 		if err != nil {
 			return RefundTemplateTxID{}, err
 		}
-		if err := engine.VerifyFundingTx(nil, proof.FundingTransactionRaw, proof); err != nil {
-			return RefundTemplateTxID{}, fmt.Errorf("%w: funding transaction does not pin the template fee: %v", ErrInvalidEvidence, err)
+		if err := engine.VerifyFundingTx(proof.FundingTransactionRaw, proof); err != nil {
+			return RefundTemplateTxID{}, protocol.Wrap(fmt.Errorf("funding transaction does not pin the template fee: %v", err), "pool.DeriveRefundTemplateTxID", protocol.CodeInvalidEvidence, 0, "funding_transaction_raw")
 		}
 	}
 	return refundTemplateTxIDFromBytes(proof.RefundTemplateRaw)
@@ -45,7 +45,7 @@ func DeriveRefundTemplateTxID(_ context.Context, proof *OpeningProof) (RefundTem
 // the same RefundTemplateRaw.
 func DeriveRefundTemplateTxIDFromRequest(request *RefundPresignRequest) (RefundTemplateTxID, error) {
 	if request == nil {
-		return RefundTemplateTxID{}, fmt.Errorf("%w: refund presign request is required", ErrInvalidEvidence)
+		return RefundTemplateTxID{}, invalid("refund presign request is required")
 	}
 	if err := ValidateRefundPresignRequest(request); err != nil {
 		return RefundTemplateTxID{}, err
@@ -80,7 +80,7 @@ func validateRefundTemplate(refundTx []byte, buyerPubKey, sellerPubKey, arbiterP
 // the fixed SDK TxID bytes without reversing their display order.
 func refundTemplateTxIDFromBytes(refundTx []byte) (RefundTemplateTxID, error) {
 	if len(refundTx) == 0 {
-		return RefundTemplateTxID{}, fmt.Errorf("%w: refund transaction is required", ErrInvalidEvidence)
+		return RefundTemplateTxID{}, invalid("refund transaction is required")
 	}
 	value, err := parseCanonicalTransaction(refundTx)
 	if err != nil {
@@ -88,7 +88,7 @@ func refundTemplateTxIDFromBytes(refundTx []byte) (RefundTemplateTxID, error) {
 	}
 	computed := RefundTemplateTxID(value.TxID().CloneBytes())
 	if computed == (RefundTemplateTxID{}) {
-		return RefundTemplateTxID{}, fmt.Errorf("%w: refund template transaction ID is zero", ErrInvalidEvidence)
+		return RefundTemplateTxID{}, invalid("refund template transaction ID is zero")
 	}
 	return computed, nil
 }
@@ -155,7 +155,7 @@ func parseCanonicalTransaction(raw []byte) (*tx.Transaction, error) {
 		return nil, err
 	}
 	if !bytes.Equal(value.Bytes(), raw) {
-		return nil, fmt.Errorf("%w: transaction encoding is not canonical", ErrInvalidEvidence)
+		return nil, protocol.Errorf("pool.parseCanonicalTransaction", protocol.CodeNonCanonical, 0, "raw_tx", "transaction encoding is not canonical")
 	}
 	return value, nil
 }

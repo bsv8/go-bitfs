@@ -93,21 +93,28 @@ amount.
 ## Go API
 
 ```go
-arbiterCBOR, err := bitfs.EncodeSupportedArbiterPublicKeys(arbiterPublicKeys)
-terms := &bitfs.FileQuoteTerms{
+// 直接私钥必须经唯一的 local signer 适配器进入；HSM/KMS 实现同一 Signer 接口。
+sellerSigner, err := protocol.NewPrivateKeySigner(sellerPrivateKey)
+arbiters := [][]byte{arbiterPublicKey}
+supportedCBOR, err := content.EncodeSupportedArbiterPublicKeys(arbiters)
+terms := &content.FileQuoteTerms{
     SeedHash:                       seedHash,
     BuyerPublicKey:                 buyerPublicKey,
     SeedPriceSatoshis:              10,
     FullBlockPriceSatoshis:         100,
     FileSizeBytes:                  fileSizeBytes,
     QuoteExpiresAtUnixSeconds:      expiresAtUnixSeconds,
-    SupportedArbiterPublicKeysCBOR: arbiterCBOR,
+    SupportedArbiterPublicKeysCBOR: supportedCBOR,
+    RecommendedFilename:            "download.bin", // sanitize 后的唯一文件名来源
 }
-quote, err := bitfs.NewSignedFileQuote(terms, sellerPrivateKey, "download.bin")
-verifiedTerms, err := bitfs.VerifyFileQuoteEvidence(quote)
-quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
+signedQuote, err := content.NewSignedFileQuote(ctx, terms, sellerSigner)
+outboundKind1, err := wire.EncodeFileQuote(signedQuote) // exact bytes：先持久化再发送
+terms, err := content.VerifyFileQuoteEvidence(signedQuote)
+quoteID, err := content.FileQuoteTermsID(signedQuote.FileQuoteTermsCBOR)
 ```
 
-The workflow holds only the official BSV private key; signing and verification
-go through the fixed `SignWireDocument(1, 1, ...)` helper, so callers supply
-no signing domain, verifier callback, or curve implementation.
+Signing capability enters only through the constrained `protocol.Signer`
+port; signing and verification go through the fixed `SignWireDocument`
+helpers, so callers supply no signing domain, verifier callback, or curve
+implementation. Time-sensitive checks take the caller's explicit facts
+(`protocol.Facts`); the SDK never reads a clock.

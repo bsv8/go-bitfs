@@ -1,4 +1,4 @@
-package bitfs
+package content
 
 // CloneSignedFileQuote returns an independent copy for API and storage
 // boundaries.

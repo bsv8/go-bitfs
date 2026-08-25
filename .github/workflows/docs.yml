@@ -42,9 +42,16 @@ jobs:
             echo "$files"
             exit 1
           fi
+          go vet ./...
           go test ./...
 
-      - name: Run offline protocol demos (03–08)
+      - name: Race detector over the SDK test suite
+        run: go test -race ./... -count=1
+
+      # Demo 01（报价生成）与 Demo 02 的空状态离线冒烟：0201→0205 五个命令
+      # 以 DEMO_02_OFFLINE=1 从零状态完整跑通开池链，不访问任何网络。真实
+      # JungleBus 资金路径仍由带 UTXO 的手工演示覆盖。
+      - name: Run offline protocol demos (01, 02 offline smoke, 03–08)
         run: |
           set -euo pipefail
           cp demo/.env.example demo/.env
@@ -54,10 +61,17 @@ jobs:
           export SELLER_PRIVATE_KEY_HEX="1111111111111111111111111111111111111111111111111111111111111111"
           export BUYER_PRIVATE_KEY_HEX="2222222222222222222222222222222222222222222222222222222222222222"
           export ARBITER_PRIVATE_KEY_HEX="3333333333333333333333333333333333333333333333333333333333333333"
+          export DEMO_02_OFFLINE=1
           # demo/file.bin is a tracked fixture; never overwrite it in CI. Point
           # FILE_PATH at a generated file under $RUNNER_TEMP instead.
           export FILE_PATH="$RUNNER_TEMP/bitfs-demo-file.bin"
           head -c $((10*1024*1024)) /dev/urandom > "$FILE_PATH"
+          echo "::group::go run ./demo/01_quote/01_build_quote"
+          go run ./demo/01_quote/01_build_quote >/dev/null
+          echo "::endgroup::"
+          echo "::group::demo 02 offline smoke (0201→0205)"
+          go test ./integration/ -run TestDemo02OfflineEmptyStateSmoke -count=1 -v
+          echo "::endgroup::"
           for step in 03_content_request 04_content_delivery 05_cumulative_payment 06_pool_close 07_arbitration 08_arbitration_content_retrieval; do
             echo "::group::go run ./demo/${step}/..."
             go run ./demo/${step}/...
@@ -67,17 +81,7 @@ jobs:
       - name: Reject retired protocol wording in current documents
         run: |
           set -euo pipefail
-          hits=$(grep -RInE 'spec/v4|\[4,|BitFS v4' \
-            --include='*.md' --include='*.mdx' --include='*.js' --include='*.json' \
-            --exclude-dir=legacy --exclude-dir=build --exclude-dir=node_modules \
-            --exclude-dir=vendor --exclude-dir=.git --exclude-dir=.docusaurus \
-            --exclude='package-lock.json' \
-            . | grep -v '/施工单/' || true)
-          if [ -n "$hits" ]; then
-            echo "Retired protocol wording found in current documents:"
-            echo "$hits"
-            exit 1
-          fi
+          go test ./docs/ -run TestCurrentDocumentsExcludeRetiredProtocol,TestExportedStructFieldsHaveChineseDocs -count=1
 
       - name: Build source-driven documentation
         run: npm run build

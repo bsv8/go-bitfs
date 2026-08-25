@@ -13,7 +13,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
@@ -21,7 +20,6 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 	mp "github.com/bsv8/MultisigPool/v4/pkg"
 	libs "github.com/bsv8/MultisigPool/v4/pkg/libs"
-	"github.com/bsv8/go-bitfs/internal/refundlock"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
@@ -30,16 +28,14 @@ const (
 	maxArbitrationCandidateBytes      = 64 * 1024
 )
 
-// CheckArbitrationRefundNotExpired applies the local nLockTime forward gate
-// to the refund template. It proves only that the template is not yet mature
-// under the caller-provided block height/UTC clock; it does not prove that the
-// source output exists, is confirmed, or remains unspent.
-func CheckArbitrationRefundNotExpired(refundTemplateRaw []byte, blockHeight uint32) error {
+// RefundTemplateLockTime 从退款模板原文提取强类型 nLockTime；模板字节必须
+// 是 canonical 交易编码。
+func RefundTemplateLockTime(refundTemplateRaw []byte) (protocol.RefundLockTime, error) {
 	refund, err := parseCanonicalTransaction(refundTemplateRaw)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return refundlock.CheckNotExpired(refund.LockTime, time.Now().UTC(), blockHeight)
+	return protocol.RefundLockTime(refund.LockTime), nil
 }
 
 // ParseArbitratedPoolLockingScript accepts only the canonical
@@ -56,7 +52,7 @@ func ParseArbitratedPoolLockingScript(raw []byte) (MultisigPoolPublicKeys, error
 	for index, keyBytes := range keys {
 		key, err := protocol.ParseCompressedPubKey(keyBytes)
 		if err != nil {
-			return result, fmt.Errorf("%w: pool role key #%d: %v", ErrInvalidEvidence, index+1, err)
+			return result, protocol.Wrap(fmt.Errorf("pool role key #%d: %v", index+1, err), "pool.ParseArbitratedPoolLockingScript", protocol.CodeInvalidEvidence, 0, "pool_output_locking_script")
 		}
 		parsed[index] = key
 	}
@@ -167,7 +163,7 @@ func validateArbitrationClaimContext(poolOutputSatoshis uint64, poolOutputLockin
 	refundFeeSatoshis := poolOutputSatoshis - refundOutputs
 	spendableSatoshis := poolOutputSatoshis - refundFeeSatoshis
 	if sellerAmountAfterSatoshis > spendableSatoshis {
-		return ErrInsufficientBalance
+		return insufficientBalance()
 	}
 	return nil
 }
@@ -195,7 +191,7 @@ func BuildArbitrationPaymentFromClaim(poolOutputSatoshis uint64, poolOutputLocki
 		return nil, invalid("arbitration payment requires a positive arbiter amount")
 	}
 	if arbiterAmountSatoshis > remainingAfterSellerSatoshis {
-		return nil, ErrInsufficientBalance
+		return nil, insufficientBalance()
 	}
 	buyerAmountSatoshis := remainingAfterSellerSatoshis - arbiterAmountSatoshis
 
@@ -354,24 +350,24 @@ func isZeroBytes(value []byte) bool {
 	return true
 }
 
-func (engine *MultisigPoolEngine) signArbitrationPayment(unsigned *UnsignedPayment, key *ec.PrivateKey, role string) ([]byte, error) {
+func (engine *MultisigPoolEngine) signArbitrationPayment(ctx context.Context, unsigned *UnsignedPayment, signer protocol.Signer, role string) ([]byte, error) {
 	state, err := engine.validateArbitrationUnsignedPayment(unsigned)
 	if err != nil {
 		return nil, err
 	}
-	return engine.signWithKey(state, unsigned.PoolOutputSatoshis, key, role)
+	return engine.signDigest(ctx, signer, state, unsigned.PoolOutputSatoshis, role)
 }
 
 // SignArbitrationSellerPayment signs an independently rebuilt arbitration
-// candidate with the Seller role key.
-func (engine *MultisigPoolEngine) SignArbitrationSellerPayment(_ context.Context, unsigned *UnsignedPayment, key *ec.PrivateKey) ([]byte, error) {
-	return engine.signArbitrationPayment(unsigned, key, "seller")
+// candidate with the Seller role constrained Signer.
+func (engine *MultisigPoolEngine) SignArbitrationSellerPayment(ctx context.Context, unsigned *UnsignedPayment, signer protocol.Signer) ([]byte, error) {
+	return engine.signArbitrationPayment(ctx, unsigned, signer, "seller")
 }
 
 // SignArbitrationArbiterPayment signs an independently rebuilt arbitration
-// candidate with the Arbiter role key.
-func (engine *MultisigPoolEngine) SignArbitrationArbiterPayment(_ context.Context, unsigned *UnsignedPayment, key *ec.PrivateKey) ([]byte, error) {
-	return engine.signArbitrationPayment(unsigned, key, "arbiter")
+// candidate with the Arbiter role constrained Signer.
+func (engine *MultisigPoolEngine) SignArbitrationArbiterPayment(ctx context.Context, unsigned *UnsignedPayment, signer protocol.Signer) ([]byte, error) {
+	return engine.signArbitrationPayment(ctx, unsigned, signer, "arbiter")
 }
 
 // VerifyArbitrationSellerPayment verifies a Seller transaction signature over
@@ -433,4 +429,20 @@ func (engine *MultisigPoolEngine) MergeArbitratedPoolSellerArbiterSignatures(uns
 		return nil, err
 	}
 	return engine.signedFromTx(merged, unsigned, nil, sellerSignature, arbiterSignature), nil
+}
+
+// CheckArbitrationRefundNotExpired applies the local nLockTime forward gate to
+// the refund template using the caller's explicit facts: 只读取锁定类型对应的
+// 那一份事实。It proves only that the template is not yet mature; it does not
+// prove that the source output exists, is confirmed, or remains unspent.
+func CheckArbitrationRefundNotExpired(refundTemplateRaw []byte, facts protocol.Facts) error {
+	const op = "pool.CheckArbitrationRefundNotExpired"
+	lockTime, err := RefundTemplateLockTime(refundTemplateRaw)
+	if err != nil {
+		return err
+	}
+	if err := facts.CheckRefundNotExpired(lockTime); err != nil {
+		return protocol.Wrap(err, op, protocol.CodeExpired, 8, "refund_locktime")
+	}
+	return nil
 }

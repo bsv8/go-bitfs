@@ -17,7 +17,6 @@ import (
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 	mp "github.com/bsv8/MultisigPool/v4/pkg"
-	"github.com/bsv8/go-bitfs/internal/protoclock"
 	"github.com/bsv8/go-bitfs/internal/refundlock"
 	"github.com/bsv8/go-bitfs/protocol"
 )
@@ -63,44 +62,44 @@ type MultisigPoolEngine struct {
 }
 
 // BuyerPoolAdapter adapts the pool engine to buyer workflow operations.
-// Key is the caller-parsed official BSV private key; it never enters any wire
-// message, local result, log, or persisted structure.
+// Signer is the caller-supplied constrained signing capability; SDK 固定构造
+// sighash digest，Signer 只执行密钥操作，私钥绝不进入任何 wire 报文、本地结果、日志或持久化结构。
 type BuyerPoolAdapter struct {
 	*MultisigPoolEngine
-	// Key 是调用方解析好的买方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
-	Key *ec.PrivateKey
+	// Signer 是买方受约束签名能力（软件私钥适配器或 HSM/KMS 远程服务）。
+	Signer protocol.Signer
 }
 
 // SellerPoolAdapter adapts the pool engine to seller workflow operations.
 type SellerPoolAdapter struct {
 	*MultisigPoolEngine
-	// Key 是调用方解析好的卖方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
-	Key *ec.PrivateKey
+	// Signer 是卖方受约束签名能力。
+	Signer protocol.Signer
 }
 
 // ArbiterPoolAdapter adapts the pool engine to arbiter workflow operations.
 type ArbiterPoolAdapter struct {
 	*MultisigPoolEngine
-	// Key 是调用方解析好的仲裁方官方 BSV 私钥；绝不进入任何 wire 报文、本地结果、日志或持久化结构。
-	Key *ec.PrivateKey
+	// Signer 是仲裁方受约束签名能力。
+	Signer protocol.Signer
 }
 
-// NewBuyerPoolAdapter binds an engine to the buyer private key used for
+// NewBuyerPoolAdapter binds an engine to the buyer signer used for
 // detached payment and refund signatures. It performs no signing at construction.
-func NewBuyerPoolAdapter(engine *MultisigPoolEngine, key *ec.PrivateKey) *BuyerPoolAdapter {
-	return &BuyerPoolAdapter{MultisigPoolEngine: engine, Key: key}
+func NewBuyerPoolAdapter(engine *MultisigPoolEngine, signer protocol.Signer) *BuyerPoolAdapter {
+	return &BuyerPoolAdapter{MultisigPoolEngine: engine, Signer: signer}
 }
 
-// NewSellerPoolAdapter binds an engine to the seller private key used
+// NewSellerPoolAdapter binds an engine to the seller signer used
 // for detached payment, refund, and arbitration-candidate signatures.
-func NewSellerPoolAdapter(engine *MultisigPoolEngine, key *ec.PrivateKey) *SellerPoolAdapter {
-	return &SellerPoolAdapter{MultisigPoolEngine: engine, Key: key}
+func NewSellerPoolAdapter(engine *MultisigPoolEngine, signer protocol.Signer) *SellerPoolAdapter {
+	return &SellerPoolAdapter{MultisigPoolEngine: engine, Signer: signer}
 }
 
-// NewArbiterPoolAdapter binds an engine to the arbiter private key used
+// NewArbiterPoolAdapter binds an engine to the arbiter signer used
 // to sign the candidate state selected by the 007 workflow.
-func NewArbiterPoolAdapter(engine *MultisigPoolEngine, key *ec.PrivateKey) *ArbiterPoolAdapter {
-	return &ArbiterPoolAdapter{MultisigPoolEngine: engine, Key: key}
+func NewArbiterPoolAdapter(engine *MultisigPoolEngine, signer protocol.Signer) *ArbiterPoolAdapter {
+	return &ArbiterPoolAdapter{MultisigPoolEngine: engine, Signer: signer}
 }
 
 // NewMultisigPoolEngine parses and validates three distinct role keys, preserving
@@ -156,8 +155,8 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 		return nil, invalid("buyer signer is required")
 	}
 	engine := adapter.MultisigPoolEngine
-	if engine == nil || adapter.Key == nil {
-		return nil, invalid("buyer signer is required")
+	if engine == nil || adapter.Signer == nil {
+		return nil, protocol.Errorf("pool.BuildRefundPresignRequest", protocol.CodeSignerUnavailable, 0, "signer", "buyer signer is required")
 	}
 	if input.ExpiryLockTime == 0 {
 		return nil, invalid("refund expiry locktime is required")
@@ -187,7 +186,7 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 	if err := requireUnsigned(state); err != nil {
 		return nil, err
 	}
-	sig, err := engine.signWithKey(state, output.Satoshis, adapter.Key, "buyer")
+	sig, err := engine.signDigest(ctx, adapter.Signer, state, output.Satoshis, "buyer")
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +251,7 @@ func (engine *MultisigPoolEngine) deriveRefundPresignTerms(request *RefundPresig
 // VerifySellerRefundSignature validates the 002 presigned refund state named by
 // request, including its funding outpoint, role keys, buyer signature, and the
 // supplied seller detached signature. It does not submit either transaction.
-func (engine *MultisigPoolEngine) VerifySellerRefundSignature(_ context.Context, request *RefundPresignRequest, signature []byte) error {
+func (engine *MultisigPoolEngine) VerifySellerRefundSignature(request *RefundPresignRequest, signature []byte) error {
 	terms, err := engine.validateRefundPresignRequestAndBuyer(request)
 	if err != nil {
 		return err
@@ -292,15 +291,15 @@ func (engine *MultisigPoolEngine) validateRefundPresignRequestAndBuyer(request *
 // SignSellerRefund produces the seller's detached signature over the
 // presigned refund transaction described by request.
 func (adapter *SellerPoolAdapter) SignSellerRefund(ctx context.Context, request *RefundPresignRequest) ([]byte, error) {
-	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Key == nil {
-		return nil, invalid("seller signer is required")
+	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Signer == nil {
+		return nil, protocol.Errorf("pool.SignSellerRefund", protocol.CodeSignerUnavailable, 0, "signer", "seller signer is required")
 	}
 	engine := adapter.MultisigPoolEngine
 	terms, err := engine.validateRefundPresignRequestAndBuyer(request)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := engine.signWithKey(terms.state, terms.poolOutputSatoshis, adapter.Key, "seller")
+	sig, err := engine.signDigest(ctx, adapter.Signer, terms.state, terms.poolOutputSatoshis, "seller")
 	if err != nil {
 		return nil, err
 	}
@@ -310,8 +309,8 @@ func (adapter *SellerPoolAdapter) SignSellerRefund(ctx context.Context, request 
 // BuildOpeningProof retains only the original opening evidence. fundingTx may
 // be nil while the seller stores the presigned pending proof; all transaction
 // identities and pool-output terms are derived when the proof is consumed.
-func (engine *MultisigPoolEngine) BuildOpeningProof(ctx context.Context, request *RefundPresignRequest, sellerSignature, fundingTx []byte) (*OpeningProof, error) {
-	if err := engine.VerifySellerRefundSignature(ctx, request, sellerSignature); err != nil {
+func (engine *MultisigPoolEngine) BuildOpeningProof(request *RefundPresignRequest, sellerSignature, fundingTx []byte) (*OpeningProof, error) {
+	if err := engine.VerifySellerRefundSignature(request, sellerSignature); err != nil {
 		return nil, err
 	}
 	proof := &OpeningProof{
@@ -442,40 +441,11 @@ func (engine *MultisigPoolEngine) VerifyOpening(proof *OpeningProof) error {
 	return nil
 }
 
-// VerifyRefundExpired checks whether the refund transaction's nLockTime has been reached.
-// For block-height refunds it compares against the caller-provided blockHeight;
-// for timestamp refunds it reads system UTC exactly once at entry. There is no
-// public variant taking a time: the SDK owns the clock read, callers provide
-// only the block height they trust.
-func (engine *MultisigPoolEngine) VerifyRefundExpired(proof *OpeningProof, blockHeight uint32) error {
-	return engine.refundExpired(proof, protoclock.Now(), blockHeight)
-}
-
-// VerifyRefundNotExpired is the forward-operation gate. It is deliberately
-// separate from VerifyRefundExpired so content and payment workflows cannot
-// accidentally continue after the refund path has become executable. Like
-// VerifyRefundExpired it reads system UTC exactly once and never queries a node.
-func (engine *MultisigPoolEngine) VerifyRefundNotExpired(proof *OpeningProof, blockHeight uint32) error {
-	return engine.checkRefundNotExpired(proof, protoclock.Now(), blockHeight)
-}
-
-// checkRefundNotExpired 是包内未导出的显式时间 helper：公开入口读取一次
-// UTC 后委托到这里，不在校验点重复读钟。
-func (engine *MultisigPoolEngine) checkRefundNotExpired(proof *OpeningProof, at time.Time, blockHeight uint32) error {
-	if err := engine.VerifyOpening(proof); err != nil {
-		return err
-	}
-	if err := engine.refundExpired(proof, at, blockHeight); err == nil {
-		return invalid("pool refund has expired")
-	} else if !errors.Is(err, ErrNotExpired) {
-		return err
-	}
-	return nil
-}
-
-// verifyRefundExpiredAt is the package-private pure helper taking an explicit
-// now; public entries read UTC once and delegate here.
-func (engine *MultisigPoolEngine) refundExpired(proof *OpeningProof, at time.Time, blockHeight uint32) error {
+// VerifyRefundExpiredAt checks whether the refund transaction's nLockTime has
+// been reached at the caller-supplied explicit facts: timestamp locks compare
+// against at，height locks compare against blockHeight。SDK 不读取系统时钟，
+// 也不查询节点。
+func (engine *MultisigPoolEngine) VerifyRefundExpiredAt(proof *OpeningProof, at time.Time, blockHeight uint32) error {
 	if err := engine.VerifyOpening(proof); err != nil {
 		return err
 	}
@@ -483,7 +453,31 @@ func (engine *MultisigPoolEngine) refundExpired(proof *OpeningProof, at time.Tim
 	if err != nil {
 		return err
 	}
-	return refundlock.CheckExpired(refund.LockTime, at, blockHeight)
+	err = refundlock.CheckExpired(refund.LockTime, at, blockHeight)
+	if errors.Is(err, refundlock.ErrNotMatured) {
+		return protocol.Errorf("pool.VerifyRefundExpiredAt", protocol.CodeNotMatured, 0, "refund_locktime", "refund locktime not reached")
+	}
+	return err
+}
+
+// VerifyRefundNotExpiredAt is the forward-operation gate. It is deliberately
+// separate from VerifyRefundExpiredAt so content and payment workflows cannot
+// accidentally continue after the refund path has become executable.
+func (engine *MultisigPoolEngine) VerifyRefundNotExpiredAt(proof *OpeningProof, at time.Time, blockHeight uint32) error {
+	if err := engine.VerifyOpening(proof); err != nil {
+		return err
+	}
+	refund, err := parseCanonicalTransaction(proof.RefundTemplateRaw)
+	if err != nil {
+		return err
+	}
+	if err := refundlock.CheckExpired(refund.LockTime, at, blockHeight); err == nil {
+		return protocol.Errorf("pool.VerifyRefundNotExpiredAt", protocol.CodeExpired, 0, "refund_locktime", "pool refund has expired")
+	} else if errors.Is(err, refundlock.ErrNotMatured) {
+		return nil
+	} else {
+		return err
+	}
 }
 
 // BuildRefundSubmission merges the buyer and seller refund signatures from the opening proof into a broadcast-ready transaction.
@@ -510,7 +504,7 @@ func (engine *MultisigPoolEngine) BuildRefundSubmission(proof *OpeningProof) ([]
 // VerifyFundingTx parses the delivered 002 funding transaction and matches its txid, pool
 // output index, satoshis, and role-ordered MultisigPool v4 locking script to
 // proof. It is an evidence check only and does not submit the transaction.
-func (engine *MultisigPoolEngine) VerifyFundingTx(_ context.Context, rawTx []byte, proof *OpeningProof) error {
+func (engine *MultisigPoolEngine) VerifyFundingTx(rawTx []byte, proof *OpeningProof) error {
 	if proof == nil {
 		return invalid("funding transaction and opening proof are required")
 	}
@@ -546,7 +540,7 @@ func (engine *MultisigPoolEngine) VerifyPoolParticipants(proof *OpeningProof, bu
 
 // ParsePaymentState parses a fully signed pool transaction into a PaymentState.
 // Returns an error if the transaction has an empty unlocking script.
-func (engine *MultisigPoolEngine) ParsePaymentState(_ context.Context, rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
+func (engine *MultisigPoolEngine) ParsePaymentState(rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
 	state, err := engine.parseUnsignedOrSignedState(rawTx, proof)
 	if err != nil {
 		return nil, err
@@ -563,8 +557,8 @@ func (engine *MultisigPoolEngine) ParsePaymentState(_ context.Context, rawTx []b
 
 // ParseNonFinalPaymentState parses a fully signed pool transaction and rejects
 // the reserved final-close sequence before any backend can receive it.
-func (engine *MultisigPoolEngine) ParseNonFinalPaymentState(ctx context.Context, rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
-	state, err := engine.ParsePaymentState(ctx, rawTx, proof)
+func (engine *MultisigPoolEngine) ParseNonFinalPaymentState(rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
+	state, err := engine.ParsePaymentState(rawTx, proof)
 	if err != nil {
 		return nil, err
 	}
@@ -575,7 +569,7 @@ func (engine *MultisigPoolEngine) ParseNonFinalPaymentState(ctx context.Context,
 }
 
 // ParseUnsignedPayment validates and parses an unsigned pool transaction against the opening proof's canonical state.
-func (engine *MultisigPoolEngine) ParseUnsignedPayment(_ context.Context, rawTx []byte, proof *OpeningProof) (*UnsignedPayment, error) {
+func (engine *MultisigPoolEngine) ParseUnsignedPayment(rawTx []byte, proof *OpeningProof) (*UnsignedPayment, error) {
 	if engine == nil {
 		return nil, invalid("MultisigPool engine is required")
 	}
@@ -595,13 +589,13 @@ func (engine *MultisigPoolEngine) ParseUnsignedPayment(_ context.Context, rawTx 
 
 // ParseFinalPaymentState parses a fully signed pool transaction and verifies it is the final settlement
 // (sequence == finalPoolSequence).
-func (engine *MultisigPoolEngine) ParseFinalPaymentState(ctx context.Context, rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
-	state, err := engine.ParsePaymentState(ctx, rawTx, proof)
+func (engine *MultisigPoolEngine) ParseFinalPaymentState(rawTx []byte, proof *OpeningProof) (*PaymentState, error) {
+	state, err := engine.ParsePaymentState(rawTx, proof)
 	if err != nil {
 		return nil, err
 	}
 	if state.PaymentSequence != finalPoolSequence {
-		return nil, ErrInvalidEvidence
+		return nil, invalid("payment state is not the final settlement")
 	}
 	if err := engine.VerifyFinalPayment(state, proof); err != nil {
 		return nil, err
@@ -687,19 +681,19 @@ func compareUnsignedState(actual, expected *tx.Transaction) error {
 // CheckPaymentCapacity performs only deterministic arithmetic checks on a
 // caller-supplied update. BuildPaymentUpdate first performs the complete
 // proof-bound opening and previous-state verification, then calls this helper.
-func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input PaymentUpdateInput) error {
+func (engine *MultisigPoolEngine) CheckPaymentCapacity(input PaymentUpdateInput) error {
 	if input.Opening == nil || input.Previous == nil {
-		return ErrInsufficientBalance
+		return insufficientBalance()
 	}
 	details, err := engine.deriveOpeningDetails(input.Opening)
 	if err != nil {
 		return err
 	}
 	if input.SellerAmountAfterSatoshis < input.Previous.SellerAmountSatoshis || input.SellerAmountAfterSatoshis > details.PoolOutputSatoshis {
-		return ErrInsufficientBalance
+		return insufficientBalance()
 	}
 	if input.PaymentSequence <= input.Previous.PaymentSequence || input.PaymentSequence == finalPoolSequence {
-		return ErrStalePaymentSequence
+		return staleSequence("payment sequence does not extend current state")
 	}
 	return nil
 }
@@ -714,7 +708,7 @@ func (engine *MultisigPoolEngine) CheckPaymentCapacity(_ context.Context, input 
 // path uses BuildArbitrationPaymentFromClaim in arbitration.go instead: it has
 // no OpeningProof or previous state on the wire and reconstructs from the
 // signed Claim's source context.
-func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input PaymentUpdateInput) (*UnsignedPayment, error) {
+func (engine *MultisigPoolEngine) BuildPaymentUpdate(input PaymentUpdateInput) (*UnsignedPayment, error) {
 	if engine == nil || input.Opening == nil || input.Previous == nil {
 		return nil, invalid("opening proof and previous payment are required")
 	}
@@ -731,9 +725,9 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 		}
 	}
 	if input.Previous.PaymentSequence == finalPoolSequence || input.PaymentSequence != input.Previous.PaymentSequence+1 || input.PaymentSequence == finalPoolSequence {
-		return nil, ErrStalePaymentSequence
+		return nil, staleSequence("payment sequence must extend previous state by exactly one")
 	}
-	if err := engine.CheckPaymentCapacity(ctx, input); err != nil {
+	if err := engine.CheckPaymentCapacity(input); err != nil {
 		return nil, err
 	}
 	previous, err := parseCanonicalTransaction(input.Previous.RawTx)
@@ -750,14 +744,14 @@ func (engine *MultisigPoolEngine) BuildPaymentUpdate(ctx context.Context, input 
 
 // SignBuyerPayment produces the buyer's detached signature over an unsigned pool transaction.
 func (adapter *BuyerPoolAdapter) SignBuyerPayment(ctx context.Context, unsigned *UnsignedPayment, proof *OpeningProof) ([]byte, error) {
-	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Key == nil || unsigned == nil {
-		return nil, invalid("buyer signing inputs are required")
+	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Signer == nil || unsigned == nil {
+		return nil, protocol.Errorf("pool.SignBuyerPayment", protocol.CodeSignerUnavailable, 0, "signer", "buyer signing inputs are required")
 	}
 	state, err := adapter.validateUnsignedPayment(unsigned, proof)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := adapter.MultisigPoolEngine.signWithKey(state, unsigned.PoolOutputSatoshis, adapter.Key, "buyer")
+	sig, err := adapter.MultisigPoolEngine.signDigest(ctx, adapter.Signer, state, unsigned.PoolOutputSatoshis, "buyer")
 	if err != nil {
 		return nil, err
 	}
@@ -781,8 +775,8 @@ func (adapter *SellerPoolAdapter) SignImmediateClose(ctx context.Context, unsign
 
 // SignArbiterPayment produces the arbiter's detached signature over an unsigned pool transaction.
 func (adapter *ArbiterPoolAdapter) SignArbiterPayment(ctx context.Context, unsigned *UnsignedPayment, proof *OpeningProof) ([]byte, error) {
-	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Key == nil || unsigned == nil {
-		return nil, invalid("arbiter signing inputs are required")
+	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Signer == nil || unsigned == nil {
+		return nil, protocol.Errorf("pool.SignArbiterPayment", protocol.CodeSignerUnavailable, 0, "signer", "arbiter signing inputs are required")
 	}
 	if unsigned.PaymentSequence == finalPoolSequence {
 		return nil, invalid("arbiter payment cannot use final sequence")
@@ -795,7 +789,7 @@ func (adapter *ArbiterPoolAdapter) SignArbiterPayment(ctx context.Context, unsig
 	if err := requireUnsigned(state); err != nil {
 		return nil, err
 	}
-	sig, err := adapter.MultisigPoolEngine.signWithKey(state, unsigned.PoolOutputSatoshis, adapter.Key, "arbiter")
+	sig, err := adapter.MultisigPoolEngine.signDigest(ctx, adapter.Signer, state, unsigned.PoolOutputSatoshis, "arbiter")
 	if err != nil {
 		return nil, err
 	}
@@ -803,28 +797,35 @@ func (adapter *ArbiterPoolAdapter) SignArbiterPayment(ctx context.Context, unsig
 }
 
 func (adapter *SellerPoolAdapter) signSeller(ctx context.Context, unsigned *UnsignedPayment, proof *OpeningProof) ([]byte, error) {
-	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Key == nil || unsigned == nil {
-		return nil, invalid("seller signing inputs are required")
+	if adapter == nil || adapter.MultisigPoolEngine == nil || adapter.Signer == nil || unsigned == nil {
+		return nil, protocol.Errorf("pool.signSeller", protocol.CodeSignerUnavailable, 0, "signer", "seller signing inputs are required")
 	}
 	state, err := adapter.validateUnsignedPayment(unsigned, proof)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := adapter.MultisigPoolEngine.signWithKey(state, unsigned.PoolOutputSatoshis, adapter.Key, "seller")
+	sig, err := adapter.MultisigPoolEngine.signDigest(ctx, adapter.Signer, state, unsigned.PoolOutputSatoshis, "seller")
 	if err != nil {
 		return nil, err
 	}
 	return append([]byte(nil), sig...), nil
 }
 
-// signWithKey computes the canonical MultisigPool sighash with the fixed SDK
-// implementation and signs that exact digest with the official BSV private key.
-// The private key never enters a wire message, local result, log, or error text;
-// its derived public key is matched against the protocol role before signing,
-// and every generated signature is re-verified by the fixed SDK verifier.
-func (engine *MultisigPoolEngine) signWithKey(state *tx.Transaction, poolAmount uint64, key *ec.PrivateKey, role string) ([]byte, error) {
-	if engine == nil || state == nil || key == nil {
-		return nil, invalid("pool private key and transaction are required")
+// signDigest computes the canonical MultisigPool ForkID|All sighash with the
+// fixed SDK implementation and delegates only the raw secp256k1 operation to
+// the constrained Signer. SDK 拥有 preimage、digest、low-S 校验、flag 装配与
+// 固定自验；Signer 不能选择算法或 flag。Signer 公钥在签名前与协议角色比对，
+// 返回值在附加 sighash flag 前后都由固定验证器复核。
+func (engine *MultisigPoolEngine) signDigest(ctx context.Context, signer protocol.Signer, state *tx.Transaction, poolAmount uint64, role string) ([]byte, error) {
+	const op = "pool.signDigest"
+	if ctx == nil {
+		return nil, protocol.Errorf(op, protocol.CodeCanceled, 0, "ctx", "a non-nil context is required for transaction signing")
+	}
+	if engine == nil || state == nil || signer == nil {
+		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "pool signer and transaction are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, protocol.Wrap(err, op, protocol.CodeCanceled, 0, "")
 	}
 	var want *ec.PublicKey
 	switch role {
@@ -837,28 +838,40 @@ func (engine *MultisigPoolEngine) signWithKey(state *tx.Transaction, poolAmount 
 	default:
 		return nil, invalid("unsupported pool signer role")
 	}
-	got, err := parsePoolKey(key.PubKey().Compressed())
+	publicKey := signer.PublicKey()
+	got, err := parsePoolKey(publicKey[:])
 	if err != nil || !got.IsEqual(want) {
-		return nil, invalid(role + " private key does not match pool role")
+		return nil, protocol.Errorf(op, protocol.CodeUnauthorized, 0, role+"_public_key", "%s signer public key does not match pool role", role)
 	}
 	flag := sighash.Flag(sighash.ForkID | sighash.All)
-	digest, err := state.CalcInputSignatureHash(0, flag)
+	digestBytes, err := state.CalcInputSignatureHash(0, flag)
 	if err != nil {
 		return nil, err
 	}
-	signature, err := key.Sign(digest)
-	if err != nil {
-		return nil, err
+	if len(digestBytes) != sha256Size {
+		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 0, "sighash_digest", "sighash digest must be 32 bytes")
 	}
-	raw, err := signature.ToDER()
+	var digest protocol.Digest32
+	copy(digest[:], digestBytes)
+	raw, err := signer.Sign(ctx, protocol.SigningRequest{Purpose: protocol.PurposeTransaction, WireKind: 0, Digest: digest})
 	if err != nil {
-		return nil, err
+		// 取消语义优先：canceled/deadline 永远返回 canceled。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, protocol.Wrap(err, op, protocol.CodeCanceled, 0, "")
+		}
+		if !errors.Is(err, protocol.ErrSignerUnavailable) {
+			err = fmt.Errorf("%s signer failed: %v", role, err)
+		}
+		return nil, protocol.Wrap(err, op, protocol.CodeSignerUnavailable, 0, "signature")
 	}
 	if len(raw) == 0 {
-		return nil, invalid(role + " private key returned an empty signature")
+		return nil, protocol.Errorf(op, protocol.CodeInvalidSignature, 0, "signature", "%s signer returned an empty signature", role)
 	}
 	if _, err := ec.ParseDERSignature(raw); err != nil {
-		return nil, fmt.Errorf("%s signature is not valid DER: %w", role, err)
+		return nil, protocol.Wrap(fmt.Errorf("%s signature is not valid DER: %v", role, err), op, protocol.CodeInvalidSignature, 0, "signature")
+	}
+	if err := protocol.VerifyDigestSignature(publicKey, digest, raw); err != nil {
+		return nil, protocol.Wrap(fmt.Errorf("self-verify %s transaction signature: %v", role, err), op, protocol.CodeInvalidSignature, 0, "signature")
 	}
 	result := append(append([]byte(nil), raw...), byte(flag))
 	var valid bool
@@ -874,10 +887,13 @@ func (engine *MultisigPoolEngine) signWithKey(state *tx.Transaction, poolAmount 
 		return nil, err
 	}
 	if !valid {
-		return nil, invalid(role + " signer returned a signature that does not verify")
+		return nil, protocol.Errorf(op, protocol.CodeInvalidSignature, 0, "signature", "%s signer returned a signature that does not verify", role)
 	}
 	return result, nil
 }
+
+// sha256Size 是交易 sighash digest 的固定宽度。
+const sha256Size = 32
 
 func (adapter *BuyerPoolAdapter) validateUnsignedPayment(unsigned *UnsignedPayment, proof *OpeningProof) (*tx.Transaction, error) {
 	return adapter.MultisigPoolEngine.validateUnsignedPayment(unsigned, proof)
@@ -1115,7 +1131,7 @@ func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, 
 // BuildImmediateClose constructs the unsigned final close state from the
 // accepted payment and CloseInput. The buyer obtains its detached signature
 // separately through BuyerPoolAdapter before the seller adds its signature.
-func (engine *MultisigPoolEngine) BuildImmediateClose(_ context.Context, input CloseInput) (*UnsignedPayment, error) {
+func (engine *MultisigPoolEngine) BuildImmediateClose(input CloseInput) (*UnsignedPayment, error) {
 	if engine == nil || input.Opening == nil || input.Base == nil {
 		return nil, invalid("opening proof and base payment state are required")
 	}

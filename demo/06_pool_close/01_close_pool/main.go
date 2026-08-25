@@ -1,3 +1,8 @@
+// Command buyer and seller perform an immediate pool close (BitFS 006).
+//
+// fixture 先完成一轮付款得到共享的“节点已确认”最新状态；随后买方角色 API
+// 从调用方选定的基准状态构造未签名关闭 candidate 与买方签名（不广播），
+// 卖方补签合并，最后买方验证完整关闭交易。是否广播由应用决定。
 package main
 
 import (
@@ -7,13 +12,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/fixture"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/seller"
 )
-
-// blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
-const blockHeight uint32 = 900000
 
 func main() {
 	if err := demoenv.Load(); err != nil {
@@ -26,52 +31,57 @@ func main() {
 	}
 	now := time.Now().UTC()
 	debug("=== Step 006: Immediate Pool Close ===")
-	_, _, deliveryState, verified, err := f.DeliverAndBuildPayment(ctx, now)
-	if err != nil {
+	if _, err := f.RunSeedPurchase(ctx, now); err != nil {
 		fail(fmt.Errorf("build prerequisite payment: %w", err))
 	}
-	// 005 最小凭证只携带 payment_authorization_id 与买方签名；应用先按 ID 取回原始签名 003
-	// 再交给卖方验收。
-	authorization, err := f.LookupPaymentAuthorization(verified.Update.PaymentAuthorizationID)
-	if err != nil {
-		fail(err)
-	}
-	// 卖方本地重建状态交易、合并签名后得到完整付款交易；demo 作为调用方把
-	// 它当作新的最新状态保存（真实应用在此处广播并记录结果）。
-	signedPayment, err := f.Seller.AcceptPayment(ctx, f.Opening, f.LatestPayment, authorization, deliveryState, verified.Update, blockHeight)
-	if err != nil {
-		fail(fmt.Errorf("accept prerequisite payment: %w", err))
-	}
-	latest := &signedPayment.State
+	latest := f.LatestPayment
 	debug("[state] latest non-final payment has been merged and saved by the caller")
-	debug("[buyer] buyer.BuildImmediateClose creates final unsigned transaction and buyer signature from explicit state")
-	unsigned, buyerSignature, err := f.Buyer.BuildImmediateClose(ctx, f.Opening, latest, latest.SellerAmountSatoshis, blockHeight)
+	debug("[buyer] buyer.PrepareClose creates final unsigned transaction and buyer signature from explicit state")
+	closePrep, err := f.Buyer.PrepareClose(ctx, f.Facts(now), buyer.PrepareCloseCommand{
+		Pool:                       f.BuyerPool,
+		Base:                       latest,
+		TargetSellerAmountSatoshis: protocol.Satoshis(latest.SellerAmountSatoshis),
+	})
 	if err != nil {
-		fail(fmt.Errorf("buyer.BuildImmediateClose: %w", err))
+		fail(fmt.Errorf("buyer.PrepareClose: %w", err))
 	}
-	debug("[close] unsigned transaction bytes: %d", len(unsigned.RawTx))
-	debug("[close] buyer signature: %s", hex.EncodeToString(buyerSignature))
-	debug("[seller] seller.SignImmediateClose adds seller signature without broadcasting")
-	closed, err := f.Seller.SignImmediateClose(ctx, f.Opening, unsigned, buyerSignature, blockHeight)
+	debug("[close] unsigned transaction bytes: %d", len(closePrep.Unsigned.RawTx))
+	debug("[close] buyer signature produced (detached; persisted before sending)")
+	debug("[seller] seller.CompleteClose adds seller signature without broadcasting")
+	closed, err := f.Seller.CompleteClose(ctx, f.Facts(now), seller.CloseCommand{
+		Pool:           f.SellerPool,
+		Unsigned:       closePrep.Unsigned,
+		BuyerSignature: closePrep.BuyerSignature,
+	})
 	if err != nil {
-		fail(fmt.Errorf("seller.SignImmediateClose: %w", err))
+		fail(fmt.Errorf("seller.CompleteClose: %w", err))
 	}
-	debug("[close] seller signature: %s", hex.EncodeToString(closed.State.SellerTransactionSignature))
-	debug("[buyer] buyer.CompleteImmediateClose verifies the fully signed final transaction; the caller broadcasts it")
-	completed, err := f.Buyer.CompleteImmediateClose(ctx, f.Opening, closed)
+	debug("[close] seller signature produced and merged")
+	debug("[buyer] buyer.VerifyCompletedClose verifies the fully signed final transaction; the caller broadcasts it")
+	verifiedClose, err := f.Buyer.VerifyCompletedClose(buyer.VerifyCloseCommand{
+		Pool:  f.BuyerPool,
+		Close: &pool.SignedPayment{State: *closed.State(), RawTx: closed.RawTx()},
+	})
 	if err != nil {
-		fail(fmt.Errorf("buyer.CompleteImmediateClose: %w", err))
+		fail(fmt.Errorf("buyer.VerifyCompletedClose: %w", err))
 	}
-	finalTransaction, err := pool.ParseCanonicalTransaction(completed.RawTx)
+	finalTransaction := verifiedClose.RawTx()
+	txID := hex.EncodeToString(finalTransactionTxID(finalTransaction))
+	debug("[close] final transaction ready for caller broadcast")
+	debug("[close] final transaction ID: %s", txID)
+	fmt.Printf("FINAL_CLOSE_TX_HEX=%s\n", hex.EncodeToString(finalTransaction))
+	fmt.Printf("FINAL_CLOSE_TX_ID_HEX=%s\n", txID)
+	debug("=== Immediate pool close complete ===")
+}
+
+// finalTransactionTxID 用库的规范交易解析器计算交易 ID，保证与后续广播使用
+// 的序列化一致。
+func finalTransactionTxID(raw []byte) []byte {
+	transaction, err := pool.ParseCanonicalTransaction(raw)
 	if err != nil {
 		fail(fmt.Errorf("parse final close transaction: %w", err))
 	}
-	txID := finalTransaction.TxID().CloneBytes()
-	debug("[close] final transaction ready for caller broadcast")
-	debug("[close] final transaction ID: %s", hex.EncodeToString(txID))
-	fmt.Printf("FINAL_CLOSE_TX_HEX=%s\n", hex.EncodeToString(completed.RawTx))
-	fmt.Printf("FINAL_CLOSE_TX_ID_HEX=%s\n", hex.EncodeToString(txID))
-	debug("=== Immediate pool close complete ===")
+	return transaction.TxID().CloneBytes()
 }
 
 func debug(format string, values ...any) { fmt.Fprintf(os.Stderr, format+"\n", values...) }

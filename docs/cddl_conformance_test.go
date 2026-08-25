@@ -2,13 +2,14 @@ package docs_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv8/go-bitfs/arbitration"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/docs/cddltool"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/wire"
@@ -142,11 +143,15 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 	}
 
 	// ---- Kind 1 · FileQuote（真实 SDK 编码器）。----
-	arbiters, err := bitfs.EncodeSupportedArbiterPublicKeys([][]byte{arbiterKey.PubKey().Compressed()})
+	arbiters, err := content.EncodeSupportedArbiterPublicKeys([][]byte{arbiterKey.PubKey().Compressed()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	quote, err := bitfs.NewSignedFileQuote(&bitfs.FileQuoteTerms{
+	signer, err := protocol.NewPrivateKeySigner(sellerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, err := content.NewSignedFileQuote(context.Background(), &content.FileQuoteTerms{
 		SeedHash:                       hash,
 		BuyerPublicKey:                 buyerKey.PubKey().Compressed(),
 		SeedPriceSatoshis:              100,
@@ -154,14 +159,16 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		FileSizeBytes:                  4096,
 		QuoteExpiresAtUnixSeconds:      2000000000,
 		SupportedArbiterPublicKeysCBOR: arbiters,
-	}, sellerKey, "file.bin")
+		RecommendedFilename:            "file.bin",
+	}, signer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	quoteRaw, err := wire.MarshalFileQuote(quote)
+	quoteArtifact, err := wire.EncodeFileQuote(quote)
 	if err != nil {
 		t.Fatal(err)
 	}
+	quoteRaw := quoteArtifact.Bytes()
 	add("kind-1-file-quote", "kind-1-file-quote", quoteRaw)
 
 	// ---- Kind 2/3/4（结构性正例：语法合法、语义由 SDK 层负责）。----
@@ -174,44 +181,50 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		cddlEnc(t, []interface{}{uint64(1), uint64(4), cddlB(txid), cddlB(bytes.Repeat([]byte{5}, 128))}))
 
 	// ---- Kind 5 · ContentRequest（真实 SDK 编码器）。----
-	hashes, err := bitfs.EncodeContentHashes([][]byte{bytes.Repeat([]byte{6}, 32)})
+	hashes, err := content.EncodeContentHashes([][]byte{bytes.Repeat([]byte{6}, 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
+	quoteID, err := content.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := bitfs.NewSignedContentRequest(&bitfs.PaymentAuthorization{
+	buyerSigner, err := protocol.NewPrivateKeySigner(buyerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := content.NewSignedContentRequest(context.Background(), &content.PaymentAuthorization{
 		FileQuoteTermsID:            quoteID,
 		RefundTemplateTxID:          append([]byte(nil), txid...),
 		PaymentSequence:             3,
 		SellerAmountAfterSatoshis:   1100,
 		ContentHashesCBOR:           hashes,
 		DeliveryDeadlineUnixSeconds: 1999999000,
-	}, buyerKey)
+	}, buyerSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kind5, err := wire.MarshalContentRequest(request)
+	kind5Artifact, err := wire.EncodeContentRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
+	kind5 := kind5Artifact.Bytes()
 	add("kind-5-content-request", "kind-5-content-request", kind5)
 
 	// ---- Kind 6 · ContentDelivery（真实 SDK 编码器）。----
-	authID, err := bitfs.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
+	authID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := bitfs.NewSignedContentDelivery(authID, [][]byte{bytes.Repeat([]byte{8}, 512)}, sellerKey)
+	delivery, err := content.NewSignedContentDelivery(context.Background(), authID, [][]byte{bytes.Repeat([]byte{8}, 512)}, signer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kind6, err := wire.MarshalContentDelivery(delivery)
+	kind6Artifact, err := wire.EncodeContentDelivery(delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
+	kind6 := kind6Artifact.Bytes()
 	add("kind-6-content-delivery", "kind-6-content-delivery", kind6)
 
 	// ---- Kind 7 · PaymentUpdate。----
@@ -228,7 +241,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		uint64(100000), cddlB(poolScript), cddlB(refundTemplate), cddlB(authDoc), buyerAuthSignature,
 	})
 	payloadBundle := func(payload []byte) []byte {
-		raw, err := bitfs.EncodeContentPayloads([][]byte{payload})
+		raw, err := content.EncodeContentPayloads([][]byte{payload})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -247,8 +260,9 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 	// ---- Kind 10/11（真实 SDK 编码器）。----
 	var claimID protocol.ArbitrationClaimID
 	copy(claimID[:], bytes.Repeat([]byte{3}, 32))
-	nonce := bytes.Repeat([]byte{4}, 32)
-	retrievalRequest, err := arbitration.NewContentRetrievalRequest(claimID, nonce, buyerKey)
+	var nonce protocol.RetrievalNonce
+	copy(nonce[:], bytes.Repeat([]byte{4}, 32))
+	retrievalRequest, err := arbitration.NewContentRetrievalRequest(context.Background(), claimID, nonce, buyerSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +273,11 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 	add("kind-10-content-retrieval-request", "kind-10-content-retrieval-request", kind10)
 
 	requestID := protocol.ContentRetrievalRequestID(hash)
-	unavailable, err := arbitration.BuildContentRetrievalUnavailable(requestID, arbitration.RetrievalCustodyGone, arbiterKey)
+	arbiterSigner, err := protocol.NewPrivateKeySigner(arbiterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable, err := arbitration.BuildContentRetrievalUnavailable(context.Background(), requestID, arbitration.RetrievalCustodyGone, arbiterSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +287,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 	}
 	add("kind-11-unavailable", "kind-11-content-retrieval-response", kind11Unavailable)
 
-	available, err := arbitration.BuildContentRetrievalAvailableRaw(requestID, payloadBundle, arbiterKey)
+	available, err := arbitration.BuildContentRetrievalAvailableRaw(context.Background(), requestID, payloadBundle, arbiterSigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +317,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 			return cddlEnc(t, []interface{}{uint64(1), uint64(10), cddlB(doc), signature})
 		}()),
 		cdlMessage("31-byte claim id", "", func() []byte {
-			doc := cddlEnc(t, []interface{}{cddlB(bytes.Repeat([]byte{3}, 31)), cddlB(nonce)})
+			doc := cddlEnc(t, []interface{}{cddlB(bytes.Repeat([]byte{3}, 31)), cddlB(nonce[:])})
 			return cddlEnc(t, []interface{}{uint64(1), uint64(10), cddlB(doc), signature})
 		}()),
 		cdlMessage("oversized signature", "", cddlEnc(t, []interface{}{uint64(1), uint64(5), cddlB(request.PaymentAuthorizationCBOR), bytes.Repeat([]byte{7}, 300)})),
@@ -318,7 +336,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		}()),
 		// 非最短编码反例：能被宽松 decoder 接受，但违反 core deterministic CBOR。
 		cdlMessage("non-shortest integer head for the wire version", "", func() []byte {
-			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce)
+			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce[:])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +345,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 			return append([]byte{0x84}, body...)
 		}()),
 		cdlMessage("non-shortest array length head for Kind 10", "", func() []byte {
-			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce)
+			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce[:])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -338,7 +356,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 			return raw
 		}()),
 		cdlMessage("non-shortest bstr length head inside Kind 10", "", func() []byte {
-			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce)
+			doc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, nonce[:])
 			if err != nil {
 				t.Fatal(err)
 			}

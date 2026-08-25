@@ -58,15 +58,15 @@ Arbiter = ArbiterAmountSatoshis (> 0)
 其中 spendable = pool - refund_fee
 ```
 
-`Buyer + Seller + Arbiter + 退款矿工费` 恒等于池输出金额，全部使用先比较后减法的无溢出算术。Seller 金额已超过 spendable 或费用超过剩余余额时返回 `pool.ErrInsufficientBalance`；零费用按 invalid evidence 拒绝。恰好耗尽 Buyer 余额（Buyer 输出为零）在三个输出仍存在时是合法边界。source output 仅注入内存 sighash context，不序列化进 RawTx。卖方和仲裁方必须调用同一核心并得到逐字节相同的 candidate。
+`Buyer + Seller + Arbiter + 退款矿工费` 恒等于池输出金额，全部使用先比较后减法的无溢出算术。Seller 金额已超过 spendable 或费用超过剩余余额时返回 `CodeInsufficientBalance` 错误分类；零费用按 invalid evidence 拒绝。恰好耗尽 Buyer 余额（Buyer 输出为零）在三个输出仍存在时是合法边界。source output 仅注入内存 sighash context，不序列化进 RawTx。卖方和仲裁方必须调用同一核心并得到逐字节相同的 candidate。
 
 应用流程固定为：
 
 ```text
 应用按自己的收费策略计算 arbiter_amount_sat
-PreparePayment(request, blockHeight, arbiterAmountSat)
+arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
   -> 应用原子持久化精确 Kind 8、Claim ID、费用与 payload bundle
-  -> SignPreparedPayment
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
   -> 持久化/发送精确 Kind 9
 ```
 

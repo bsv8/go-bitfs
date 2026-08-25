@@ -19,7 +19,7 @@ import (
 // 绑定对象、是否进入 wire 与签名预映像还是仅 attachment，以及可空条件与
 // 分支约束。
 func TestExportedStructFieldsHaveChineseDocs(t *testing.T) {
-	packages := []string{"bitfs", "pool", "buyer", "seller", "arbitration", "wire", "protocol"}
+	packages := []string{"content", "pool", "buyer", "seller", "arbiter", "arbitration", "wire", "protocol"}
 
 	for _, pkg := range packages {
 		pkgDir := filepath.Join("..", pkg)

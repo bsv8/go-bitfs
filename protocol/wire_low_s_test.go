@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"math/big"
@@ -19,12 +20,23 @@ func lowSKey(t *testing.T, repeat string) *ec.PrivateKey {
 	return key
 }
 
+// lowSSigner 把私钥包装成受约束 Signer（新统一签名入口只接受 Signer）。
+func lowSSigner(t *testing.T, key *ec.PrivateKey) *PrivateKeySigner {
+	t.Helper()
+	signer, err := NewPrivateKeySigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
 // TestSignWireDocumentProducesLowS 确认统一签名入口只产出 low-S DER。
 func TestSignWireDocumentProducesLowS(t *testing.T) {
 	key := lowSKey(t, "21")
 	doc := bytes.Repeat([]byte{7}, 64)
+	signer := lowSSigner(t, key)
 	for kind := uint64(1); kind <= 11; kind++ {
-		signature, err := SignWireDocument(key, WireVersion, kind, doc)
+		signature, err := SignWireDocument(context.Background(), signer, WireVersion, kind, doc)
 		if err != nil {
 			t.Fatalf("kind %d: %v", kind, err)
 		}
@@ -50,7 +62,7 @@ func TestEveryOrdinaryKindRejectsHighS(t *testing.T) {
 	pubkey := key.PubKey().Compressed()
 	doc := bytes.Repeat([]byte{9}, 48)
 
-	lowS, err := SignWireDocument(key, WireVersion, 1, doc)
+	lowS, err := SignWireDocument(context.Background(), lowSSigner(t, key), WireVersion, 1, doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +95,7 @@ func TestZeroSNeverAccepted(t *testing.T) {
 	key := lowSKey(t, "23")
 	pubkey := key.PubKey().Compressed()
 	doc := []byte("payload")
-	signature, err := SignWireDocument(key, WireVersion, 3, doc)
+	signature, err := SignWireDocument(context.Background(), lowSSigner(t, key), WireVersion, 3, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

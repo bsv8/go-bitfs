@@ -14,7 +14,7 @@ import (
 
 func TestRefundTemplateTxIDGoldenValueAndByteOrder(t *testing.T) {
 	_, proof := mustRefundExpiryFixture(t, 500000100)
-	computed, err := DeriveRefundTemplateTxID(context.Background(), proof)
+	computed, err := DeriveRefundTemplateTxID(proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,11 +41,11 @@ func TestRefundTemplateTxIDRequestAndProofEntriesAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := NewBuyerPoolAdapter(engine, buyerKey).BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding, ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: keys.SellerPublicKey, ArbiterPublicKey: keys.ArbiterPublicKey})
+	request, err := NewBuyerPoolAdapter(engine, mustSigner(t, buyerKey)).BuildRefundPresignRequest(ctx, OpeningInput{FundingTransactionRaw: funding, ExpiryLockTime: 500000100, MinerFeeRateSatoshisPerKilobyte: 1, SellerPublicKey: keys.SellerPublicKey, ArbiterPublicKey: keys.ArbiterPublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sellerSignature, err := NewSellerPoolAdapter(engine, sellerKey).SignSellerRefund(ctx, request)
+	sellerSignature, err := NewSellerPoolAdapter(engine, mustSigner(t, sellerKey)).SignSellerRefund(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +53,11 @@ func TestRefundTemplateTxIDRequestAndProofEntriesAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := engine.BuildOpeningProof(ctx, request, sellerSignature, funding)
+	proof, err := engine.BuildOpeningProof(request, sellerSignature, funding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromProof, err := DeriveRefundTemplateTxID(ctx, proof)
+	fromProof, err := DeriveRefundTemplateTxID(proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +67,8 @@ func TestRefundTemplateTxIDRequestAndProofEntriesAgree(t *testing.T) {
 }
 
 func TestMergedOnChainRefundTxidDiffersFromPoolID(t *testing.T) {
-	ctx := context.Background()
 	_, proof := mustRefundExpiryFixture(t, 500000100)
-	poolID, err := DeriveRefundTemplateTxID(ctx, proof)
+	poolID, err := DeriveRefundTemplateTxID(proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +144,7 @@ func wrongSellerSignatureForRequest(t *testing.T, request *RefundPresignRequest)
 
 func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 	engine, proof := mustRefundExpiryFixture(t, 500000100)
-	validTxID, err := DeriveRefundTemplateTxID(context.Background(), proof)
+	validTxID, err := DeriveRefundTemplateTxID(proof)
 	if err != nil {
 		t.Fatalf("valid template rejected: %v", err)
 	}
@@ -155,7 +154,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 		t.Helper()
 		bad := CloneOpeningProof(proof)
 		mutate(bad)
-		if _, err := DeriveRefundTemplateTxID(context.Background(), bad); err == nil {
+		if _, err := DeriveRefundTemplateTxID(bad); err == nil {
 			t.Fatalf("tampered %s was accepted as refund template", name)
 		}
 	}
@@ -178,7 +177,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 	{
 		locked := CloneOpeningProof(proof)
 		locked.RefundTemplateRaw[len(locked.RefundTemplateRaw)-1] ^= 0x01
-		altered, err := DeriveRefundTemplateTxID(context.Background(), locked)
+		altered, err := DeriveRefundTemplateTxID(locked)
 		if err != nil {
 			t.Fatalf("locktime is part of the rebuilt template: %v", err)
 		}
@@ -212,7 +211,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	signed.RefundTemplateRaw = merged
-	if _, err := DeriveRefundTemplateTxID(context.Background(), signed); err == nil {
+	if _, err := DeriveRefundTemplateTxID(signed); err == nil {
 		t.Fatal("fully signed refund transaction was accepted as a template")
 	}
 
@@ -228,7 +227,7 @@ func TestRefundTemplateTxIDDerivationRejectsTamperedTemplates(t *testing.T) {
 	}
 	fake := CloneOpeningProof(proof)
 	fake.RefundTemplateRaw = generic.Bytes()
-	if _, err := DeriveRefundTemplateTxID(context.Background(), fake); err == nil {
+	if _, err := DeriveRefundTemplateTxID(fake); err == nil {
 		t.Fatal("generic one-in-three-out transaction was accepted as a refund template")
 	}
 }

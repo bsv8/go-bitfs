@@ -1,35 +1,61 @@
-package arbitration
+package arbitration_test
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"errors"
 	"testing"
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/arbiter"
+	"github.com/bsv8/go-bitfs/arbitration"
+	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-var testRetrievalNonce = bytes.Repeat([]byte{0xab}, RetrievalNonceBytes)
+// testRetrievalNonce 是显式 nonce 的底层入口所用的固定重放键。
+var testRetrievalNonce = mustNonce(bytes.Repeat([]byte{0xab}, arbitration.RetrievalNonceBytes))
 
-func mustSignedCustodyPair(t *testing.T) (arbitrationEvidence, *Workflow, *PreparedPayment, *ArbitrationResponse) {
+func mustNonce(raw []byte) protocol.RetrievalNonce {
+	nonce, err := protocol.NewRetrievalNonce(raw)
+	if err != nil {
+		panic(err)
+	}
+	return nonce
+}
+
+func mustSignedCustodyPair(t *testing.T) (arbitrationEvidence, *arbiter.Workflow, *arbiter.PreparedArbitration, *arbitration.ArbitrationResponse) {
 	t.Helper()
 	evidence := makeArbitrationEvidence(t)
 	workflow, prepared := mustSignPrepared(t, evidence)
-	response, err := workflow.SignPreparedPayment(context.Background(), prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
+	response := signPrepared(t, workflow, prepared)
 	return evidence, workflow, prepared, response
 }
 
-func mustRetrievalRequest(t *testing.T, evidence arbitrationEvidence, claimID protocol.ArbitrationClaimID, nonce []byte) *ContentRetrievalRequest {
+// signPrepared 完成持久化后的签名步骤，并把 Kind 9 Artifact 解码为应答 DTO。
+func signPrepared(t *testing.T, workflow *arbiter.Workflow, prepared *arbiter.PreparedArbitration) *arbitration.ArbitrationResponse {
 	t.Helper()
-	request, err := NewContentRetrievalRequest(claimID, nonce, evidence.keys[0])
+	return signPreparedWithFacts(t, workflow, testFacts(), prepared)
+}
+
+func signPreparedWithFacts(t *testing.T, workflow *arbiter.Workflow, facts protocol.Facts, prepared *arbiter.PreparedArbitration) *arbitration.ArbitrationResponse {
+	t.Helper()
+	artifact, err := workflow.SignPreparedArbitration(context.Background(), facts, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := arbitration.UnmarshalResponse(artifact.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func mustRetrievalRequest(t *testing.T, evidence arbitrationEvidence, claimID protocol.ArbitrationClaimID, nonce protocol.RetrievalNonce) *arbitration.ContentRetrievalRequest {
+	t.Helper()
+	request, err := arbitration.NewContentRetrievalRequest(context.Background(), claimID, nonce, mustSigner(t, evidence.keys[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,30 +64,30 @@ func mustRetrievalRequest(t *testing.T, evidence arbitrationEvidence, claimID pr
 
 func TestContentRetrievalRequestShapeRoundTripAndSigningDomain(t *testing.T) {
 	evidence := makeArbitrationEvidence(t)
-	claimID, err := ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := mustRetrievalRequest(t, evidence, claimID, testRetrievalNonce)
-	raw, err := MarshalContentRetrievalRequest(request)
+	raw, err := arbitration.MarshalContentRetrievalRequest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(raw) < 4 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x0a {
 		t.Fatalf("Kind 10 must be the four-element [1,10,...] array: %x", raw)
 	}
-	decoded, err := UnmarshalContentRetrievalRequest(raw)
+	decoded, err := arbitration.UnmarshalContentRetrievalRequest(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(decoded.ContentRetrievalRequestCBOR, request.ContentRetrievalRequestCBOR) || !bytes.Equal(decoded.BuyerContentRetrievalRequestSignature, request.BuyerContentRetrievalRequestSignature) {
 		t.Fatal("Kind 10 fields changed during round trip")
 	}
-	again, err := MarshalContentRetrievalRequest(decoded)
+	again, err := arbitration.MarshalContentRetrievalRequest(decoded)
 	if err != nil || !bytes.Equal(raw, again) {
 		t.Fatal("Kind 10 canonical round trip drifted")
 	}
-	if _, err := UnmarshalContentRetrievalRequest(append(append([]byte(nil), raw...), 0)); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalRequest(append(append([]byte(nil), raw...), 0)); err == nil {
 		t.Fatal("Kind 10 decoder accepted trailing bytes")
 	}
 	// 签名域严格为统一 helper 的 [domain, 1, 10, request_cbor]。
@@ -69,20 +95,20 @@ func TestContentRetrievalRequestShapeRoundTripAndSigningDomain(t *testing.T) {
 	if err := protocol.VerifyWireDocument(buyerPubKey, protocol.WireVersion, 10, request.ContentRetrievalRequestCBOR, request.BuyerContentRetrievalRequestSignature); err != nil {
 		t.Fatal(err)
 	}
-	decodedClaimID, decodedNonce, err := DecodeContentRetrievalRequestDocument(request.ContentRetrievalRequestCBOR)
+	decodedClaimID, decodedNonce, err := arbitration.DecodeContentRetrievalRequestDocument(request.ContentRetrievalRequestCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decodedClaimID != claimID || !bytes.Equal(decodedNonce, testRetrievalNonce) {
+	if decodedClaimID != claimID || !bytes.Equal(decodedNonce, testRetrievalNonce.Bytes()) {
 		t.Fatal("request document fields changed during round trip")
 	}
-	if err := bitfs.VerifySignature(buyerPubKey, claimID[:], request.BuyerContentRetrievalRequestSignature); err == nil {
+	if err := protocol.VerifyMessageSignature(buyerPubKey, claimID[:], request.BuyerContentRetrievalRequestSignature); err == nil {
 		t.Fatal("bare Claim ID was accepted as the signing domain")
 	}
-	if err := bitfs.VerifySignature(buyerPubKey, testRetrievalNonce, request.BuyerContentRetrievalRequestSignature); err == nil {
+	if err := protocol.VerifyMessageSignature(buyerPubKey, testRetrievalNonce.Bytes(), request.BuyerContentRetrievalRequestSignature); err == nil {
 		t.Fatal("bare nonce was accepted as the signing domain")
 	}
-	if err := bitfs.VerifySignature(buyerPubKey, raw, request.BuyerContentRetrievalRequestSignature); err == nil {
+	if err := protocol.VerifyMessageSignature(buyerPubKey, raw, request.BuyerContentRetrievalRequestSignature); err == nil {
 		t.Fatal("the complete Kind 10 envelope was accepted as the signing domain")
 	}
 	if err := protocol.VerifyWireDocument(buyerPubKey, protocol.WireVersion, 11, request.ContentRetrievalRequestCBOR, request.BuyerContentRetrievalRequestSignature); err == nil {
@@ -91,22 +117,22 @@ func TestContentRetrievalRequestShapeRoundTripAndSigningDomain(t *testing.T) {
 }
 
 func TestContentRetrievalLimitsAreDerivedFromChildLimits(t *testing.T) {
-	wantRequest := 3 + maxSignatureBstrOverhead + maxContentRetrievalRequestDocBytes + maxSignatureBstrOverhead + MaxArbitrationSignatureBytes
-	if MaxContentRetrievalRequestBytes != wantRequest {
-		t.Fatalf("request wire limit drifted from the derived protocol value: %d", MaxContentRetrievalRequestBytes)
+	wantRequest := 3 + arbitration.MaxSignatureBstrOverheadForTest + arbitration.MaxContentRetrievalRequestDocBytesForTest + arbitration.MaxSignatureBstrOverheadForTest + arbitration.MaxArbitrationSignatureBytes
+	if arbitration.MaxContentRetrievalRequestBytes != wantRequest {
+		t.Fatalf("request wire limit drifted from the derived protocol value: %d", arbitration.MaxContentRetrievalRequestBytes)
 	}
-	if MaxContentRetrievalRequestBytes != 334 {
-		t.Fatalf("request wire limit drifted from the pinned protocol value: %d", MaxContentRetrievalRequestBytes)
+	if arbitration.MaxContentRetrievalRequestBytes != 334 {
+		t.Fatalf("request wire limit drifted from the pinned protocol value: %d", arbitration.MaxContentRetrievalRequestBytes)
 	}
-	if MaxContentRetrievalResponseBytes != MaxContentRetrievalAvailableBytes {
+	if arbitration.MaxContentRetrievalResponseBytes != arbitration.MaxContentRetrievalAvailableBytes {
 		t.Fatalf("response pre-allocation guard must equal the available branch limit")
 	}
-	if _, err := UnmarshalContentRetrievalRequest(bytes.Repeat([]byte{0}, MaxContentRetrievalRequestBytes+1)); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalRequest(bytes.Repeat([]byte{0}, arbitration.MaxContentRetrievalRequestBytes+1)); err == nil {
 		t.Fatal("oversized Kind 10 was decoded")
 	}
 }
 
-func retrievalRequestIDHash(t *testing.T, request *ContentRetrievalRequest) protocol.ContentRetrievalRequestID {
+func retrievalRequestIDHash(t *testing.T, request *arbitration.ContentRetrievalRequest) protocol.ContentRetrievalRequestID {
 	t.Helper()
 	digest := sha256.Sum256(request.ContentRetrievalRequestCBOR)
 	return protocol.ContentRetrievalRequestID(digest)
@@ -114,36 +140,36 @@ func retrievalRequestIDHash(t *testing.T, request *ContentRetrievalRequest) prot
 
 func TestContentRetrievalAvailableBranchRoundTripAndBinding(t *testing.T) {
 	evidence, _, _, _ := mustSignedCustodyPair(t)
-	claimID, err := ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := mustRetrievalRequest(t, evidence, claimID, testRetrievalNonce)
 
 	payloads := [][]byte{[]byte("custody-block-0"), []byte("custody-block-1")}
-	payloadsCBOR, err := bitfs.EncodeContentPayloads(payloads)
+	payloadsCBOR, err := content.EncodeContentPayloads(payloads)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := BuildContentRetrievalAvailableRaw(retrievalRequestIDHash(t, request), payloadsCBOR, evidence.keys[2])
+	response, err := arbitration.BuildContentRetrievalAvailableRaw(context.Background(), retrievalRequestIDHash(t, request), payloadsCBOR, mustSigner(t, evidence.keys[2]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := MarshalContentRetrievalResponse(response)
+	raw, err := arbitration.MarshalContentRetrievalResponse(response)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(raw) < 3 || raw[0] != 0x85 || raw[1] != 0x01 || raw[2] != 0x0b {
 		t.Fatalf("available Kind 11 must be the five-element [1,11,...] array: %x", raw)
 	}
-	decoded, err := UnmarshalContentRetrievalResponse(raw)
+	decoded, err := arbitration.UnmarshalContentRetrievalResponse(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(decoded.ContentPayloadsCBOR, payloadsCBOR) {
 		t.Fatal("payload attachment changed during round trip")
 	}
-	result, err := VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), decoded)
+	result, err := arbitration.VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,10 +177,10 @@ func TestContentRetrievalAvailableBranchRoundTripAndBinding(t *testing.T) {
 		t.Fatalf("verified available result = %#v", result)
 	}
 	// payload 替换必须被 content_payloads_id 拒绝。
-	tampered := cloneRetrievalResponse(decoded)
+	tampered := arbitration.CloneContentRetrievalResponse(decoded)
 	tampered.ContentPayloadsCBOR = append([]byte(nil), tampered.ContentPayloadsCBOR...)
 	tampered.ContentPayloadsCBOR[len(tampered.ContentPayloadsCBOR)-1] ^= 1
-	if _, err := VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), tampered); err == nil {
+	if _, err := arbitration.VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), tampered); err == nil {
 		t.Fatal("tampered payload attachment satisfied the signed payload ID")
 	}
 	if err := protocol.VerifyWireDocument(evidence.keys[2].PubKey().Compressed(), protocol.WireVersion, 10, decoded.ContentRetrievalResultCBOR, decoded.ArbiterContentRetrievalResultSignature); err == nil {
@@ -164,41 +190,45 @@ func TestContentRetrievalAvailableBranchRoundTripAndBinding(t *testing.T) {
 
 func TestContentRetrievalUnavailableBranchRoundTripAndReasons(t *testing.T) {
 	evidence, _, _, _ := mustSignedCustodyPair(t)
-	claimID, err := ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := mustRetrievalRequest(t, evidence, claimID, testRetrievalNonce)
 	requestID := retrievalRequestIDHash(t, request)
 
-	for reason := range map[ContentRetrievalUnavailableReason]string{
-		RetrievalSellerArbitrationNotReceived: "not_received",
-		RetrievalSellerArbitrationNotReady:    "not_ready",
-		RetrievalCustodyGone:                  "gone",
+	for reason := range map[arbitration.ContentRetrievalUnavailableReason]string{
+		arbitration.RetrievalSellerArbitrationNotReceived: "not_received",
+		arbitration.RetrievalSellerArbitrationNotReady:    "not_ready",
+		arbitration.RetrievalCustodyGone:                  "gone",
 	} {
-		response, err := BuildContentRetrievalUnavailable(requestID, reason, evidence.keys[2])
+		response, err := arbitration.BuildContentRetrievalUnavailable(context.Background(), requestID, reason, mustSigner(t, evidence.keys[2]))
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, err := MarshalContentRetrievalResponse(response)
+		raw, err := arbitration.MarshalContentRetrievalResponse(response)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(raw) < 3 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x0b {
 			t.Fatalf("unavailable Kind 11 must be the four-element [1,11,...] array: %x", raw)
 		}
-		decoded, err := UnmarshalContentRetrievalResponse(raw)
+		decoded, err := arbitration.UnmarshalContentRetrievalResponse(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), decoded)
+		// valid unavailable 是已验签的协议结果：不返回 error，返回 typed result。
+		result, err := arbitration.VerifyContentRetrievalResponse(request, evidence.keys[2].PubKey().Compressed(), decoded)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("valid unavailable branch returned an error: %v", err)
 		}
 		if result.Available || result.Payloads != nil || result.PayloadsCBOR != nil {
 			t.Fatalf("unavailable branch leaked attachment data: %#v", result)
 		}
-		view, err := DecodeContentRetrievalResultDocument(decoded.ContentRetrievalResultCBOR)
+		if result.UnavailableReason != reason {
+			t.Fatalf("unavailable reason drifted: got %d, want %d", result.UnavailableReason, reason)
+		}
+		view, err := arbitration.DecodeContentRetrievalResultDocument(decoded.ContentRetrievalResultCBOR)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,81 +238,81 @@ func TestContentRetrievalUnavailableBranchRoundTripAndReasons(t *testing.T) {
 	}
 
 	// 未知原因与未知判别值必须被拒绝。
-	badReason := mustMarshal(t, []any{bstr(requestID[:]), uint64(0), uint64(9)})
-	if _, err := DecodeContentRetrievalResultDocument(badReason); err == nil {
+	badReason := mustMarshal(t, []any{arbitration.BstrForTest(requestID[:]), uint64(0), uint64(9)})
+	if _, err := arbitration.DecodeContentRetrievalResultDocument(badReason); err == nil {
 		t.Fatal("unknown unavailable reason decoded")
 	}
-	badDiscriminator := mustMarshal(t, []any{bstr(requestID[:]), uint64(7), uint64(0)})
-	if _, err := DecodeContentRetrievalResultDocument(badDiscriminator); err == nil {
+	badDiscriminator := mustMarshal(t, []any{arbitration.BstrForTest(requestID[:]), uint64(7), uint64(0)})
+	if _, err := arbitration.DecodeContentRetrievalResultDocument(badDiscriminator); err == nil {
 		t.Fatal("unknown discriminator decoded")
 	}
-	shortPayloadID := mustMarshal(t, []any{bstr(requestID[:]), uint64(1), bstr(bytes.Repeat([]byte{1}, 31))})
-	if _, err := DecodeContentRetrievalResultDocument(shortPayloadID); err == nil {
+	shortPayloadID := mustMarshal(t, []any{arbitration.BstrForTest(requestID[:]), uint64(1), arbitration.BstrForTest(bytes.Repeat([]byte{1}, 31))})
+	if _, err := arbitration.DecodeContentRetrievalResultDocument(shortPayloadID); err == nil {
 		t.Fatal("short content_payloads_id decoded")
 	}
 }
 
 func TestContentRetrievalResponseRejectsBranchInconsistency(t *testing.T) {
 	evidence, _, _, _ := mustSignedCustodyPair(t)
-	claimID, err := ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(evidence.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := mustRetrievalRequest(t, evidence, claimID, testRetrievalNonce)
 	requestID := retrievalRequestIDHash(t, request)
 
-	unavailable, err := BuildContentRetrievalUnavailable(requestID, RetrievalSellerArbitrationNotReady, evidence.keys[2])
+	unavailable, err := arbitration.BuildContentRetrievalUnavailable(context.Background(), requestID, arbitration.RetrievalSellerArbitrationNotReady, mustSigner(t, evidence.keys[2]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	unavailableRaw, err := MarshalContentRetrievalResponse(unavailable)
+	unavailableRaw, err := arbitration.MarshalContentRetrievalResponse(unavailable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	smuggled, err := bitfs.EncodeContentPayloads([][]byte{[]byte("smuggled")})
+	smuggled, err := content.EncodeContentPayloads([][]byte{[]byte("smuggled")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	withAttachment := mustMarshal(t, []any{
-		protocol.WireVersion, wireKindContentRetrievalResponse,
-		bstr(unavailable.ContentRetrievalResultCBOR), bstr(unavailable.ArbiterContentRetrievalResultSignature),
-		bstr(smuggled),
+		protocol.WireVersion, uint64(11),
+		arbitration.BstrForTest(unavailable.ContentRetrievalResultCBOR), arbitration.BstrForTest(unavailable.ArbiterContentRetrievalResultSignature),
+		arbitration.BstrForTest(smuggled),
 	})
-	if _, err := UnmarshalContentRetrievalResponse(withAttachment); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(withAttachment); err == nil {
 		t.Fatal("unavailable branch with attachment decoded")
 	}
 
-	available, err := BuildContentRetrievalAvailable(requestID, [][]byte{[]byte("block")}, evidence.keys[2])
+	available, err := arbitration.BuildContentRetrievalAvailable(context.Background(), requestID, [][]byte{[]byte("block")}, mustSigner(t, evidence.keys[2]))
 	if err != nil {
 		t.Fatal(err)
 	}
 	withoutAttachment := mustMarshal(t, []any{
-		protocol.WireVersion, wireKindContentRetrievalResponse,
-		bstr(available.ContentRetrievalResultCBOR), bstr(available.ArbiterContentRetrievalResultSignature),
+		protocol.WireVersion, uint64(11),
+		arbitration.BstrForTest(available.ContentRetrievalResultCBOR), arbitration.BstrForTest(available.ArbiterContentRetrievalResultSignature),
 	})
-	if _, err := UnmarshalContentRetrievalResponse(withoutAttachment); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(withoutAttachment); err == nil {
 		t.Fatal("available branch without attachment decoded")
 	}
-	if _, err := UnmarshalContentRetrievalResponse(mustEncodeArray(t, []any{protocol.WireVersion, wireKindContentRetrievalResponse, bstr(available.ContentRetrievalResultCBOR)})); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(mustEncodeArray(t, []any{protocol.WireVersion, uint64(11), arbitration.BstrForTest(available.ContentRetrievalResultCBOR)})); err == nil {
 		t.Fatal("three-element Kind 11 decoded")
 	}
-	wrongVersion := mustMarshal(t, []any{uint64(protocol.WireVersion + 1), wireKindContentRetrievalResponse, bstr(available.ContentRetrievalResultCBOR), bstr(available.ArbiterContentRetrievalResultSignature), bstr(available.ContentPayloadsCBOR)})
-	if _, err := UnmarshalContentRetrievalResponse(wrongVersion); err == nil {
+	wrongVersion := mustMarshal(t, []any{uint64(protocol.WireVersion + 1), uint64(11), arbitration.BstrForTest(available.ContentRetrievalResultCBOR), arbitration.BstrForTest(available.ArbiterContentRetrievalResultSignature), arbitration.BstrForTest(available.ContentPayloadsCBOR)})
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(wrongVersion); err == nil {
 		t.Fatal("wrong wire version Kind 11 decoded")
 	}
-	wrongKind := mustMarshal(t, []any{protocol.WireVersion, wireKindArbitrationResponse, bstr(available.ContentRetrievalResultCBOR), bstr(available.ArbiterContentRetrievalResultSignature), bstr(available.ContentPayloadsCBOR)})
-	if _, err := UnmarshalContentRetrievalResponse(wrongKind); err == nil {
+	wrongKind := mustMarshal(t, []any{protocol.WireVersion, uint64(9), arbitration.BstrForTest(available.ContentRetrievalResultCBOR), arbitration.BstrForTest(available.ArbiterContentRetrievalResultSignature), arbitration.BstrForTest(available.ContentPayloadsCBOR)})
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(wrongKind); err == nil {
 		t.Fatal("Kind 9 body decoded as Kind 11")
 	}
-	if _, err := UnmarshalContentRetrievalResponse(append(append([]byte(nil), unavailableRaw...), 0)); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(append(append([]byte(nil), unavailableRaw...), 0)); err == nil {
 		t.Fatal("Kind 11 decoder accepted trailing bytes")
 	}
-	if _, err := UnmarshalContentRetrievalResponse(bytes.Repeat([]byte{0}, MaxContentRetrievalResponseBytes+1)); err == nil {
+	if _, err := arbitration.UnmarshalContentRetrievalResponse(bytes.Repeat([]byte{0}, arbitration.MaxContentRetrievalResponseBytes+1)); err == nil {
 		t.Fatal("oversized Kind 11 was decoded")
 	}
 	// 请求绑定：响应回答另一个请求 ID 必须失败。
-	otherRequest := mustRetrievalRequest(t, evidence, claimID, bytes.Repeat([]byte{0xcd}, RetrievalNonceBytes))
-	if _, err := VerifyContentRetrievalResponse(otherRequest, evidence.keys[2].PubKey().Compressed(), unavailable); err == nil {
+	otherRequest := mustRetrievalRequest(t, evidence, claimID, mustNonce(bytes.Repeat([]byte{0xcd}, arbitration.RetrievalNonceBytes)))
+	if _, err := arbitration.VerifyContentRetrievalResponse(otherRequest, evidence.keys[2].PubKey().Compressed(), unavailable); err == nil {
 		t.Fatal("a response answered a different retrieval request")
 	}
 }
@@ -290,72 +320,69 @@ func TestContentRetrievalResponseRejectsBranchInconsistency(t *testing.T) {
 func TestVerifyCustodiedContentRejectsTamperedEvidence(t *testing.T) {
 	evidence, workflow, prepared, response := mustSignedCustodyPair(t)
 	baseRequest := prepared.Request()
-	claimID, err := ArbitrationClaimID(baseRequest.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(baseRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	other := makeArbitrationEvidenceWithPayloads(t, [][]byte{mustDigest(t, "other")}, [][]byte{[]byte("other")})
 	_, preparedOther := mustSignPrepared(t, other)
-	responseOther, err := workflow.SignPreparedPayment(context.Background(), preparedOther)
-	if err != nil {
-		t.Fatal(err)
-	}
-	spliced := &ArbitrationResponse{ArbitrationReceiptCBOR: responseOther.ArbitrationReceiptCBOR, ArbiterArbitrationReceiptSignature: responseOther.ArbiterArbitrationReceiptSignature}
-	if _, err := VerifyCustodiedContent(baseRequest, spliced); err == nil {
+	responseOther := signPrepared(t, workflow, preparedOther)
+	spliced := &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: responseOther.ArbitrationReceiptCBOR, ArbiterArbitrationReceiptSignature: responseOther.ArbiterArbitrationReceiptSignature}
+	if _, err := arbitration.VerifyCustodiedContent(baseRequest, spliced); err == nil {
 		t.Fatal("a foreign receipt satisfied the custody chain")
 	}
 
-	badSellerSig := cloneRequest(baseRequest)
+	badSellerSig := arbitration.CloneRequest(baseRequest)
 	badSellerSig.SellerArbitrationClaimSignature[len(badSellerSig.SellerArbitrationClaimSignature)-1] ^= 1
-	if _, err := VerifyCustodiedContent(badSellerSig, response); !errors.Is(err, pool.ErrInvalidEvidence) {
+	if _, err := arbitration.VerifyCustodiedContent(badSellerSig, response); !protocol.IsCode(err, protocol.CodeInvalidSignature) {
 		t.Fatalf("tampered Seller Claim signature accepted: %v", err)
 	}
 
-	tamperedBundle, err := bitfs.EncodeContentPayloads([][]byte{[]byte("tampered")})
+	tamperedBundle, err := content.EncodeContentPayloads([][]byte{[]byte("tampered")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tamperedPayload := cloneRequest(baseRequest)
+	tamperedPayload := arbitration.CloneRequest(baseRequest)
 	tamperedPayload.ContentPayloadsCBOR = tamperedBundle
-	if _, err := VerifyCustodiedContent(tamperedPayload, response); err == nil {
+	if _, err := arbitration.VerifyCustodiedContent(tamperedPayload, response); err == nil {
 		t.Fatal("tampered payload bundle satisfied the custody chain")
 	}
 
-	receipt, err := UnmarshalReceipt(response.ArbitrationReceiptCBOR)
+	receipt, err := arbitration.UnmarshalReceipt(response.ArbitrationReceiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	arbiterKey := evidence.keys[2]
-	reFee := cloneReceipt(receipt)
+	reFee := cloneReceiptForTest(receipt)
 	reFee.ArbiterAmountSatoshis += 7
-	reFeeCBOR, err := MarshalReceipt(reFee)
+	reFeeCBOR, err := arbitration.MarshalReceipt(reFee)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reFeeSig, err := protocol.SignWireDocument(arbiterKey, protocol.WireVersion, 9, reFeeCBOR)
+	reFeeSig, err := protocol.SignWireDocument(context.Background(), mustSigner(t, arbiterKey), protocol.WireVersion, 9, reFeeCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyCustodiedContent(baseRequest, &ArbitrationResponse{ArbitrationReceiptCBOR: reFeeCBOR, ArbiterArbitrationReceiptSignature: reFeeSig}); err == nil {
+	if _, err := arbitration.VerifyCustodiedContent(baseRequest, &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: reFeeCBOR, ArbiterArbitrationReceiptSignature: reFeeSig}); err == nil {
 		t.Fatal("a re-signed receipt with a different fee satisfied the transaction binding")
 	}
 
-	flipped := cloneReceipt(receipt)
+	flipped := cloneReceiptForTest(receipt)
 	flipped.ArbiterPaymentTransactionSignature[len(flipped.ArbiterPaymentTransactionSignature)-1] ^= 1
-	flippedCBOR, err := MarshalReceipt(flipped)
+	flippedCBOR, err := arbitration.MarshalReceipt(flipped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	flippedSig, err := protocol.SignWireDocument(arbiterKey, protocol.WireVersion, 9, flippedCBOR)
+	flippedSig, err := protocol.SignWireDocument(context.Background(), mustSigner(t, arbiterKey), protocol.WireVersion, 9, flippedCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyCustodiedContent(baseRequest, &ArbitrationResponse{ArbitrationReceiptCBOR: flippedCBOR, ArbiterArbitrationReceiptSignature: flippedSig}); err == nil {
+	if _, err := arbitration.VerifyCustodiedContent(baseRequest, &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: flippedCBOR, ArbiterArbitrationReceiptSignature: flippedSig}); err == nil {
 		t.Fatal("a flipped transaction signature satisfied the rebuilt candidate")
 	}
 
-	verified, err := VerifyCustodiedContent(baseRequest, response)
+	verified, err := arbitration.VerifyCustodiedContent(baseRequest, response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +391,7 @@ func TestVerifyCustodiedContentRejectsTamperedEvidence(t *testing.T) {
 	}
 	firstPayload := append([]byte(nil), verified.Payloads[0]...)
 	verified.Payloads[0][len(verified.Payloads[0])-1] ^= 1
-	second, err := VerifyCustodiedContent(baseRequest, response)
+	second, err := arbitration.VerifyCustodiedContent(baseRequest, response)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,63 +412,80 @@ func TestVerifyCustodiedContentRejectsTamperedEvidence(t *testing.T) {
 	}
 }
 
-func TestVerifyContentRetrievalRequestAuthenticatesBuyer(t *testing.T) {
+func TestAuthenticateContentRetrievalRequestAuthenticatesBuyer(t *testing.T) {
 	evidence, workflow, prepared, response := mustSignedCustodyPair(t)
 	storedRequest := prepared.Request()
-	claimID, err := ArbitrationClaimID(storedRequest.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(storedRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
 	retrieval := mustRetrievalRequest(t, evidence, claimID, testRetrievalNonce)
-	if _, err := workflow.VerifyContentRetrievalRequest(retrieval, storedRequest, response); err != nil {
+	arbiterPublicKey := evidence.keys[2].PubKey().Compressed()
+	if err := arbitration.AuthenticateContentRetrievalRequest(retrieval, storedRequest, arbiterPublicKey); err != nil {
 		t.Fatalf("legitimate buyer retrieval was rejected: %v", err)
+	}
+	// 角色级全链入口（含已签 Kind 9 托管证据）同样通过。
+	rawKind10, err := arbitration.MarshalContentRetrievalRequest(retrieval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind8, err := arbitration.MarshalRequest(storedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKind9, err := arbitration.MarshalResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workflow.VerifyRetrievableCustody(rawKind10, rawKind8, rawKind9); err != nil {
+		t.Fatalf("full custody verification rejected a legitimate buyer: %v", err)
 	}
 
 	other := makeArbitrationEvidenceWithPayloads(t, [][]byte{mustDigest(t, "cross")}, [][]byte{[]byte("cross")})
-	otherID, err := ArbitrationClaimID(other.request.ArbitrationClaimCBOR)
+	otherID, err := arbitration.ArbitrationClaimID(other.request.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	crossDoc, err := EncodeContentRetrievalRequestDocument(otherID, testRetrievalNonce)
+	crossDoc, err := arbitration.EncodeContentRetrievalRequestDocument(otherID, testRetrievalNonce.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	crossClaim := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), retrieval.BuyerContentRetrievalRequestSignature...)}
-	if _, err := workflow.VerifyContentRetrievalRequest(crossClaim, storedRequest, response); err == nil {
+	crossClaim := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), retrieval.BuyerContentRetrievalRequestSignature...)}
+	if err := arbitration.AuthenticateContentRetrievalRequest(crossClaim, storedRequest, arbiterPublicKey); err == nil {
 		t.Fatal("Kind 10 signature was replayed across Claim IDs")
 	}
 
-	otherNonce := bytes.Repeat([]byte{0xcd}, RetrievalNonceBytes)
-	crossNonceDoc, err := EncodeContentRetrievalRequestDocument(claimID, otherNonce)
+	otherNonce := bytes.Repeat([]byte{0xcd}, arbitration.RetrievalNonceBytes)
+	crossNonceDoc, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, otherNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	crossNonce := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossNonceDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), retrieval.BuyerContentRetrievalRequestSignature...)}
-	if _, err := workflow.VerifyContentRetrievalRequest(crossNonce, storedRequest, response); err == nil {
+	crossNonce := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: crossNonceDoc, BuyerContentRetrievalRequestSignature: append([]byte(nil), retrieval.BuyerContentRetrievalRequestSignature...)}
+	if err := arbitration.AuthenticateContentRetrievalRequest(crossNonce, storedRequest, arbiterPublicKey); err == nil {
 		t.Fatal("Kind 10 signature was replayed across nonces")
 	}
 
-	forgedRequest, err := NewContentRetrievalRequest(claimID, testRetrievalNonce, mustKey(t, "99"))
+	forgedRequest, err := arbitration.NewContentRetrievalRequest(context.Background(), claimID, testRetrievalNonce, mustSigner(t, mustKey(t, "99")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workflow.VerifyContentRetrievalRequest(forgedRequest, storedRequest, response); err == nil {
+	if err := arbitration.AuthenticateContentRetrievalRequest(forgedRequest, storedRequest, arbiterPublicKey); err == nil {
 		t.Fatal("a foreign buyer key authorized retrieval")
 	}
 
-	wrongArbiter, err := NewWorkflow(WorkflowConfig{PrivateKey: mustKey(t, "44")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wrongArbiter.VerifyContentRetrievalRequest(retrieval, storedRequest, response); err == nil {
+	wrongArbiter := mustArbiterWorkflowWithKey(t, "44")
+	if err := arbitration.AuthenticateContentRetrievalRequest(retrieval, storedRequest, wrongArbiter.PublicKey()); err == nil {
 		t.Fatal("another arbiter served this custody record")
+	}
+	if _, err := wrongArbiter.VerifyRetrievableCustody(rawKind10, rawKind8, rawKind9); err == nil {
+		t.Fatal("another arbiter verified this custody record through the role API")
 	}
 }
 
-func forceSignCustodyResponse(t *testing.T, request *ArbitrationRequest, arbiterKey *ec.PrivateKey) *ArbitrationResponse {
+func forceSignCustodyResponse(t *testing.T, request *arbitration.ArbitrationRequest, arbiterKey *ec.PrivateKey) *arbitration.ArbitrationResponse {
 	t.Helper()
-	local := cloneRequest(request)
-	claim, _, _, unsigned, claimID, _, keys, err := validateRequestEvidence(local, testArbitrationFeeSat)
+	local := arbitration.CloneRequest(request)
+	claim, _, _, unsigned, claimID, _, keys, err := arbitration.ValidateRequestEvidence(local, testArbitrationFeeSat)
 	if err != nil {
 		t.Fatalf("premise broken: expired evidence fails structural verification: %v", err)
 	}
@@ -449,23 +493,23 @@ func forceSignCustodyResponse(t *testing.T, request *ArbitrationRequest, arbiter
 	if err != nil {
 		t.Fatal(err)
 	}
-	arbiterTransactionSignature, err := engine.SignArbitrationArbiterPayment(context.Background(), unsigned, arbiterKey)
+	arbiterTransactionSignature, err := engine.SignArbitrationArbiterPayment(context.Background(), unsigned, mustSigner(t, arbiterKey))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(keys.ArbiterPublicKey, arbiterKey.PubKey().Compressed()) {
 		t.Fatal("premise broken: role keys do not match the signing arbiter")
 	}
-	receipt := &ArbitrationReceipt{ArbitrationClaimID: claimID, ArbiterAmountSatoshis: testArbitrationFeeSat, ArbiterPaymentTransactionSignature: append([]byte(nil), arbiterTransactionSignature...)}
-	receiptCBOR, err := MarshalReceipt(receipt)
+	receipt := &arbitration.ArbitrationReceipt{ArbitrationClaimID: claimID, ArbiterAmountSatoshis: testArbitrationFeeSat, ArbiterPaymentTransactionSignature: append([]byte(nil), arbiterTransactionSignature...)}
+	receiptCBOR, err := arbitration.MarshalReceipt(receipt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := protocol.SignWireDocument(arbiterKey, protocol.WireVersion, 9, receiptCBOR)
+	sig, err := protocol.SignWireDocument(context.Background(), mustSigner(t, arbiterKey), protocol.WireVersion, 9, receiptCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &ArbitrationResponse{ArbitrationReceiptCBOR: receiptCBOR, ArbiterArbitrationReceiptSignature: sig}
+	return &arbitration.ArbitrationResponse{ArbitrationReceiptCBOR: receiptCBOR, ArbiterArbitrationReceiptSignature: sig}
 }
 
 func TestExpiredCustodyEvidenceRemainsVerifiable(t *testing.T) {
@@ -477,11 +521,15 @@ func TestExpiredCustodyEvidenceRemainsVerifiable(t *testing.T) {
 		keys, [][]byte{mustDigest(t, "expired-custody")}, [][]byte{[]byte("expired-custody")},
 		expiredLock, expiredDeadline)
 
-	if _, err := mustArbiterWorkflow(t).PreparePayment(context.Background(), cloneRequest(evidence.request), 900000, testArbitrationFeeSat); !errors.Is(err, pool.ErrInvalidEvidence) {
-		t.Fatalf("premise broken: expired evidence still prepares: %v", err)
+	rawKind8, err := arbitration.MarshalRequest(cloneExpiredEvidence(t, evidence))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mustArbiterWorkflow(t).PrepareArbitration(testFacts(), rawKind8, protocol.Satoshis(testArbitrationFeeSat)); !protocol.IsCode(err, protocol.CodeExpired) {
+		t.Fatalf("premise broken: expired evidence still prepares (want expired): %v", err)
 	}
 	response := forceSignCustodyResponse(t, evidence.request, keys[2])
-	verified, err := VerifyCustodiedContent(evidence.request, response)
+	verified, err := arbitration.VerifyCustodiedContent(evidence.request, response)
 	if err != nil {
 		t.Fatalf("signed custody evidence became unverifiable after expiry: %v", err)
 	}
@@ -489,38 +537,56 @@ func TestExpiredCustodyEvidenceRemainsVerifiable(t *testing.T) {
 		t.Fatal("verified payloads do not match the custodied batch")
 	}
 	retrieval := mustRetrievalRequest(t, evidence, verified.ArbitrationClaimID, testRetrievalNonce)
-	if _, err := mustArbiterWorkflow(t).VerifyContentRetrievalRequest(retrieval, evidence.request, response); err != nil {
+	if err := arbitration.AuthenticateContentRetrievalRequest(retrieval, evidence.request, keys[2].PubKey().Compressed()); err != nil {
 		t.Fatalf("post-deadline retrieval of signed custody evidence failed: %v", err)
+	}
+	rawKind10, err := arbitration.MarshalContentRetrievalRequest(retrieval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mustArbiterWorkflow(t).AuthenticateRetrieval(rawKind10, rawKind8); err != nil {
+		t.Fatalf("role-level post-deadline authentication failed: %v", err)
 	}
 }
 
-func TestVerifyContentRetrievalRequestSnapshotsCallerBuffers(t *testing.T) {
-	evidence, workflow, prepared, response := mustSignedCustodyPair(t)
+// cloneExpiredEvidence 深拷贝过期证据，避免共享缓冲被 Prepare 内部克隆边界掩盖问题。
+func cloneExpiredEvidence(t *testing.T, evidence arbitrationEvidence) *arbitration.ArbitrationRequest {
+	t.Helper()
+	cloned := arbitration.CloneRequest(evidence.request)
+	if cloned == nil {
+		t.Fatal("clone of expired evidence failed")
+	}
+	return cloned
+}
+
+func TestAuthenticateContentRetrievalRequestSnapshotsCallerBuffers(t *testing.T) {
+	evidence, _, prepared, _ := mustSignedCustodyPair(t)
 	storedRequest := prepared.Request()
-	claimID, err := ArbitrationClaimID(storedRequest.ArbitrationClaimCBOR)
+	claimID, err := arbitration.ArbitrationClaimID(storedRequest.ArbitrationClaimCBOR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requestBuf, err := EncodeContentRetrievalRequestDocument(claimID, testRetrievalNonce)
+	requestBuf, err := arbitration.EncodeContentRetrievalRequestDocument(claimID, testRetrievalNonce.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := protocol.SignWireDocument(evidence.keys[0], protocol.WireVersion, 10, requestBuf)
+	signature, err := protocol.SignWireDocument(context.Background(), mustSigner(t, evidence.keys[0]), protocol.WireVersion, 10, requestBuf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := &ContentRetrievalRequest{ContentRetrievalRequestCBOR: requestBuf, BuyerContentRetrievalRequestSignature: signature}
-	if _, err := workflow.VerifyContentRetrievalRequest(request, storedRequest, response); err != nil {
+	request := &arbitration.ContentRetrievalRequest{ContentRetrievalRequestCBOR: requestBuf, BuyerContentRetrievalRequestSignature: signature}
+	arbiterPublicKey := evidence.keys[2].PubKey().Compressed()
+	if err := arbitration.AuthenticateContentRetrievalRequest(request, storedRequest, arbiterPublicKey); err != nil {
 		t.Fatal(err)
 	}
 	request.ContentRetrievalRequestCBOR[len(request.ContentRetrievalRequestCBOR)-1] ^= 1
 	request.BuyerContentRetrievalRequestSignature[0] ^= 1
-	if _, err := workflow.VerifyContentRetrievalRequest(request, storedRequest, response); err == nil {
+	if err := arbitration.AuthenticateContentRetrievalRequest(request, storedRequest, arbiterPublicKey); err == nil {
 		t.Fatal("tampered caller buffers were accepted, verifier did not read current content")
 	}
 	request.ContentRetrievalRequestCBOR[len(request.ContentRetrievalRequestCBOR)-1] ^= 1
 	request.BuyerContentRetrievalRequestSignature[0] ^= 1
-	if _, err := workflow.VerifyContentRetrievalRequest(request, storedRequest, response); err != nil {
+	if err := arbitration.AuthenticateContentRetrievalRequest(request, storedRequest, arbiterPublicKey); err != nil {
 		t.Fatalf("restored caller buffers no longer verify: %v", err)
 	}
 }

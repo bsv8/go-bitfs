@@ -1,4 +1,4 @@
-package bitfs
+package content
 
 // FileQuoteTerms is the seller's signed pricing and expiry commitment to one
 // buyer. It is the authenticated Kind 1 document: business fields only, no

@@ -1,14 +1,13 @@
 // Command buyer parses and verifies a BitFS 001 file quote.
 //
-// The quote is accepted as canonical SignedFileQuote CBOR encoded as hex.
-// Binary fields in the decoded result are printed as hex. The buyer private
-// key is used only to derive the expected buyer public key.
+// 输入是 exact Kind 1 Artifact 的 hex。新角色 API：买方用
+// buyer.NewWorkflow(...).AcceptQuote(facts, raw) 一次完成严格解析、卖方
+// 验签与过期判断，得到不可变 VerifiedQuote；wire.Parse 仅用于展示层打印报文
+// 自描述 Kind。
 package main
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -19,9 +18,14 @@ import (
 	"time"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
-	"github.com/bsv8/go-bitfs/bitfs"
+	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
+	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/wire"
 )
+
+// blockHeight 是调用方认可并提供的当前区块高度；SDK 不查询节点。
+const blockHeight protocol.BlockHeight = 900000
 
 func main() {
 	if err := demoenv.Load(); err != nil {
@@ -50,40 +54,46 @@ func run(input io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("[decode hex] invalid quote hex: %w", err)
 	}
-	debugf("[decode] quote CBOR bytes  : %d", len(rawQuote))
-	quote, err := bitfs.DecodeSignedFileQuote(rawQuote)
-	if err != nil {
-		return fmt.Errorf("[decode CBOR] invalid SignedFileQuote: %w", err)
-	}
-	debugf("[decode] canonical quote  : yes")
-	debugf("[decode] terms CBOR bytes  : %d", len(quote.FileQuoteTermsCBOR))
-	debugf("[decode] seller public key : %s", hex.EncodeToString(quote.SellerPublicKey))
-	debugf("[decode] signature bytes   : %d", len(quote.SellerFileQuoteTermsSignature))
-	terms, err := bitfs.VerifySignedFileQuote(quote)
-	if err != nil {
-		return fmt.Errorf("[verify seller signature/expiry] rejected: %w", err)
-	}
-	debugf("[verify] seller signature : valid")
-	debugf("[verify] quote not expired: yes")
+	debugf("[decode] quote artifact bytes: %d", len(rawQuote))
 
 	privateKey, err := ec.PrivateKeyFromHex(strings.TrimSpace(os.Getenv("BUYER_PRIVATE_KEY_HEX")))
 	if err != nil {
-		return fmt.Errorf("derive expected buyer public key from BUYER_PRIVATE_KEY_HEX: %w", err)
+		return fmt.Errorf("create buyer signer from BUYER_PRIVATE_KEY_HEX: %w", err)
 	}
-	if !bytes.Equal(privateKey.PubKey().Compressed(), terms.BuyerPublicKey) {
+	signer, err := protocol.NewPrivateKeySigner(privateKey)
+	if err != nil {
+		return fmt.Errorf("create buyer signer: %w", err)
+	}
+	buyerWorkflow, err := buyer.NewWorkflow(signer)
+	if err != nil {
+		return fmt.Errorf("create buyer workflow: %w", err)
+	}
+
+	// 展示层打印：wire.Parse 自读版本与 Kind 并分派严格 decoder；
+	// 业务验证完全交给角色 API。
+	artifact, err := wire.Parse(rawQuote)
+	if err != nil {
+		return fmt.Errorf("[parse wire] invalid artifact: %w", err)
+	}
+	debugf("[parse] self-described kind: %d (FileQuote=%d)", artifact.Kind(), wire.FileQuote)
+
+	// 显式事实：过期判断只依赖调用方传入的 Facts.Now。
+	now := time.Now().UTC()
+	facts := protocol.Facts{Now: now, BlockHeight: blockHeight}
+	verified, err := buyerWorkflow.AcceptQuote(facts, rawQuote)
+	if err != nil {
+		return fmt.Errorf("[verify seller signature/expiry] rejected: %w", err)
+	}
+	terms := verified.Terms()
+	debugf("[verify] seller signature : valid")
+	debugf("[verify] quote not expired: yes")
+	if !strings.EqualFold(hex.EncodeToString(privateKey.PubKey().Compressed()), hex.EncodeToString(terms.BuyerPublicKey)) {
 		return errors.New("[verify buyer binding] quote is addressed to a different buyer")
 	}
 	debugf("[verify] buyer binding    : valid")
 
-	quoteID, err := bitfs.FileQuoteTermsID(quote.FileQuoteTermsCBOR)
-	if err != nil {
-		return fmt.Errorf("calculate FileQuoteTermsID: %w", err)
-	}
-	debugf("[id] FileQuoteTermsID       : %s", hex.EncodeToString(quoteID[:]))
-	supportedArbiters, err := bitfs.DecodeSupportedArbiterPublicKeys(terms.SupportedArbiterPublicKeysCBOR)
-	if err != nil {
-		return fmt.Errorf("decode supported arbiters: %w", err)
-	}
+	supportedArbiters := verified.SupportedArbiterPublicKeys()
+	debugf("[id] FileQuoteTermsID       : %s", verified.ID().String())
 	debugf("[terms] SeedHash         : %s", hex.EncodeToString(terms.SeedHash))
 	debugf("[terms] buyer public key  : %s", hex.EncodeToString(terms.BuyerPublicKey))
 	debugf("[terms] seed price        : %d satoshis", terms.SeedPriceSatoshis)
@@ -97,19 +107,13 @@ func run(input io.Reader) error {
 	debugf("[result] quote accepted   : yes")
 	debugf("=== Buyer quote parse complete ===")
 
-	// Every binary value is printed as hex so this output can be piped to another
-	// program without depending on Go's internal structs.
+	// 每个二进制值都以 hex 打印，输出可以继续管道传输而不依赖 Go 内部结构。
 	fmt.Println("VALID=true")
 	fmt.Printf("QUOTE_CBOR_HEX=%s\n", hex.EncodeToString(rawQuote))
-	fmt.Printf("FILE_QUOTE_TERMS_ID_HEX=%s\n", hex.EncodeToString(quoteID[:]))
-	fmt.Printf("TERMS_CBOR_HEX=%s\n", hex.EncodeToString(quote.FileQuoteTermsCBOR))
-	fmt.Printf("SELLER_PUBKEY_HEX=%s\n", hex.EncodeToString(quote.SellerPublicKey))
-	fmt.Printf("TERMS_SIGNATURE_HEX=%s\n", hex.EncodeToString(quote.SellerFileQuoteTermsSignature))
-	decodedTerms, err := bitfs.DecodeFileQuoteTerms(quote.FileQuoteTermsCBOR)
-	if err != nil {
-		return fmt.Errorf("decode quote terms: %w", err)
-	}
-	fmt.Printf("RECOMMENDED_FILENAME=%s\n", decodedTerms.RecommendedFilename)
+	fmt.Printf("FILE_QUOTE_TERMS_ID=%s\n", verified.ID().String())
+	fmt.Printf("SEED_HASH_BYTES=%d\n", len(verified.SeedHash()))
+	fmt.Printf("SELLER_PUBKEY_HEX=%s\n", hex.EncodeToString(verified.SellerPublicKey()))
+	fmt.Printf("RECOMMENDED_FILENAME=%s\n", terms.RecommendedFilename)
 	fmt.Printf("SEED_HASH_HEX=%s\n", hex.EncodeToString(terms.SeedHash))
 	fmt.Printf("BUYER_PUBKEY_HEX=%s\n", hex.EncodeToString(terms.BuyerPublicKey))
 	fmt.Printf("SEED_PRICE_SAT=%d\n", terms.SeedPriceSatoshis)
@@ -126,7 +130,7 @@ func run(input io.Reader) error {
 func readQuoteHex(input io.Reader) (string, error) {
 	if file, ok := input.(*os.File); ok {
 		if info, err := file.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintln(os.Stderr, "请输入卖家输出的 SignedFileQuote hex，然后按回车：")
+			fmt.Fprintln(os.Stderr, "请输入卖家输出的 Kind 1 Artifact hex，然后按回车：")
 			line, err := bufio.NewReader(input).ReadString('\n')
 			if err != nil && len(line) == 0 {
 				return "", fmt.Errorf("read interactive quote hex: %w", err)
@@ -158,20 +162,4 @@ func preview(value string, length int) string {
 
 func debugf(format string, values ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", values...)
-}
-
-func verifySignature(pubkey, payload, signature []byte) error {
-	key, err := ec.ParsePubKey(pubkey)
-	if err != nil {
-		return err
-	}
-	sig, err := ec.ParseDERSignature(signature)
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(payload)
-	if !sig.Verify(digest[:], key) {
-		return errors.New("signature mismatch")
-	}
-	return nil
 }

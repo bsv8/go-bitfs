@@ -1,8 +1,8 @@
 # 008：买方仲裁托管内容取回
 
-这一步演示 Seller 与 Buyer 无法直连、但二者均能连接 Arbiter 时，Buyer 如何用自己可独立计算的 `ArbitrationClaimID` 从 Arbiter 取回已托管的精确内容：Arbiter 验签后原子占用 nonce，返回由自己签名的两分支 Kind 11——可交付分支经 `content_payloads_id` 绑定 exact payload bundle（不内嵌 Kind 8/9），Buyer 完整验收后保存 payload。
+这一步演示 Seller 与 Buyer 无法直连、但二者均能连接 Arbiter 时，Buyer 如何取回已托管的精确内容：Buyer 用角色 API 构造 exact Kind 10（SDK 生成安全随机 nonce），Arbiter 验签后按结果返回由自己签名的两分支 Kind 11——可交付分支经 `content_payloads_id` 绑定 exact payload bundle（不内嵌 Kind 8/9），不可交付分支携带结构化原因。
 
-go-bitfs SDK 无状态：workflow 只持有官方 BSV 私钥。托管记录、nonce 占用表和传输全部由本 demo（调用方应用）实现；SDK 不查数据库、不生成 nonce、不记录下载次数。本 demo 不产生 005、不演示 Buyer 关池、不广播任何交易。
+角色 workflow 只持有受约束 Signer。托管记录、nonce 占用表和传输全部由本 demo（调用方应用）实现；SDK 不查数据库、不记录下载次数。本 demo 演示两个分支：先在 Kind 9 落库前请求一次得到签名 not_ready（typed 结果，不是 error），随后用新 nonce 重试得到 available。验收不产生付款凭证、不改池状态、不关池、不广播任何交易。
 
 运行：
 
@@ -14,42 +14,43 @@ go run ./demo/08_arbitration_content_retrieval/01_retrieve_content
 
 ```text
 // 应用侧（一次性）：Seller 托管 + Arbiter 签署（复用 007）
-arbitrationRequest = seller.BuildArbitrationRequest(opening, signed003, delivery, blockHeight)
-persist(exact Kind 8（内含唯一 payload 真值）, Claim ID, frozen fee)
-arbitrationResponse = arbiter.SignPreparedPayment(prepared)
-persist(exact canonical Kind 9)          // 此后记录才进入 Retrievable
+rawKind8 = seller.PrepareArbitration(...).Bytes()   // 内含唯一 payload 真值
+persist(exact Kind 8)                                // 此时尚无 Kind 9
+prepared = arbiter.PrepareArbitration(ctx, facts, rawKind8, fee)
+persist(Claim ID、冻结费用等托管字段)
+kind9 = arbiter.SignPreparedArbitration(ctx, facts, prepared).Bytes()
+persist(exact canonical Kind 9)                      // 此后记录才可取回
 
-// Buyer 取件
-nonce = crypto/rand(32 bytes)            // 应用生成；SDK 不产生 nonce
-retrievalRequest = buyer.BuildArbitrationContentRequest(opening, signed003, nonce)
-persist(exact Kind 10 before send)
-rawKind11 = app.handleContentRetrieval(marshal(kind10), arbiter)
-result = buyer.AcceptArbitratedContent(
-    quote, opening, previous, signed003, kind10, kind11, {seed})
-persist(exact Kind 11 and payloads)      // 验收后保存
-```
+// Buyer 取件：只需要池 checkpoint + exact 已签 003。
+k10 = buyer.RequestArbitratedContent(ctx, buyer.ArbitrationRetrievalCommand{
+    Pool:          buyerPoolCheckpoint,
+    Authorization: authorizationCheckpoint, // 本地持久化的 003 checkpoint
+}).Bytes()
+persist(exact Kind 10 before send)          // 先持久化再发送
 
-应用侧 `handleContentRetrieval` 的固定顺序：
+// Arbiter 应用：按请求状态选择分支并签署 Kind 11。
+custody = arbiter.VerifyRetrievableCustody(k10.Bytes(), storedKind8, storedKind9)
+answer = arbiter.BuildAvailableRetrieval(ctx, requestID, custody)   // 可交付
+//   或 arbiter.BuildUnavailableRetrieval(ctx, requestID, reason)   // 不可交付
 
-```text
-strict decode Kind 10
-→ 幂等重放检查：同一 content_retrieval_request_id 已有首次持久化应答时原样重发
-→ 按 Claim ID 查 custody record          // 无记录且无墓碑 → 签名 not_received
-→ 要求 exact Kind 8 + exact Kind 9 都已持久化   // 缺 Kind 9 → 鉴权后签名 not_ready
-→ SDK 完整验证存储证据与 Buyer 签名       // 失败 → Unauthorized（统一语义）
-→ 状态感知原子事务：custody 复核 + unique(Claim ID, Nonce) 唯一键 + 首次应答插入
-// 并发败者重放胜者已提交的字节（对 Buyer 与首次响应逐字节一致）
-→ 构造 available 分支，payload 取自验证过的证据链字节并经 content_payloads_id 绑定
+// Buyer 完整验收（时间无关）。
+outcome = buyer.VerifyArbitratedContent(ctx, buyer.ArbitratedContentCommand{
+    Quote: verifiedQuote, Pool: buyerPoolCheckpoint,
+    Request: authorizationCheckpoint,
+    RetrievalRequestRaw: k10.Bytes(), RetrievalResponseRaw: answer.Bytes(),
+    Seed: seedBytes,
+})
 ```
 
 关键边界：
 
-- **Claim ID 不是下载密码**。只提交 Claim ID 或只知道 URL 的请求没有 Buyer 签名，一律 `Unauthorized`。
-- **nonce 一次性**。`not_ready`、`custody_gone`、`available` 都在鉴权通过后原子占用 `(Claim ID, Nonce)`，并把首次签署的 Kind 11 持久化为该请求的唯一答案；同请求重放原样重发，状态变化后绝不升级为可交付授权——Buyer 收到 `not_ready` 后必须用新 nonce 重新签名重试。nonce 不能代替传输的机密性/完整性/身份认证——生产必须使用 TLS 或等价安全通道。
-- **retention 属于应用**。留存期内允许 Buyer 用新 nonce 重复下载；留存期结束并安全删除后返回签名的 `Gone`，已持久化的首次应答随内容一起删除，nonce 去重记录至少保留到记录删除。
+- **nonce 由 SDK 生成且必须原样重放**。`RequestArbitratedContent` 的默认入口由 SDK 生成安全随机 nonce；网络超时重试必须原样重发已持久化的 exact Kind 10 Artifact，绝不能重新调用生成新 nonce。只有明确收到 not_ready 才换新 nonce 重新构造。
+- **unavailable 是 typed 结果，不是 error**。`VerifyArbitratedContent` 返回的 Result 带 `Available=false` 与结构化 `UnavailableReason`；应用据此决定换新 nonce、等待或终止。
+- **Claim ID 不是下载密码**。只提交 Claim ID 或只知道 URL 的请求没有 Buyer 签名，鉴权一律拒绝。
 - **验收是时间无关的**。取件不重新执行 Quote 过期、delivery deadline 或 refund 未过期判断；这些门禁在 Arbiter 当初签署 Kind 9 之前已经执行过。
 - **Kind 11 不声称链上结算**。它只证明 exact Kind 9 已由 Arbiter 签署并持久化；Seller 是否合并签名、广播或上链由 Seller 应用负责对账。
+- nonce 不能代替传输的机密性/完整性/身份认证——生产必须使用 TLS 或等价安全通道。
 
-输出说明：命令打印 Claim ID、nonce hex、Kind 10/11 尺寸、payload 数量与最终验证结果；不输出原始内容、私钥或完整可重放请求。
+输出说明：命令打印 Claim ID、不可交付原因码、Kind 10/11 尺寸、payload 数量与最终验证结果；不输出原始内容、私钥或完整可重放请求。
 
-当 Seller 从未提交 007 时，Arbiter 没有可取回的内容：Buyer 只能继续尝试直连 Seller 或等待网络恢复，或在 refund locktime 到期后按 002 的预签名 RefundTx 广播退款。协议中没有 Buyer+Arbiter 关池路径。
+当 Seller 从未提交 007 时，Arbiter 没有可取回的内容：Buyer 只能继续尝试直连 Seller 或等待网络恢复，或在 refund locktime 到期后按 002 的预签名 RefundTx 广播退款（`buyer.BuildMaturedRefund`）。协议中没有 Buyer+Arbiter 关池路径。

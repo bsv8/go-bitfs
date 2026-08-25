@@ -68,10 +68,25 @@ func (f Facts) RefundMatured(lockTime RefundLockTime) (bool, error) {
 	return refundlock.CheckExpired(uint32(lockTime), now, 0) == nil, nil
 }
 
+// ClassifyRefundGate 把 RefundMatured 的错误归类为稳定的门禁分类：
+//   - 事实缺失（ErrFactsMissing）→ invalid_evidence（应用没有提供本操作所需
+//     的显式事实，属于输入问题而不是协议状态问题）；
+//   - 其余错误原样透传。
+//
+// 成功时 matured 指示锁定是否已到期，由调用方映射为 expired/not_matured。
+func (f Facts) ClassifyRefundGate(lockTime RefundLockTime) (matured bool, err error) {
+	matured, err = f.RefundMatured(lockTime)
+	if err != nil && errors.Is(err, ErrFactsMissing) {
+		return false, &Error{Op: "protocol.Facts.RefundMatured", Code: CodeInvalidEvidence, Field: "facts", Cause: err}
+	}
+	return matured, err
+}
+
 // CheckRefundNotExpired 是正向操作门禁：refund 已到期时返回 CodeExpired，
-// 未到期返回 nil。只读取锁定类型对应的那一份事实。
+// 未到期返回 nil；事实缺失时返回 invalid_evidence。只读取锁定类型对应的
+// 那一份事实。
 func (f Facts) CheckRefundNotExpired(lockTime RefundLockTime) error {
-	matured, err := f.RefundMatured(lockTime)
+	matured, err := f.ClassifyRefundGate(lockTime)
 	if err != nil {
 		return err
 	}
@@ -82,9 +97,9 @@ func (f Facts) CheckRefundNotExpired(lockTime RefundLockTime) error {
 }
 
 // CheckRefundMatured 是成熟门禁：refund 尚未到期时返回 CodeNotMatured；
-// 已到期返回 nil（可执行退款）。
+// 已到期返回 nil（可执行退款）；事实缺失时返回 invalid_evidence。
 func (f Facts) CheckRefundMatured(lockTime RefundLockTime) error {
-	matured, err := f.RefundMatured(lockTime)
+	matured, err := f.ClassifyRefundGate(lockTime)
 	if err != nil {
 		return err
 	}

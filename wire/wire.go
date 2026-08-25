@@ -12,8 +12,10 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-// ProtocolFamily is the wire protocol identifier carried by the transport layer.
-const ProtocolFamily = "bitfs.protocol.v1"
+// ProtocolFamily 是外部协议族/manifest 标识字符串（wire 报文本身只携带
+// [WireVersion, kind, ...]，不含族名称）。它是 protocol.ProtocolFamily 的
+// 别名，仓库内不存在第二份版本字符串。
+const ProtocolFamily = protocol.ProtocolFamily
 
 // Kind identifies the message type selected by the transport. The outer pair
 // [protocol.WireVersion, kind] opens every complete wire message; the strict

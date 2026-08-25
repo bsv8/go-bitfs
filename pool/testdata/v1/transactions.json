@@ -1,5 +1,5 @@
 {
-  "protocol": "bitfs.pool.workflow.v1",
+  "protocol": "bitfs.protocol.v1",
   "wire_version": 1,
   "fixed_keys": "buyer=0xb1*32 seller=0x52*32 arbiter=0xa3*32; funding input zero-hash placeholder",
   "entries": [

@@ -152,9 +152,9 @@ type PrepareOpeningCommand struct {
 	ArbiterPublicKey protocol.PublicKey
 }
 
-// PrepareOpeningResult 是 PreparePoolOpening 的统一 Result：Outbound 是待发送
+// PreparePoolOpeningResult 是 PreparePoolOpening 的统一 Result：Outbound 是待发送
 // 的 exact Kind 2 Artifact——发送前必须先持久化 Checkpoint。
-type PrepareOpeningResult struct {
+type PreparePoolOpeningResult struct {
 	// Outbound 是待发送 exact Kind 2 wire Artifact。
 	Outbound wire.Artifact
 	// Checkpoint 是必须先于 Outbound 发送而持久化的买方开池 checkpoint。

@@ -516,9 +516,6 @@ func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
 	if prepared.DeadlineUnixSeconds() != content.UnixSeconds(base.Add(30*time.Second).Unix()) {
 		t.Fatalf("prepared deadline drifted: %d", int64(prepared.DeadlineUnixSeconds()))
 	}
-	if !prepared.PreparedAt().Equal(base) {
-		t.Fatalf("prepared.at drifted from facts.now: %v", prepared.PreparedAt())
-	}
 
 	// 持久化间隙过期：把签名时的 Facts.Now 推到截止秒（含），必须拒签。
 	gapFacts := protocol.Facts{Now: time.Unix(int64(prepared.DeadlineUnixSeconds()), 0).UTC(), BlockHeight: 900000}

@@ -100,9 +100,9 @@ func (c *PoolCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
 	return details.RefundTemplateTxID
 }
 
-// OpeningPreparationResult 是 PreparePoolOpening 的统一 Result：Outbound 是
+// PreparePoolOpeningResult 是 PreparePoolOpening 的统一 Result：Outbound 是
 // 待发送 exact Kind 3——发送前必须先持久化 Checkpoint。
-type OpeningPreparationResult struct {
+type PreparePoolOpeningResult struct {
 	// Outbound 是待发送 exact Kind 3 预签响应 Artifact。
 	Outbound wire.Artifact
 	// Checkpoint 是必须先持久化的卖方预签 checkpoint。

@@ -107,8 +107,9 @@ func SignWireDocument(ctx context.Context, signer Signer, wireVersion, wireKind 
 }
 
 // ErrHighSSignature 标记一个 S > N/2 的可延展（high-S）签名。协议只接受
-// low-S DER：同一认证文档因此只存在一份有效 wire 签名，杜绝 exact-wire
-// 双真值与不必要的重复证据冲突。
+// low-S DER：low-S 消除 ECDSA 的对称 high-S 可延展形式，但不承诺不同签名
+// 调用产生逐字节相同的 DER——不同 nonce 仍可给出多份合法 low-S 签名。
+// exact Artifact 的幂等依赖"首次成功后持久化并原样重放"，而不是签名复现。
 var ErrHighSSignature = errors.New("high-S signature is rejected; only low-S DER is canonical")
 
 // verifyLowS enforces the protocol-wide low-S rule over any parsed ECDSA

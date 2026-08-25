@@ -237,8 +237,7 @@ type openedPool struct {
 
 func (f *buyerFixture) openPoolWith(t *testing.T, quote *content.VerifiedQuote, expiry uint32, feeRate uint64, fundingRaw []byte) *openedPool {
 	t.Helper()
-	ctx := context.Background()
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(context.Background(), PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           fundingRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(expiry),
@@ -249,11 +248,11 @@ func (f *buyerFixture) openPoolWith(t *testing.T, quote *content.VerifiedQuote, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	presign, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	presign, err := f.Seller.PreparePoolOpening(context.Background(), prepared.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed, err := f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, presign.Outbound.Bytes())
+	completed, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, presign.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +387,7 @@ func TestAcceptQuoteReturnsVerifiedSnapshotAndRejectsBadInputs(t *testing.T) {
 	requireCode(t, err, protocol.CodeMalformedWire)
 
 	// 路由声明 Kind 与报文自描述 Kind 错配 → unsupported_kind。
-	prepared, err := f.Buyer.PreparePoolOpening(context.Background(), testFacts(testBaseTime), PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(context.Background(), PrepareOpeningCommand{
 		Quote:                           verified,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -408,7 +407,6 @@ func TestAcceptQuoteReturnsVerifiedSnapshotAndRejectsBadInputs(t *testing.T) {
 func TestPreparePoolOpeningProducesDeterministicWireAndPrivateCheckpoint(t *testing.T) {
 	f := newBuyerFixture(t)
 	quote, _ := f.defaultQuote(t)
-	ctx := context.Background()
 	command := PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
@@ -417,7 +415,7 @@ func TestPreparePoolOpeningProducesDeterministicWireAndPrivateCheckpoint(t *test
 		SellerPublicKey:                 f.sellerPubKey,
 		ArbiterPublicKey:                f.arbiterPubKey,
 	}
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), command)
+	prepared, err := f.Buyer.PreparePoolOpening(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +447,7 @@ func TestPreparePoolOpeningProducesDeterministicWireAndPrivateCheckpoint(t *test
 	}
 
 	// 纯函数性质：相同输入产生逐字节相同的请求。
-	repeat, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), command)
+	repeat, err := f.Buyer.PreparePoolOpening(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,9 +479,8 @@ func decodePresignResponse(t *testing.T, raw []byte) *pool.RefundPresignResponse
 func TestCompletePoolOpeningRoundTripAndRejectsTampering(t *testing.T) {
 	f := newBuyerFixture(t)
 	quote, _ := f.defaultQuote(t)
-	ctx := context.Background()
 
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(context.Background(), PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -494,13 +491,13 @@ func TestCompletePoolOpeningRoundTripAndRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	presign, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	presign, err := f.Seller.PreparePoolOpening(context.Background(), prepared.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 缺失 checkpoint → state_conflict。
-	_, err = f.Buyer.CompletePoolOpening(ctx, nil, presign.Outbound.Bytes())
+	_, err = f.Buyer.CompletePoolOpening(nil, presign.Outbound.Bytes())
 	requireCode(t, err, protocol.CodeStateConflict)
 
 	// 卖方退款签名被翻转 → invalid_evidence。
@@ -510,7 +507,7 @@ func TestCompletePoolOpeningRoundTripAndRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, tamperedRaw.Bytes())
+	_, err = f.Buyer.CompletePoolOpening(prepared.Checkpoint, tamperedRaw.Bytes())
 	requireCode(t, err, protocol.CodeInvalidEvidence)
 
 	// 响应关联 ID 指向另一个池 → state_conflict。
@@ -520,11 +517,11 @@ func TestCompletePoolOpeningRoundTripAndRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, foreignRaw.Bytes())
+	_, err = f.Buyer.CompletePoolOpening(prepared.Checkpoint, foreignRaw.Bytes())
 	requireCode(t, err, protocol.CodeStateConflict)
 
 	// 正常往返：verified opening + 初始池状态。
-	completed, err := f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, presign.Outbound.Bytes())
+	completed, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, presign.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -957,7 +954,6 @@ func TestBuildMaturedRefundHonorsExplicitLocktimeFacts(t *testing.T) {
 func TestCheckpointRestoreRoundTripAndConflicts(t *testing.T) {
 	f := newBuyerFixture(t)
 	p := f.openDefaultPool(t)
-	ctx := context.Background()
 
 	// OpeningCheckpoint restore：重派生关联 ID 并保留私有资金交易。
 	restoredOpening, err := RestoreOpeningCheckpoint(p.rawKind2, f.FundingTransactionRaw)
@@ -973,7 +969,7 @@ func TestCheckpointRestoreRoundTripAndConflicts(t *testing.T) {
 	if restoredOpening.Request() == nil {
 		t.Fatal("restored opening checkpoint lost the signed request")
 	}
-	recompleted, err := f.Buyer.CompletePoolOpening(ctx, restoredOpening, p.rawKind3)
+	recompleted, err := f.Buyer.CompletePoolOpening(restoredOpening, p.rawKind3)
 	if err != nil {
 		t.Fatalf("restored checkpoint cannot complete the round trip: %v", err)
 	}

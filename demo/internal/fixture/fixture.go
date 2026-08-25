@@ -184,7 +184,7 @@ func New(ctx context.Context) (*Fixture, error) {
 	f.FundingTransactionRaw = funding
 	f.ExpiryLockTime = protocol.RefundLockTime(now.Add(time.Hour).Unix())
 
-	prepared, err := buyerWorkflow.PreparePoolOpening(ctx, facts, buyer.PrepareOpeningCommand{
+	prepared, err := buyerWorkflow.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
 		Quote:                           f.VerifiedQuote,
 		FundingTransactionRaw:           funding,
 		ExpiryLockTime:                  f.ExpiryLockTime,
@@ -197,13 +197,13 @@ func New(ctx context.Context) (*Fixture, error) {
 	}
 	f.BuyerOpening = prepared.Checkpoint // 应用先持久化 checkpoint 再发送 Kind 2
 
-	presignResult, err := sellerWorkflow.PreparePoolOpening(ctx, facts, prepared.Outbound.Bytes())
+	presignResult, err := sellerWorkflow.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("presign fixture opening: %w", err)
 	}
 	f.SellerOpening = presignResult.Checkpoint // 应用先持久化预签证据再发送 Kind 3
 
-	completed, err := buyerWorkflow.CompletePoolOpening(ctx, f.BuyerOpening, presignResult.Outbound.Bytes())
+	completed, err := buyerWorkflow.CompletePoolOpening(f.BuyerOpening, presignResult.Outbound.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("accept fixture refund presign: %w", err)
 	}

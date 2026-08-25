@@ -220,13 +220,13 @@ type openedPool struct {
 	rawKind2      []byte
 	rawKind3      []byte
 	rawKind4      []byte
-	presignResult *OpeningPreparationResult
+	presignResult *PreparePoolOpeningResult
 }
 
 func (f *sellerFixture) openPoolWith(t *testing.T, quote *content.VerifiedQuote, expiry uint32, feeRate uint64, fundingRaw []byte) *openedPool {
 	t.Helper()
 	ctx := context.Background()
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           fundingRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(expiry),
@@ -237,11 +237,11 @@ func (f *sellerFixture) openPoolWith(t *testing.T, quote *content.VerifiedQuote,
 	if err != nil {
 		t.Fatal(err)
 	}
-	presign, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	presign, err := f.Seller.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed, err := f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, presign.Outbound.Bytes())
+	completed, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, presign.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestPreparePoolOpeningCorrelatesPresignEvidence(t *testing.T) {
 	quote, _ := f.defaultQuote(t)
 	ctx := context.Background()
 
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -447,7 +447,7 @@ func TestPreparePoolOpeningCorrelatesPresignEvidence(t *testing.T) {
 	}
 
 	// 预签请求指定其他卖方 → unauthorized。
-	_, err = f.OtherSeller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	_, err = f.OtherSeller.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
 	requireCode(t, err, protocol.CodeUnauthorized)
 
 	// 篡改买方退款签名 → 卖方验证失败。
@@ -464,17 +464,17 @@ func TestPreparePoolOpeningCorrelatesPresignEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), tamperedRaw.Bytes()); err == nil {
+	if _, err := f.Seller.PreparePoolOpening(ctx, tamperedRaw.Bytes()); err == nil {
 		t.Fatal("tampered refund presign request was accepted")
 	}
 
 	// 畸形字节 → malformed_wire。
-	if _, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), []byte{0x01}); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+	if _, err := f.Seller.PreparePoolOpening(ctx, []byte{0x01}); !protocol.IsCode(err, protocol.CodeMalformedWire) {
 		t.Fatalf("garbage request accepted: %v", err)
 	}
 
 	// 正常预签：响应关联 ID 与本地重派生一致，退款签名可独立验证。
-	result, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	result, err := f.Seller.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestVerifyFundingDeliveryCompletesProofAndInitialPool(t *testing.T) {
 	quote, _ := f.defaultQuote(t)
 	ctx := context.Background()
 
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -549,11 +549,11 @@ func TestVerifyFundingDeliveryCompletesProofAndInitialPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	presign, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), prepared.Outbound.Bytes())
+	presign, err := f.Seller.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed, err := f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, presign.Outbound.Bytes())
+	completed, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, presign.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}

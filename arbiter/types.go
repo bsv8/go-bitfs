@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash"
-	"time"
 
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/content"
@@ -34,7 +33,6 @@ type PreparedArbitration struct {
 	arbiterPublicKey       []byte
 	evidenceCommitment     []byte
 	deadlineUnixSeconds    int64
-	preparedAt             time.Time
 }
 
 // Request 返回深拷贝的 exact Kind 8 托管请求（含 Claim、卖方签名与 payload
@@ -47,6 +45,8 @@ func (prepared *PreparedArbitration) Request() *arbitration.ArbitrationRequest {
 }
 
 // RequestCBOR 返回 exact Kind 8 的 canonical wire 字节；发送与持久化都用它。
+// （PreparedAt 之类的观测元数据由应用连同其 Facts 来源自行保存，不属于可
+// 验证协议证据，因此不在本值上。）
 func (prepared *PreparedArbitration) RequestCBOR() ([]byte, error) {
 	if prepared == nil || prepared.request == nil {
 		return nil, protocol.Errorf("arbiter.PreparedArbitration.RequestCBOR", protocol.CodeInvalidEvidence, 8, "request", "prepared arbitration is empty")
@@ -117,14 +117,6 @@ func (prepared *PreparedArbitration) DeadlineUnixSeconds() content.UnixSeconds {
 		return 0
 	}
 	return content.UnixSeconds(prepared.deadlineUnixSeconds)
-}
-
-// PreparedAt 返回 Prepare 完成时刻（来自当时的 Facts.Now，非系统时钟读取）。
-func (prepared *PreparedArbitration) PreparedAt() time.Time {
-	if prepared == nil {
-		return time.Time{}
-	}
-	return prepared.preparedAt
 }
 
 // ArbiterPublicKey 返回 Claim 锁定脚本中恢复的仲裁方压缩公钥副本。

@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/bsv8/go-bitfs/arbitration"
@@ -31,6 +32,16 @@ func TestPublicRoleErrorsAlwaysClassified(t *testing.T) {
 			t.Fatalf("%s: unclassified error: %v", name, err)
 		}
 	}
+	// assertExactCode 比 assertCode 更严格：CodeOf 必须精确命中 want。
+	// 退款门禁路径用它锁定"事实缺失 = invalid_evidence"，防止调用层包装
+	// 把输入问题误报成 expired/not_matured 这类协议状态结论。
+	assertExactCode := func(name string, err error, want protocol.ErrorCode) {
+		t.Helper()
+		assertCode(name, err)
+		if code, _ := protocol.CodeOf(err); code != want {
+			t.Fatalf("%s: error code = %v, want exactly %s", name, code, want)
+		}
+	}
 
 	// ---- buyer ----
 	b := f.Buyer
@@ -39,12 +50,12 @@ func TestPublicRoleErrorsAlwaysClassified(t *testing.T) {
 	{
 		_, err = b.AcceptQuote(protocol.Facts{Now: testBaseTime}, junk[:10])
 		assertCode("buyer.AcceptQuote malformed", err)
-		_, err = b.PreparePoolOpening(ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{})
+		_, err = b.PreparePoolOpening(context.Background(), buyer.PrepareOpeningCommand{})
 		assertCode("buyer.PreparePoolOpening missing quote", err)
-		_, err = b.CompletePoolOpening(ctx, nil, junk)
+		_, err = b.CompletePoolOpening(nil, junk)
 		assertCode("buyer.CompletePoolOpening nil checkpoint", err)
 		_, err = b.RequestContent(ctx, protocol.Facts{}, buyer.RequestContentCommand{})
-		assertCode("buyer.RequestContent zero facts", err)
+		assertExactCode("buyer.RequestContent zero facts", err, protocol.CodeInvalidEvidence)
 		_, err = b.VerifyDeliveryAndPreparePayment(ctx, testFacts(testBaseTime), buyer.VerifyDeliveryCommand{DeliveryRaw: junk})
 		assertCode("buyer.VerifyDelivery malformed kind6", err)
 		_, err = b.PrepareClose(ctx, protocol.Facts{}, buyer.PrepareCloseCommand{})
@@ -52,7 +63,7 @@ func TestPublicRoleErrorsAlwaysClassified(t *testing.T) {
 		_, err = b.VerifyCompletedClose(buyer.VerifyCloseCommand{})
 		assertCode("buyer.VerifyCompletedClose empty command", err)
 		_, err = b.BuildMaturedRefund(protocol.Facts{}, p.buyerPool)
-		assertCode("buyer.BuildMaturedRefund zero facts", err)
+		assertExactCode("buyer.BuildMaturedRefund zero facts", err, protocol.CodeInvalidEvidence)
 		_, err = b.RequestArbitratedContent(ctx, buyer.ArbitrationRetrievalCommand{})
 		assertCode("buyer.RequestArbitratedContent empty command", err)
 		_, err = b.VerifyArbitratedContent(ctx, buyer.ArbitratedContentCommand{RetrievalRequestRaw: junk, RetrievalResponseRaw: junk})
@@ -64,12 +75,12 @@ func TestPublicRoleErrorsAlwaysClassified(t *testing.T) {
 	_, err = s.CreateQuote(ctx, protocol.Facts{}, seller.QuoteDraft{})
 	assertCode("seller.CreateQuote zero facts", err)
 	{
-		_, err = s.PreparePoolOpening(ctx, testFacts(testBaseTime), junk)
+		_, err = s.PreparePoolOpening(context.Background(), junk)
 		assertCode("seller.PreparePoolOpening junk kind2", err)
 		_, err = s.VerifyFundingDelivery(nil, junk)
 		assertCode("seller.VerifyFundingDelivery junk kind4", err)
 		_, err = s.DeliverContent(ctx, protocol.Facts{}, seller.DeliveryCommand{})
-		assertCode("seller.DeliverContent zero facts", err)
+		assertExactCode("seller.DeliverContent zero facts", err, protocol.CodeInvalidEvidence)
 		_, err = s.CompletePayment(ctx, protocol.Facts{}, seller.PaymentCommand{UpdateRaw: junk})
 		assertCode("seller.CompletePayment junk kind7", err)
 		_, err = s.CompleteClose(ctx, protocol.Facts{}, seller.CloseCommand{})

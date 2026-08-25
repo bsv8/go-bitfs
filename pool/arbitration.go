@@ -442,7 +442,7 @@ func CheckArbitrationRefundNotExpired(refundTemplateRaw []byte, facts protocol.F
 		return err
 	}
 	if err := facts.CheckRefundNotExpired(lockTime); err != nil {
-		return protocol.Wrap(err, op, protocol.CodeExpired, 8, "refund_locktime")
+		return protocol.WrapClassified(err, op, 8, "refund_locktime")
 	}
 	return nil
 }

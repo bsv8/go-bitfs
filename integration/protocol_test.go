@@ -266,7 +266,7 @@ type openedPool struct {
 // 再把字节交给对端角色 API。
 func (f *protocolFixture) openPool(t *testing.T, fundingRaw []byte) *openedPool {
 	t.Helper()
-	prepared, err := f.Buyer.PreparePoolOpening(f.ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(f.ctx, buyer.PrepareOpeningCommand{
 		Quote:                           f.buyerQuote,
 		FundingTransactionRaw:           fundingRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -279,13 +279,13 @@ func (f *protocolFixture) openPool(t *testing.T, fundingRaw []byte) *openedPool 
 	}
 	rawKind2 := prepared.Outbound.Bytes() // 应用先持久化 checkpoint 与 bytes 再发送
 
-	presign, err := f.Seller.PreparePoolOpening(f.ctx, testFacts(testBaseTime), rawKind2)
+	presign, err := f.Seller.PreparePoolOpening(f.ctx, rawKind2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rawKind3 := presign.Outbound.Bytes()
 
-	completed, err := f.Buyer.CompletePoolOpening(f.ctx, prepared.Checkpoint, rawKind3)
+	completed, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, rawKind3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ func TestWrongRolesAndExpiredFactsAreClassified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wrongSeller.PreparePoolOpening(f.ctx, testFacts(testBaseTime), p.rawKind2); !protocol.IsCode(err, protocol.CodeUnauthorized) {
+	if _, err := wrongSeller.PreparePoolOpening(f.ctx, p.rawKind2); !protocol.IsCode(err, protocol.CodeUnauthorized) {
 		t.Fatalf("wrong seller presign error = %v, want unauthorized", err)
 	}
 

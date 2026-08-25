@@ -248,7 +248,7 @@ _ = vq.AllowsArbiter(arbiterPubKey)
 fundingTx := wallet.BuildSignedFundingTransaction(buyerPubKey, sellerPubKey, arbiterPubKey, poolOutputSat)
 
 // 0201：SDK 返回待发送 Artifact 与必须先持久化的 OpeningCheckpoint。
-prepared, err := buyerWorkflow.PreparePoolOpening(ctx, facts, buyer.PrepareOpeningCommand{
+prepared, err := buyerWorkflow.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
     Quote:                           vq,
     FundingTransactionRaw:           fundingTx,
     ExpiryLockTime:                  uint32(now.Add(time.Hour).Unix()),
@@ -265,7 +265,7 @@ journal.SaveOutbox("kind2", prepared.Outbound.Bytes())
 sendToSeller(prepared.Outbound.Bytes())
 
 // 0202：卖方验证请求并预签。同样先持久化再回应。
-presign, err := sellerWorkflow.PreparePoolOpening(ctx, facts, receivedKind2Raw)
+presign, err := sellerWorkflow.PreparePoolOpening(ctx, receivedKind2Raw)
 if err != nil { /* ... */ }
 sellerPresignCP := presign.Checkpoint                  // 先落库
 journal.SaveOutbox("kind3", presign.Outbound.Bytes())
@@ -273,7 +273,7 @@ sendToBuyer(presign.Outbound.Bytes())
 
 // 0203：买家加载 0201 的 exact bytes 全量重验后显式传回。
 restored, err := buyer.RestoreOpeningCheckpoint(savedKind2Raw, savedFundingTxRaw)
-completed, err := buyerWorkflow.CompletePoolOpening(ctx, restored, receivedKind3Raw)
+completed, err := buyerWorkflow.CompletePoolOpening(restored, receivedKind3Raw)
 if err != nil { /* 关联 ID 错配或验签失败按分类拒绝 */ }
 buyerPool := completed.InitialPool                     // 初始池 checkpoint
 openingProofCBOR, _ := pool.EncodeOpeningProof(completed.Opening.Proof())

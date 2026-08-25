@@ -65,6 +65,16 @@ func TestCurrentDocumentsExcludeRetiredProtocol(t *testing.T) {
 		{"retired buyer methods", regexp.MustCompile(`AcceptDelivery\(|BuildImmediateClose\(|BuildContentRequest\(|BuildRefundAfterExpiry\(|BuildArbitrationContentRequest\(|BuildFundingTransactionDelivery\(|CompleteImmediateClose\( |AcceptRefundPresign\(|AcceptArbitratedContent\(`)},
 		{"retired seller methods", regexp.MustCompile(`PresignPoolOpening\(|AcceptPoolFunding\(|BuildContentDelivery\(|AcceptPayment\(|SignImmediateClose\(|BuildArbitrationRequest\( `)},
 		{"retired arbitration workflow", regexp.MustCompile(`arbitration\.NewWorkflow|\bPreparePayment\(|\bSignPreparedPayment\(|PreparedPayment\b`)},
+		// 文档中的 retired 公开 API 形态（负向检查：签名 lint 只验证"存在一份
+		// 正确签名"，这里负责拒绝残留的旧签名/旧类型名）。
+		{"retired result type names", regexp.MustCompile(`\bPrepareOpeningResult\b|\bOpeningPreparationResult\b`)},
+		{"retired PreparedAt getter", regexp.MustCompile(`\.?PreparedAt\(\)`)},
+		// 声明形态（签名 lint 只验证存在一份正确签名，这里拒绝残留旧签名）与
+		// 调用表达式形态都要拦截：示例代码里的调用不会出现在任何 func 声明中。
+		{"retired PreparePoolOpening facts signature", regexp.MustCompile(`PreparePoolOpening\([^)\n]*facts protocol\.Facts`)},
+		{"retired PreparePoolOpening ctx+facts call", regexp.MustCompile(`PreparePoolOpening\(\s*ctx\s*,\s*facts\s*,`)},
+		{"retired CompletePoolOpening ctx signature", regexp.MustCompile(`CompletePoolOpening\(\s*(?:ctx|context\.Context)\s*,`)},
+		{"retired pool ProtocolFamily", regexp.MustCompile(`pool\.ProtocolFamily|bitfs\.pool\.workflow\.v1`)},
 	}
 	// GoDoc 静态门禁：发布文档由这些注释生成，旧 004 描述一旦回归会直接
 	// 传播到 generated API 与翻译页。

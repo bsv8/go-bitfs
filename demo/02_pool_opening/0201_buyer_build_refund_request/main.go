@@ -119,7 +119,7 @@ func main() {
 	// 持久化的 OpeningCheckpoint。SDK 不做任何保存；应用必须先持久化
 	// checkpoint 的证据，再发送 Outbound。这里由 demo checkpoint 承担
 	// “应用数据库”的角色。
-	prepared, err := session.Buyer.PreparePoolOpening(ctx, poolopening.Facts(nowUTC()), openingCommand)
+	prepared, err := session.Buyer.PreparePoolOpening(ctx, openingCommand)
 	if err != nil {
 		fail(fmt.Errorf("buyer.PreparePoolOpening: %w", err))
 	}

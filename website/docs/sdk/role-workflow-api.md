@@ -54,7 +54,7 @@ func (w *Workflow) AcceptQuote(facts protocol.Facts, rawKind1 []byte) (*content.
 
 // PreparePoolOpening 构造并签署 Kind 2 预签请求：返回待发送 Artifact 与必须
 // 先持久化的 OpeningCheckpoint。资金交易原文只存在于 checkpoint。
-func (w *Workflow) PreparePoolOpening(ctx context.Context, facts protocol.Facts, command PrepareOpeningCommand) (*PrepareOpeningResult, error)
+func (w *Workflow) PreparePoolOpening(ctx context.Context, command PrepareOpeningCommand) (*PreparePoolOpeningResult, error)
 
 type PrepareOpeningCommand struct {
     Quote                           *content.VerifiedQuote // AcceptQuote 的返回值
@@ -65,14 +65,14 @@ type PrepareOpeningCommand struct {
     ArbiterPublicKey                protocol.PublicKey
 }
 
-type PrepareOpeningResult struct {
+type PreparePoolOpeningResult struct {
     Outbound   wire.Artifact       // 待发送 exact Kind 2；先持久化 Checkpoint 再发送
     Checkpoint *OpeningCheckpoint  // 含私有资金交易原文
 }
 
 // CompletePoolOpening 用保存的 OpeningCheckpoint 验收 exact Kind 3：重派生池
 // 关联 ID 并拒绝任何错配，验卖方预签，产出 verified opening 与初始池 checkpoint。
-func (w *Workflow) CompletePoolOpening(ctx context.Context, checkpoint *OpeningCheckpoint, rawKind3 []byte) (*CompleteOpeningResult, error)
+func (w *Workflow) CompletePoolOpening(checkpoint *OpeningCheckpoint, rawKind3 []byte) (*CompleteOpeningResult, error)
 
 type CompleteOpeningResult struct {
     Opening     *pool.VerifiedOpening // 完整已验证开池证明
@@ -232,9 +232,9 @@ type QuoteResult struct {
 
 // PreparePoolOpening 验证 exact Kind 2 并计算卖方退款预签：返回待发送 Kind 3
 // Artifact 与必须先持久化的 OpeningCheckpoint。
-func (w *Workflow) PreparePoolOpening(ctx context.Context, facts protocol.Facts, rawKind2 []byte) (*OpeningPreparationResult, error)
+func (w *Workflow) PreparePoolOpening(ctx context.Context, rawKind2 []byte) (*PreparePoolOpeningResult, error)
 
-type OpeningPreparationResult struct {
+type PreparePoolOpeningResult struct {
     Outbound   wire.Artifact       // 待发送 exact Kind 3
     Checkpoint *OpeningCheckpoint  // 预签证据；VerifyFundingDelivery 需要它
 }
@@ -351,7 +351,7 @@ func (w *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee
 // Request() / RequestCBOR() / Claim() / RefundTemplateTxID() /
 // ArbitrationClaimID() / PaymentAuthorizationID() / FeeSatoshis() /
 // ContentPayloadsCBOR() / ContentPayloads() / DeadlineUnixSeconds() /
-// PreparedAt() / ArbiterPublicKey()
+// ArbiterPublicKey()
 
 // SignPreparedArbitration 是先持久化后的签名步骤：从冻结的 exact Kind 8 字节
 // 独立重建交易与 digest，重新比较 Claim ID、费用、角色、deadline（本次显式
@@ -427,18 +427,18 @@ vq, err := buyerWorkflow.AcceptQuote(ctx, facts, receivedKind1Raw)
 
 ```go
 // 0201: compute request + private state; SAVE Checkpoint BEFORE sending Outbound.
-prepared, err := buyerWorkflow.PreparePoolOpening(ctx, facts, buyer.PrepareOpeningCommand{ /* ... */ })
+prepared, err := buyerWorkflow.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{ /* ... */ })
 journal.SaveBuyerOpening(prepared.Outbound.Bytes(), prepared.Checkpoint)
 sendToSeller(prepared.Outbound.Bytes())
 
 // 0202: verify and presign; SAVE Checkpoint BEFORE sending Outbound.
-presign, err := sellerWorkflow.PreparePoolOpening(ctx, facts, receivedKind2Raw)
+presign, err := sellerWorkflow.PreparePoolOpening(ctx, receivedKind2Raw)
 journal.SaveSellerPresign(presign.Checkpoint)
 sendToBuyer(presign.Outbound.Bytes())
 
 // 0203: restore from exact persisted evidence, then accept the response.
 restored, err := buyer.RestoreOpeningCheckpoint(savedKind2Raw, savedFundingRaw)
-completed, err := buyerWorkflow.CompletePoolOpening(ctx, restored, receivedKind3Raw)
+completed, err := buyerWorkflow.CompletePoolOpening(restored, receivedKind3Raw)
 buyerPool := completed.InitialPool
 
 // 0204: package the funding transaction; 0205: verify against the saved presign.

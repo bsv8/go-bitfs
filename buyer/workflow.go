@@ -28,11 +28,12 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "buyer workflow requires a signer")
 	}
-	publicKey := signer.PublicKey()
-	if err := protocol.ValidatePublicKey(publicKey); err != nil {
-		return nil, protocol.Wrap(fmt.Errorf("signer public key: %v", err), op, protocol.CodeInvalidEvidence, 0, "public_key")
+	bound, err := protocol.BindSigner(signer)
+	if err != nil {
+		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
-	return &Workflow{signer: signer, publicKey: publicKey}, nil
+	publicKey := bound.PublicKey()
+	return &Workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
@@ -77,13 +78,13 @@ func (workflow *Workflow) AcceptQuote(facts protocol.Facts, rawKind1 []byte) (*c
 }
 
 // PreparePoolOpening 构造并签署 Kind 2 预签请求：返回待发送 Artifact 与必须
-// 先持久化的 OpeningCheckpoint。资金交易原文只存在于 checkpoint；SDK 不持久化。
-func (workflow *Workflow) PreparePoolOpening(ctx context.Context, facts protocol.Facts, command PrepareOpeningCommand) (*PrepareOpeningResult, error) {
+// 先持久化的 OpeningCheckpoint。本操作不含任何时间/高度判断（纯交易构造），
+// 因此不接收 Facts，也不接收无用参数。资金交易原文只存在于 checkpoint；SDK 不持久化。
+func (workflow *Workflow) PreparePoolOpening(ctx context.Context, command PrepareOpeningCommand) (*PreparePoolOpeningResult, error) {
 	const op = "buyer.PreparePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
 	}
-	_ = facts // Kind 2 构造不含时间/高度判断；保留参数以统一主入口外形。
 	if command.Quote == nil {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 2, "quote", "verified quote is required")
 	}
@@ -110,12 +111,13 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, facts protocol
 		return nil, err
 	}
 	checkpoint := &OpeningCheckpoint{refundTemplateTxID: refundTemplateTxID, request: pool.CloneRefundPresignRequest(request), fundingTransactionRaw: append([]byte(nil), command.FundingTransactionRaw...)}
-	return &PrepareOpeningResult{Outbound: outbound, Checkpoint: checkpoint}, nil
+	return &PreparePoolOpeningResult{Outbound: outbound, Checkpoint: checkpoint}, nil
 }
 
 // CompletePoolOpening 用保存的 OpeningCheckpoint 验收 exact Kind 3：重派生池
 // ID 并拒绝任何错配，验卖方预签，产出 verified opening + 初始池 checkpoint。
-func (workflow *Workflow) CompletePoolOpening(ctx context.Context, checkpoint *OpeningCheckpoint, rawKind3 []byte) (*CompleteOpeningResult, error) {
+// 纯验证路径：不接收 context。
+func (workflow *Workflow) CompletePoolOpening(checkpoint *OpeningCheckpoint, rawKind3 []byte) (*CompleteOpeningResult, error) {
 	const op = "buyer.CompletePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -239,7 +241,7 @@ func (workflow *Workflow) RequestContent(ctx context.Context, facts protocol.Fac
 		return nil, err
 	}
 	if err := facts.CheckRefundNotExpired(protocol.RefundLockTime(openingLockDetails.RefundLockTime)); err != nil {
-		return nil, protocol.Wrap(err, op, protocol.CodeExpired, 5, "refund_locktime")
+		return nil, protocol.WrapClassified(err, op, 5, "refund_locktime")
 	}
 	terms := command.Quote.Terms()
 	// 时间无关证据已由 AcceptQuote 完成；这里做角色绑定与本操作唯一一次的
@@ -360,7 +362,7 @@ func (workflow *Workflow) VerifyDeliveryAndPreparePayment(ctx context.Context, f
 		return nil, err
 	}
 	if err := facts.CheckRefundNotExpired(protocol.RefundLockTime(openingLockDetails.RefundLockTime)); err != nil {
-		return nil, protocol.Wrap(err, op, protocol.CodeExpired, 6, "refund_locktime")
+		return nil, protocol.WrapClassified(err, op, 6, "refund_locktime")
 	}
 	requestTerms, quoteTerms, err := content.VerifyContentRequestEvidence(localRequest, command.Quote.Quote(), opening)
 	if err != nil {
@@ -477,7 +479,7 @@ func (workflow *Workflow) PrepareClose(ctx context.Context, facts protocol.Facts
 		return nil, err
 	}
 	if err := facts.CheckRefundNotExpired(protocol.RefundLockTime(details.RefundLockTime)); err != nil {
-		return nil, protocol.Wrap(err, op, protocol.CodeExpired, 0, "refund_locktime")
+		return nil, protocol.WrapClassified(err, op, 0, "refund_locktime")
 	}
 	base := pool.ClonePaymentState(command.Base)
 	if base == nil {
@@ -549,7 +551,7 @@ func (workflow *Workflow) BuildMaturedRefund(facts protocol.Facts, poolCheckpoin
 		return nil, err
 	}
 	if err := facts.CheckRefundMatured(protocol.RefundLockTime(details.RefundLockTime)); err != nil {
-		return nil, protocol.Wrap(err, op, protocol.CodeNotMatured, 0, "refund_locktime")
+		return nil, protocol.WrapClassified(err, op, 0, "refund_locktime")
 	}
 	raw, err := engine.BuildRefundSubmission(opening)
 	if err != nil {

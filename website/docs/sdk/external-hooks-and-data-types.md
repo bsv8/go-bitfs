@@ -113,7 +113,7 @@ The role APIs accept command structs and return unified results with outbound
 Artifacts plus opaque checkpoints to persist first:
 
 - `PrepareOpeningCommand` carries the verified quote, raw funding bytes, expiry
-  locktime, fee rate, and seller/arbiter public keys; `PrepareOpeningResult`
+  locktime, fee rate, and seller/arbiter public keys; `PreparePoolOpeningResult`
   returns `Outbound wire.Artifact` plus `OpeningCheckpoint` — persist the
   checkpoint before sending.
 - `RequestContentCommand` carries the verified quote, pool checkpoint, ordered

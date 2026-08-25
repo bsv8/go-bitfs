@@ -28,11 +28,13 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "arbiter workflow requires a signer")
 	}
-	publicKey := signer.PublicKey()
-	if err := protocol.ValidatePublicKey(publicKey); err != nil {
-		return nil, protocol.Wrap(fmt.Errorf("signer public key: %v", err), op, protocol.CodeInvalidEvidence, 0, "public_key")
+	// 冻结公钥：后续所有下游签名/自验都对照构造时公钥，托管换钥即 invalid_signature。
+	bound, err := protocol.BindSigner(signer)
+	if err != nil {
+		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
-	return &Workflow{signer: signer, publicKey: publicKey}, nil
+	publicKey := bound.PublicKey()
+	return &Workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
@@ -81,7 +83,7 @@ func (workflow *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []by
 	}
 	// 退款门禁只读取锁定类型对应的事实；timestamp 锁定复用本次 Now。
 	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
-		return nil, protocol.Wrap(fmt.Errorf("refund template is no longer available for arbitration: %v", err), op, protocol.CodeExpired, 8, "refund_template_raw")
+		return nil, protocol.WrapClassified(fmt.Errorf("refund template is no longer available for arbitration: %w", err), op, 8, "refund_template_raw")
 	}
 	exactRequest, err := arbitration.MarshalRequest(request)
 	if err != nil {
@@ -92,7 +94,7 @@ func (workflow *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []by
 		arbitrationClaimID: claimID, paymentAuthorizationID: authID, arbiterAmountSatoshis: fee,
 		arbiterPublicKey:    append([]byte(nil), keys.ArbiterPublicKey...),
 		evidenceCommitment:  preparedEvidenceCommitment(exactRequest, claimID[:], uint64(fee), unsigned),
-		deadlineUnixSeconds: authorization.DeliveryDeadlineUnixSeconds, preparedAt: now,
+		deadlineUnixSeconds: authorization.DeliveryDeadlineUnixSeconds,
 	}, nil
 }
 
@@ -140,6 +142,17 @@ func (workflow *Workflow) SignPreparedArbitration(ctx context.Context, facts pro
 	}
 	if rebuilt.ArbiterAmountSatoshis != uint64(frozenFeeSatoshis) || !equalUnsigned(rebuilt, prepared.unsigned) {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeStateConflict, 9, "unsigned_candidate", "prepared candidate changed")
+	}
+	// Prepare→Sign 间隙重检退款锁（timestamp/height 两种锁定都覆盖）：
+	// 持久化或排队期间退款一旦成熟，退款交易与仲裁交易将竞态花费同一池
+	// 输出。此门禁在任何 Signer 调用之前执行——被拒时 Signer 调用次数为 0，
+	// 不产生任何部分签名。Restore 产物与本门禁同源。
+	claimLockTime, err := pool.RefundTemplateLockTime(freshClaim.RefundTemplateRaw)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
+		return wire.Artifact{}, protocol.WrapClassified(fmt.Errorf("refund gate between prepare and sign: %w", err), op, 9, "refund_template_raw")
 	}
 	exactRequest, err := arbitration.MarshalRequest(prepared.request)
 	if err != nil {

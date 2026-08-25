@@ -105,6 +105,7 @@ merged(+txid)。
 | HSM/KMS 故障、超时、canceled/deadline、错误公钥 | seller/restore_test `TestContextCancellationIsCanceledNotSignerUnavailable`（4 错误 × wire/交易双路径） |
 | 过期前一秒/等于/后一秒 | buyer `TestAcceptQuote…`、seller CreateQuote 边界组 |
 | Facts 按需读取（只有 Now / 只有 Height / 缺失拒绝） | buyer/facts_test 三测试；seller restore_test 同类 |
+| 退款门禁稳定分类矩阵（事实缺失→invalid_evidence；真正成熟→expired；真正未成熟→not_matured，timestamp/height 双锁定） | protocol/facts_test `TestRefundGateClassificationMatrix`；入口层 buyer `TestRefundGateClassificationAtEntryPoints`、seller `TestSellerDeliverContentMissingHeightFactStaysInvalidEvidence`、arbiter `TestSignPreparedArbitrationMissingFactKeepsInvalidEvidence`（均以 CodeOf 精确断言）；integration error_boundary 对 refund 门禁路径精确断言 |
 | 伪造数据无法获得 Verified | seller/restore_test `TestForgedEvidenceCannotBecomeVerified` |
 | Restore 往返 + 篡改拒绝 | buyer `TestCheckpointRestore…`、seller `TestRestoreOpeningCheckpoint…/TestRestorePoolAndDelivery…`、arbiter `TestArbiterRestorePreparedArbitration` |
 | valid Kind 11 unavailable = typed 结果 | buyer VerifyArbitratedContent、integration 008 分支 |
@@ -135,11 +136,51 @@ CI 变更（`.github/workflows/docs.yml`）：新增 race 步骤；demo 步骤�
 - `TestCurrentDocumentsExcludeRetiredProtocol` PASS：当前代码/文档无旧 import、
   旧构造器、旧方法名、隐藏时钟、重复哨兵、`Marshal(any)`、workflow-held 私钥设计表述
 - 非 legacy 网站/文档无 `bitfs.*` API 引用（仅剩 `ProtocolFamily` 协议标识字符串值，属协议真值非旧 API）
-- `api-translations.json` 与生成 API 逐行同步（481 条），双语站点构建通过
+- `api-translations.json` 与生成 API 逐行同步（488 条），双语站点构建通过
 
 ## 6. 未完成项
 
-零。第二轮复核补充项已闭环：
+零。第四轮复核阻断项已闭环：
+
+- **文档残留旧调用**：role-workflow-api.md（英文源与中文页）的
+  `PreparePoolOpening(ctx, facts, …)` 示例改为新签名；terminology lint 新增
+  调用表达式负向规则（`PreparePoolOpening( ctx, facts,` 与
+  `CompletePoolOpening( ctx,`，声明形态原有规则继续生效）；CI 文档门禁的
+  `-run` 参数由逗号分隔（Go 视为普通字符导致 "no tests to run"、门禁空转）
+  改为 `^(TestA|TestB)$` 正则分组
+- **退款门禁错误分类被调用层覆盖**：新增 `protocol.WrapClassified`
+  （链上已有分类原样透传，无分类才落 invalid_evidence；附加上下文一律 `%w`
+  保持错误链），并替换全部无条件包装点——buyer RequestContent /
+  VerifyDeliveryAndPreparePayment / PrepareClose / BuildMaturedRefund、
+  seller refundGate（DeliverContent/CompletePayment/CompleteClose/
+  PrepareArbitration 四入口，op 随入口透传）/ CompleteArbitratedPayment、
+  arbiter PrepareArbitration / SignPreparedArbitration、pool
+  CheckArbitrationRefundNotExpired。事实缺失现在稳定报 invalid_evidence，
+  绝不被误报成 expired/not_matured
+- 非阻断清理：`protocol.ProtocolFamily` 注释改为"外部协议族/manifest 标识"
+  （wire 报文不携带族名称）；`signer_test` 删除重复 rotate、失败文本计数
+  改为 want 2；终审建议两项——BindSigner(nil) 断言改为精确校验
+  `CodeOf == signer_unavailable`，`IsCode` 注释改为"报告最外层稳定分类
+  是否匹配"（errors.As 只命中链上第一个 *Error，非全链扫描）
+
+第三轮复核补充项已闭环：
+
+- **Prepare→Sign 退款锁重检**：SignPreparedArbitration 在任何 Signer 调用前
+  从 freshClaim 重提取 locktime 并以显式 Facts 执行 CheckRefundNotExpired
+  （timestamp/height 双覆盖）；跨边界拒绝时 Signer 调用次数为 0，Restore
+  产物走同一门禁。测试：TestSignPreparedArbitrationRechecksRefundLockAfterPrepare
+- **绑定公钥 Signer**：新增 protocol.BindSigner（构造时冻结公钥的包装器），
+  三角色 Workflow 构造时统一绑定；远程托管中途换钥在所有 Kind 统一得到
+  invalid_signature/unauthorized，Kind 1 不可能静默写入新身份。测试：
+  TestWorkflowBindsSignerPublicKeyAcrossKinds（可轮换 fake Signer 覆盖
+  Kind 1/5/6/10/11 与交易签名路径）
+- 清理：PreparedAt 删除（观测元数据归应用）；buyer.PreparePoolOpening 去
+  无效 facts、CompletePoolOpening 去无效 ctx、seller.PreparePoolOpening 去
+  无效 facts；pool.Hash32 → protocol.Hash32 别名；删除 pool.ProtocolFamily
+  （统一 protocol.ProtocolFamily）与未使用的 pool.Reference；low-S 注释修正；
+  buyer/seller Result 类型统一为 PreparePoolOpeningResult；CI 新增 fuzz job
+  （三个 target 各 30s）
+- 第二轮复核补充项已闭环：
 
 - Demo 02 离线冒烟使用 `DEMO_02_STATE_DIR` 指向 `t.TempDir` 的真空状态目录
   （测试前断言不存在、结束后断言三个 checkpoint 齐全且不含私钥材料），

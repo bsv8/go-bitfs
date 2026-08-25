@@ -61,3 +61,34 @@ type Signer interface {
 	// 返回错误（可包装 ErrSignerUnavailable），绝不能返回空签名或部分结果。
 	Sign(ctx context.Context, request SigningRequest) ([]byte, error)
 }
+
+// boundSigner 是构造时冻结公钥的 Signer 包装器：PublicKey 永远返回绑定值，
+// 与底层实现后续可能发生的密钥轮换完全解耦。Workflow 构造时用它包装外部
+// Signer，保证所有下游自验（普通消息签名与交易 sighash）都固定对照角色
+// 公钥——远程托管中途换钥只会得到 invalid_signature/unauthorized，绝不可能
+// 把新身份静默写入任何 Kind。
+type boundSigner struct {
+	delegate  Signer
+	publicKey PublicKey
+}
+
+func (s *boundSigner) PublicKey() PublicKey { return s.publicKey }
+
+func (s *boundSigner) Sign(ctx context.Context, request SigningRequest) ([]byte, error) {
+	return s.delegate.Sign(ctx, request)
+}
+
+var _ Signer = (*boundSigner)(nil)
+
+// BindSigner 冻结并校验一个 Signer 的当前公钥，返回生命周期内公钥不变的
+// 绑定视图。nil 或无效公钥直接拒绝。角色 Workflow 必须经它进入签名能力。
+func BindSigner(signer Signer) (Signer, error) {
+	if signer == nil {
+		return nil, Errorf("protocol.BindSigner", CodeSignerUnavailable, 0, "signer", "signer is required")
+	}
+	publicKey := signer.PublicKey()
+	if err := ValidatePublicKey(publicKey); err != nil {
+		return nil, Wrap(fmt.Errorf("signer public key: %v", err), "protocol.BindSigner", CodeInvalidEvidence, 0, "public_key")
+	}
+	return &boundSigner{delegate: signer, publicKey: publicKey}, nil
+}

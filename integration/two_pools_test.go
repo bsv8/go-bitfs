@@ -39,7 +39,7 @@ func TestTwoPoolsKeepTheirExplicitStatesSeparate(t *testing.T) {
 func TestCrossPoolPresignResponseIsRefused(t *testing.T) {
 	f := newProtocolFixture(t)
 	poolA := openNamedPool(t, f, 100000)
-	preparedB, err := f.Buyer.PreparePoolOpening(f.ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	preparedB, err := f.Buyer.PreparePoolOpening(f.ctx, buyer.PrepareOpeningCommand{
 		Quote:                           f.buyerQuote,
 		FundingTransactionRaw:           buildTestFundingTx(t, 120000, pool.MultisigPoolPublicKeys{BuyerPublicKey: f.buyerPubKey[:], SellerPublicKey: f.sellerPubKey[:], ArbiterPublicKey: f.arbiterPubKey[:]}),
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -50,12 +50,12 @@ func TestCrossPoolPresignResponseIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	presignB, err := f.Seller.PreparePoolOpening(f.ctx, testFacts(testBaseTime), preparedB.Outbound.Bytes())
+	presignB, err := f.Seller.PreparePoolOpening(f.ctx, preparedB.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Pool B 的响应不能通过 pool A 已持久化的本地状态校验 → state_conflict。
-	_, err = f.Buyer.CompletePoolOpening(f.ctx, poolA.buyerOpening, presignB.Outbound.Bytes())
+	_, err = f.Buyer.CompletePoolOpening(poolA.buyerOpening, presignB.Outbound.Bytes())
 	requireCode(t, err, protocol.CodeStateConflict)
 }
 

@@ -614,7 +614,7 @@ type buyerOpeningCheckpoint struct {
 // SaveBuyerOpeningCheckpoint 把 0201 的买方本地证据写入演示 checkpoint：
 // exact Kind 2 Artifact 字节与私有资金交易原文。应用先保存该记录，然后才允许
 // 把 Outbound 发送给卖方。
-func SaveBuyerOpeningCheckpoint(path string, prepared *buyer.PrepareOpeningResult) error {
+func SaveBuyerOpeningCheckpoint(path string, prepared *buyer.PreparePoolOpeningResult) error {
 	if prepared == nil || prepared.Checkpoint == nil {
 		return errors.New("buyer prepare result with its checkpoint is required")
 	}
@@ -742,7 +742,7 @@ func LoadSellerPresignCheckpoint(ctx context.Context, session *SellerSession, pa
 	if err != nil {
 		return nil, fmt.Errorf("decode checkpoint request artifact: %w", err)
 	}
-	prepared, err := session.Seller.PreparePoolOpening(ctx, Facts(time.Now().UTC()), requestRaw)
+	prepared, err := session.Seller.PreparePoolOpening(ctx, requestRaw)
 	if err != nil {
 		return nil, fmt.Errorf("recompute seller presign checkpoint: %w", err)
 	}

@@ -25,7 +25,7 @@ func TestRestoreOpeningCheckpointRoundTripAndTampering(t *testing.T) {
 	f := newSellerFixture(t)
 	quote, _ := f.defaultQuote(t)
 	ctx := context.Background()
-	prepared, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyer.PrepareOpeningCommand{
+	prepared, err := f.Buyer.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
 		Quote:                           quote,
 		FundingTransactionRaw:           f.FundingTransactionRaw,
 		ExpiryLockTime:                  protocol.RefundLockTime(f.Expiry),
@@ -37,7 +37,7 @@ func TestRestoreOpeningCheckpointRoundTripAndTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	rawKind2 := prepared.Outbound.Bytes()
-	presign, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), rawKind2)
+	presign, err := f.Seller.PreparePoolOpening(ctx, rawKind2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestRestoreOpeningCheckpointRoundTripAndTampering(t *testing.T) {
 	}
 
 	// 恢复后的 checkpoint 必须能继续完成资金交付验收（买方侧先交付）。
-	buyerPoolCheckpoint, err := f.Buyer.CompletePoolOpening(ctx, prepared.Checkpoint, rawKind3)
+	buyerPoolCheckpoint, err := f.Buyer.CompletePoolOpening(prepared.Checkpoint, rawKind3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,15 +226,15 @@ func TestFactsOnDemandByLockType(t *testing.T) {
 	// timestamp 锁定池：到期退款只给 Now（不给高度）必须成功。
 	tsQuote, _ := f.defaultQuote(t)
 	tsLock := uint32(testBaseTime.Add(time.Hour).Unix())
-	preparedTs, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyerPrepareCommandFor(t, f, tsQuote, tsLock))
+	preparedTs, err := f.Buyer.PreparePoolOpening(ctx, buyerPrepareCommandFor(t, f, tsQuote, tsLock))
 	if err != nil {
 		t.Fatal(err)
 	}
-	presignTs, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), preparedTs.Outbound.Bytes())
+	presignTs, err := f.Seller.PreparePoolOpening(ctx, preparedTs.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	completedTs, err := f.Buyer.CompletePoolOpening(ctx, preparedTs.Checkpoint, presignTs.Outbound.Bytes())
+	completedTs, err := f.Buyer.CompletePoolOpening(preparedTs.Checkpoint, presignTs.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,15 +250,15 @@ func TestFactsOnDemandByLockType(t *testing.T) {
 	// height 锁定池：到期退款缺 BlockHeight 必须拒绝；给出后成功。
 	hQuote, _ := f.defaultQuote(t)
 	heightLock := uint32(800123)
-	preparedH, err := f.Buyer.PreparePoolOpening(ctx, testFacts(testBaseTime), buyerPrepareCommandFor(t, f, hQuote, heightLock))
+	preparedH, err := f.Buyer.PreparePoolOpening(ctx, buyerPrepareCommandFor(t, f, hQuote, heightLock))
 	if err != nil {
 		t.Fatal(err)
 	}
-	presignH, err := f.Seller.PreparePoolOpening(ctx, testFacts(testBaseTime), preparedH.Outbound.Bytes())
+	presignH, err := f.Seller.PreparePoolOpening(ctx, preparedH.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	completedH, err := f.Buyer.CompletePoolOpening(ctx, preparedH.Checkpoint, presignH.Outbound.Bytes())
+	completedH, err := f.Buyer.CompletePoolOpening(preparedH.Checkpoint, presignH.Outbound.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}

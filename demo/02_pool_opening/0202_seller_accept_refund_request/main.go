@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
@@ -45,7 +44,7 @@ func main() {
 	// 计算卖方退款签名并返回待发送 Kind 3 Artifact 与必须先持久化的
 	// OpeningCheckpoint。SDK 不保存任何证据；应用必须先保存 checkpoint，
 	// 再发送 Outbound。
-	prepared, err := session.Seller.PreparePoolOpening(ctx, poolopening.Facts(time.Now().UTC()), requestRaw)
+	prepared, err := session.Seller.PreparePoolOpening(ctx, requestRaw)
 	if err != nil {
 		fail(fmt.Errorf("seller.PreparePoolOpening: %w", err))
 	}

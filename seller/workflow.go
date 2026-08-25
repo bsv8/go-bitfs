@@ -28,11 +28,12 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "seller workflow requires a signer")
 	}
-	publicKey := signer.PublicKey()
-	if err := protocol.ValidatePublicKey(publicKey); err != nil {
-		return nil, protocol.Wrap(fmt.Errorf("signer public key: %v", err), op, protocol.CodeInvalidEvidence, 0, "public_key")
+	bound, err := protocol.BindSigner(signer)
+	if err != nil {
+		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
-	return &Workflow{signer: signer, publicKey: publicKey}, nil
+	publicKey := bound.PublicKey()
+	return &Workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
@@ -68,10 +69,11 @@ func (workflow *Workflow) ensureOwnership(op string, proof *pool.OpeningProof) e
 	return nil
 }
 
-// refundGate 是正向退款门禁：只读取锁定类型对应的那一份事实。
-func refundGate(facts protocol.Facts, lockTime uint32) error {
+// refundGate 是正向退款门禁：只读取锁定类型对应的那一份事实。分类由
+// WrapClassified 保留——事实缺失保持 invalid_evidence，绝不误报成 expired。
+func refundGate(op string, facts protocol.Facts, lockTime uint32) error {
 	if err := facts.CheckRefundNotExpired(protocol.RefundLockTime(lockTime)); err != nil {
-		return protocol.Wrap(err, "seller", protocol.CodeExpired, 0, "refund_locktime")
+		return protocol.WrapClassified(err, op, 0, "refund_locktime")
 	}
 	return nil
 }
@@ -130,7 +132,7 @@ func (workflow *Workflow) CreateQuote(ctx context.Context, facts protocol.Facts,
 // PreparePoolOpening 验证 exact Kind 2 并计算卖方退款预签：返回待发送 Kind 3
 // Artifact 与必须先持久化的 OpeningCheckpoint。相同的重复请求只会得到等价的
 // 新鲜计算结果——SDK 不存储、不重放。
-func (workflow *Workflow) PreparePoolOpening(ctx context.Context, facts protocol.Facts, rawKind2 []byte) (*OpeningPreparationResult, error) {
+func (workflow *Workflow) PreparePoolOpening(ctx context.Context, rawKind2 []byte) (*PreparePoolOpeningResult, error) {
 	const op = "seller.PreparePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -166,7 +168,7 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, facts protocol
 	if err != nil {
 		return nil, err
 	}
-	return &OpeningPreparationResult{Outbound: outbound, Checkpoint: &OpeningCheckpoint{opening: proof}}, nil
+	return &PreparePoolOpeningResult{Outbound: outbound, Checkpoint: &OpeningCheckpoint{opening: proof}}, nil
 }
 
 // VerifyFundingDelivery 用保存的预签 checkpoint 验收 exact Kind 4：完成开池
@@ -278,7 +280,7 @@ func (workflow *Workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	if err := refundGate(facts, deliveryLockDetails.RefundLockTime); err != nil {
+	if err := refundGate(op, facts, deliveryLockDetails.RefundLockTime); err != nil {
 		return nil, err
 	}
 	requestTerms, quoteTerms, err := content.VerifyContentRequestEvidence(request, localQuote, opening)
@@ -398,7 +400,7 @@ func (workflow *Workflow) CompletePayment(ctx context.Context, facts protocol.Fa
 	if err := engine.VerifyOpening(opening); err != nil {
 		return nil, fmt.Errorf("verify pool opening proof: %w", err)
 	}
-	if err := refundGate(facts, details.RefundLockTime); err != nil {
+	if err := refundGate(op, facts, details.RefundLockTime); err != nil {
 		return nil, err
 	}
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
@@ -485,7 +487,7 @@ func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 	if err != nil {
 		return nil, err
 	}
-	if err := refundGate(facts, details.RefundLockTime); err != nil {
+	if err := refundGate(op, facts, details.RefundLockTime); err != nil {
 		return nil, err
 	}
 	if unsigned.SellerAmountSatoshis+unsigned.BuyerAmountSatoshis+unsigned.ArbiterAmountSatoshis > details.PoolOutputSatoshis {
@@ -543,7 +545,7 @@ func (workflow *Workflow) PrepareArbitration(ctx context.Context, facts protocol
 	if err != nil {
 		return wire.Artifact{}, err
 	}
-	if err := refundGate(facts, arbLockDetails.RefundLockTime); err != nil {
+	if err := refundGate(op, facts, arbLockDetails.RefundLockTime); err != nil {
 		return wire.Artifact{}, err
 	}
 	built, err := arbitration.BuildClaimFromAuthorization(opening, localAuthorization)
@@ -685,7 +687,7 @@ func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, facts p
 		return nil, err
 	}
 	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
-		return nil, protocol.Wrap(fmt.Errorf("refund template is no longer available for arbitration: %v", err), op, protocol.CodeExpired, 9, "refund_template_raw")
+		return nil, protocol.WrapClassified(fmt.Errorf("refund template is no longer available for arbitration: %w", err), op, 9, "refund_template_raw")
 	}
 	engine, err := pool.NewMultisigPoolEngineFromPoolLockingScript(claim.PoolOutputLockingScript)
 	if err != nil {

@@ -153,7 +153,7 @@ func buildTransactionManifest(t *testing.T) *transactionGoldenManifest {
 		t.Fatal(err)
 	}
 
-	manifest := &transactionGoldenManifest{Protocol: ProtocolFamily, WireVersion: protocol.WireVersion, FixedKeys: "buyer=0xb1*32 seller=0x52*32 arbiter=0xa3*32; funding input zero-hash placeholder"}
+	manifest := &transactionGoldenManifest{Protocol: protocol.ProtocolFamily, WireVersion: protocol.WireVersion, FixedKeys: "buyer=0xb1*32 seller=0x52*32 arbiter=0xa3*32; funding input zero-hash placeholder"}
 	addEntry := func(entry transactionManifestEntry) { manifest.Entries = append(manifest.Entries, entry) }
 
 	templateID, err := DeriveRefundTemplateTxID(opening)
@@ -260,6 +260,11 @@ func TestTransactionGoldenManifestMatchesFrozenFile(t *testing.T) {
 	var frozen transactionGoldenManifest
 	if err := json.Unmarshal(raw, &frozen); err != nil {
 		t.Fatal(err)
+	}
+	// 顶层元数据与向量一并冻结：任何漂移都阻断。
+	if frozen.Protocol != manifest.Protocol || frozen.WireVersion != manifest.WireVersion || frozen.FixedKeys != manifest.FixedKeys {
+		t.Fatalf("manifest metadata drifted:\n frozen protocol=%q wire=%d keys=%q\n rebuilt protocol=%q wire=%d keys=%q",
+			frozen.Protocol, frozen.WireVersion, frozen.FixedKeys, manifest.Protocol, manifest.WireVersion, manifest.FixedKeys)
 	}
 	if len(frozen.Entries) != len(manifest.Entries) {
 		t.Fatalf("entry count drifted: frozen %d rebuilt %d", len(frozen.Entries), len(manifest.Entries))

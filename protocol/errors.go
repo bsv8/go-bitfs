@@ -76,6 +76,22 @@ func Wrap(err error, op string, code ErrorCode, kind uint16, field string) error
 	return &Error{Op: op, Code: code, Kind: kind, Field: field, Cause: err}
 }
 
+// WrapClassified 是"保分类"包装：错误链上已有稳定分类（CodeOf 命中）时原样
+// 透传该分类，绝不覆盖；链上没有任何分类时才落到 CodeInvalidEvidence。
+//
+// 它专用于包装可能携带多种分类的底层门禁结果（如退款门禁会返回 expired/
+// not_matured/invalid_evidence）：调用方只补充 Op/Kind/Field 上下文，不得把
+// "事实缺失（invalid_evidence）"误报成"expired/not_matured"这类协议状态结论，
+// 否则应用按稳定 Code 分支时会得到错误的语义。需要附加消息时必须用 %w 保持
+// 错误链（errors.Is(ErrFactsMissing) 等哨兵判断不能断）。
+func WrapClassified(err error, op string, kind uint16, field string) error {
+	code, ok := CodeOf(err)
+	if !ok {
+		code = CodeInvalidEvidence
+	}
+	return Wrap(err, op, code, kind, field)
+}
+
 // Error 实现 error 接口；格式面向开发诊断："op: [code] message"。
 func (e *Error) Error() string {
 	var b strings.Builder
@@ -107,7 +123,10 @@ func (e *Error) Unwrap() error {
 	return e.Cause
 }
 
-// IsCode 报告错误链中是否存在指定分类的 *Error。
+// IsCode 报告错误链的最外层稳定分类是否等于 code：errors.As 只命中链上
+// 第一个（最外层）*Error，本函数不继续向内层搜索，不要误读为全链扫描。
+// 调用方按稳定 Code 分支用它或 CodeOf；包装层一律经 WrapClassified 保留
+// 底层分类，因此最外层判断即等价于业务语义。
 func IsCode(err error, code ErrorCode) bool {
 	var target *Error
 	if errors.As(err, &target) {

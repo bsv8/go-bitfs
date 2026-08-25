@@ -156,5 +156,9 @@ func (t RefundLockTime) UsesBlockHeight() bool { return t < RefundTimestampThres
 // RefundTimestampThreshold 引用内部包的唯一定界常量，避免第二份真值。
 const RefundTimestampThreshold = refundlock.TimestampThreshold
 
+// ProtocolFamily 是外部协议族/manifest 标识字符串：wire 报文本身不携带族
+// 名称，版本真值仍只有 WireVersion。仓库内其他位置的族名称一律引用本常量。
+const ProtocolFamily = "bitfs.protocol.v1"
+
 // SatoshisPerKilobyte 是矿工费率单位：每千字节虚拟大小的聪数。
 type SatoshisPerKilobyte uint64

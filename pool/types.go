@@ -6,35 +6,21 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-// ProtocolFamily 表示 go-bitfs 资金池工作流协议族的名称。
-const ProtocolFamily = "bitfs.pool.workflow.v1"
-
 // PoolOutputIndex 是 FundingTransactionRaw 中资金池输出的协议固定索引。
 // 工作流只接受第 0 个输出作为资金池输出，因此无需在消息中重复传输。
 // 对外协议版本只使用 protocol.WireVersion，本包不再定义任何平行版本常量。
 const PoolOutputIndex uint32 = 0
 
-// Hash32 保存固定长度的 32 字节哈希值。
-//
-// 该类型用于表示交易 ID、授权哈希等协议身份标识。它使用数组而不是字节
-// 切片，因此可以直接比较，也能保证值始终具有 SHA-256 的固定宽度。
-type Hash32 [sha256.Size]byte
+// Hash32 是通用 32 字节哈希的仓库唯一真值（protocol.Hash32 的别名）：
+// 资金池域内表示资金交易 TxID 等协议身份标识。领域专属身份继续使用独立
+// 命名类型（如 RefundTemplateTxID），不与通用哈希互换。
+type Hash32 = protocol.Hash32
 
 // RefundTemplateTxID 是费用池的统一关联 ID：未嵌入角色签名的规范退款模板
 // 交易的 TxID。它只标识资金池本身，不标识同一资金池内的某次关闭或付款尝试，
 // 也不是最终广播退款交易的链上 txid。普通内容哈希继续使用各自的 Hash32，
 // 不能把所有 32 字节值混成资金池关联 ID。
 type RefundTemplateTxID [sha256.Size]byte
-
-// Reference 标识内容请求所使用的结算资金池以及返回引用时的当前付款状态序号。
-type Reference struct {
-	// RefundTemplateTxID 是费用池的统一关联 ID，即未嵌入角色签名的规范退款
-	// 模板交易的交易 ID。后续付款状态和内容请求都必须属于该资金池。
-	RefundTemplateTxID RefundTemplateTxID
-	// PaymentSequence 是返回引用时资金池已接受状态的付款序号。003 wire 只
-	// 携带本次目标序号；目标序号由接收方验证为该当前状态序号加一。
-	PaymentSequence uint32
-}
 
 // OpeningProof 保存买卖双方相互验证后、用于开立资金池的退款交易和资金交易证据。
 //
@@ -76,8 +62,8 @@ type OpeningDetails struct {
 	// 锁定脚本字节（105 字节）。
 	PoolLockingScript []byte
 	// RefundLockTime 是从规范退款模板派生的 nLockTime 原始值，供 SDK 内部
-	// 协议操作和调用方审计使用。公开 Workflow 的当前时间判断始终由 SDK 读取
-	// 系统 UTC；调用方只提供区块高度。
+	// 协议操作和调用方审计使用。时间与高度都是显式事实：timestamp 锁定由
+	// Facts.Now 判断，height 锁定由 Facts.BlockHeight 判断；SDK 绝不读取时钟。
 	RefundLockTime uint32
 }
 

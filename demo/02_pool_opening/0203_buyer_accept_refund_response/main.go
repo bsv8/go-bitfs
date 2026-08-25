@@ -66,7 +66,7 @@ func main() {
 	// CompletePoolOpening 用显式传入的本地状态重新派生 hash 并拒绝一切错配，
 	// 针对原请求验证卖方签名，然后返回完整 verified opening 和初始池
 	// checkpoint。SDK 不保存任何结果；保存仍是调用方的责任。
-	completed, err := session.Buyer.CompletePoolOpening(ctx, openingCheckpoint, responseRaw)
+	completed, err := session.Buyer.CompletePoolOpening(openingCheckpoint, responseRaw)
 	if err != nil {
 		fail(fmt.Errorf("buyer.CompletePoolOpening: %w", err))
 	}

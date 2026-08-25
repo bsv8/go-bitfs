@@ -57,7 +57,7 @@ SDK 没有时钟注入，不访问节点，也不读取系统时间。每个时�
 
 角色 API 接收 Command 结构体，返回统一 Result：待发送 Artifact 加必须先持久化的 opaque checkpoint。
 
-- `PrepareOpeningCommand` 携带已验收报价、资金交易原文、到期锁定、费率与卖方/仲裁公钥；`PrepareOpeningResult` 返回 `Outbound wire.Artifact` 与 `OpeningCheckpoint`——发送前先持久化 checkpoint。
+- `PrepareOpeningCommand` 携带已验收报价、资金交易原文、到期锁定、费率与卖方/仲裁公钥；`PreparePoolOpeningResult` 返回 `Outbound wire.Artifact` 与 `OpeningCheckpoint`——发送前先持久化 checkpoint。
 - `RequestContentCommand` 携带已验收报价、池 checkpoint、有序内容哈希、交付截止与 seed；`RequestContentResult` 返回 `Outbound`、typed `AuthorizationID` 以及持有 exact 已签 003 的 `AuthorizationCheckpoint`。
 - `VerifyDeliveryCommand` 用已持久化的授权 checkpoint 验收 exact Kind 6 交付；`PaymentPreparationResult` 返回已验证 payload、整批唯一的出站 Kind 7 凭证与仅供审计的未签名 candidate。
 - 卖方侧 `DeliveryCommand` / `DeliveryResult` 返回出站 Kind 6 Artifact 与无锁的 `DeliveryCheckpoint`——它恰好记录后续 `CompletePayment` 所需的协议上下文（费用池关联 ID、授权 ID、目标付款序号、绝对累计卖方金额），不携带任何 owner/lease/expiry 语义。

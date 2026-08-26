@@ -16,6 +16,7 @@ import (
 	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/wire"
 )
 
 const testArbitrationFeeSat uint64 = 500
@@ -265,7 +266,7 @@ func TestLegacyFiveElementKind9AndWrongKindsReject(t *testing.T) {
 }
 
 func TestArbitrationWireLimitsRejectBeforeUnboundedDecode(t *testing.T) {
-	limit := arbitration.MaxArbitrationRequestBytesForTest()
+	limit := arbitration.MaxArbitrationRequestBytes
 	if _, err := arbitration.UnmarshalRequest(bytes.Repeat([]byte{0}, limit+1)); err == nil {
 		t.Fatal("oversized arbitration request was decoded")
 	}
@@ -502,6 +503,20 @@ func TestArbitrationRequestAcceptsFullSizePayloadBundles(t *testing.T) {
 		}
 		if !bytes.Equal(decoded.ContentPayloadsCBOR, evidence.request.ContentPayloadsCBOR) || !bytes.Equal(decoded.ArbitrationClaimCBOR, evidence.request.ArbitrationClaimCBOR) {
 			t.Fatalf("%d-payload request changed during round trip", count)
+		}
+		if len(raw) > arbitration.MaxArbitrationRequestBytes || arbitration.MaxArbitrationRequestBytes > 16+arbitration.MaxArbitrationClaimBytes+arbitration.MaxArbitrationSignatureBytes+content.MaxContentPayloadsCBORBytes {
+			t.Fatalf("%d-payload request length %d violates the derived limit %d", count, len(raw), arbitration.MaxArbitrationRequestBytes)
+		}
+		if count != content.MaxContentBatchItems {
+			continue
+		}
+		// wire 层边界：合法满载 Kind 8 必须能通过全局解析上限进入 typed
+		// decoder；超限 1 字节必须在 ParseAs 阶段被拒绝。
+		if _, err = wire.ParseAs(wire.ArbitrationRequest, raw); err != nil {
+			t.Fatalf("legal full-size kind8 rejected by wire.ParseAs: %v", err)
+		}
+		if _, err = wire.ParseAs(wire.ArbitrationRequest, append(append([]byte(nil), raw...), 0)); err == nil {
+			t.Fatal("wire.ParseAs accepted a kind8 one byte beyond the limit")
 		}
 	}
 }

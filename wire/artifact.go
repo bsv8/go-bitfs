@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/protocol"
 )
@@ -39,11 +40,12 @@ func (a Artifact) Bytes() []byte {
 // IsZero 报告该 Artifact 是否为空值（未经过 Parse 或编码失败后的零值）。
 func (a Artifact) IsZero() bool { return a.raw == nil }
 
-// maxWireParseBytes 是进入 CBOR decoder 之前的全局字节上限：它由协议子文档
-// 上限派生（Kind 11 available 分支的 payload bundle 是最大的合法报文），任何
-// 超限输入直接以 malformed_wire 拒绝，保证超大不可信输入不会消耗解码内存与
-// CPU。应用可设置更小的传输层限额，但不得静默抬高本值。
-const maxWireParseBytes = content.MaxContentPayloadsCBORBytes + 1024
+// maxWireParseBytes 是进入 CBOR decoder 之前的全局字节上限：它必须容纳所有
+// Kind 的合法最大报文。Kind 11 available 分支的 payload bundle 与 Kind 8 满
+// 载整包（payload 上限 + Claim 上限 + 签名上限 + 外壳开销）分别决定两个下
+// 界；任何超限输入直接以 malformed_wire 拒绝，保证超大不可信输入不会消耗解
+// 码内存与 CPU。应用可设置更小的传输层限额，但不得静默抬高本值。
+const maxWireParseBytes = max(content.MaxContentPayloadsCBORBytes+1024, arbitration.MaxArbitrationRequestBytes)
 
 // enforceWireSizeLimit 在任何 CBOR 解码之前执行。
 func enforceWireSizeLimit(op string, raw []byte) error {

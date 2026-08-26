@@ -14,11 +14,11 @@ import (
 // content 包常量，避免在两处重复定义）。
 const contentMaxPayloadsLimit = content.MaxContentPayloadsCBORBytes
 
-// maxArbitrationRequestBytesValue 是 Kind 8 外层报文的派生字节上限：
-// payload 上限 + Claim 上限 + 签名上限 + 固定外壳开销。
-func maxArbitrationRequestBytesValue() int {
-	return contentMaxPayloadsLimit + MaxArbitrationClaimBytes + MaxArbitrationSignatureBytes + maxArbitrationRequestEnvelopeBytes
-}
+// MaxArbitrationRequestBytes 是 Kind 8 外层报文的完整 wire 字节上限：
+// payload 上限 + Claim 上限 + 签名上限 + 固定外壳开销。它是公开常量，
+// wire 层全局解析上限必须以它为下界之一，否则合法满载 Kind 8 会在进入
+// typed decoder 之前被误判为 malformed_wire。
+const MaxArbitrationRequestBytes = contentMaxPayloadsLimit + MaxArbitrationClaimBytes + MaxArbitrationSignatureBytes + maxArbitrationRequestEnvelopeBytes
 
 // ValidateClaim validates a decoded arbitration Claim: a positive pool output,
 // the canonical 2-of-3 locking script, bounded refund template and
@@ -150,7 +150,7 @@ func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := requireWireSize(raw, maxArbitrationRequestBytesValue(), "arbitration request"); err != nil {
+	if err := requireWireSize(raw, MaxArbitrationRequestBytes, "arbitration request"); err != nil {
 		return nil, err
 	}
 	return raw, nil
@@ -161,7 +161,7 @@ func MarshalRequest(request *ArbitrationRequest) ([]byte, error) {
 // byte equality.
 func UnmarshalRequest(data []byte) (*ArbitrationRequest, error) {
 	const op = "arbitration.UnmarshalRequest"
-	if err := requireWireSize(data, maxArbitrationRequestBytesValue(), "arbitration request"); err != nil {
+	if err := requireWireSize(data, MaxArbitrationRequestBytes, "arbitration request"); err != nil {
 		return nil, err
 	}
 	values, err := decodeArray(data, 5)

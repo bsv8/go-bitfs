@@ -25,7 +25,3 @@ const (
 	// 字节上限。
 	MaxContentRetrievalRequestDocBytesForTest = maxContentRetrievalRequestDocBytes
 )
-
-// MaxArbitrationRequestBytesForTest 返回 Kind 8 外层报文的精确字节上限
-// （生产代码以函数按需派生，不再暴露常量）。
-func MaxArbitrationRequestBytesForTest() int { return maxArbitrationRequestBytesValue() }

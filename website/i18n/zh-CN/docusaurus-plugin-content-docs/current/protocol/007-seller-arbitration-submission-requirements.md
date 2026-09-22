@@ -29,10 +29,10 @@ SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、Refu
 收到 raw Kind 8 -> 严格解码 -> 证据验证
   -> 应用验证链上 UTXO
   -> 应用计价
-  -> arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
+  -> arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
   -> 原子托管持久化（只追加：request、payload、Claim ID 与费用一旦写入
      即不可变）
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
   -> 持久化/发送精确 Kind 9
 ```
 

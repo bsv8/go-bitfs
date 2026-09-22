@@ -1,7 +1,7 @@
 // Package junglebus 提供 demo 应用使用的轻量 JungleBus 客户端。
 //
-// 它被刻意放在 go-bitfs workflow 之外：workflow 只接收原始交易数据和已
-// 选择的 UTXO，不直接持有区块链索引器连接，便于将来替换成其他数据源。
+// 它被刻意放在 go-bitfs SDK 之外：SDK 只接收原始交易数据和已选择的 UTXO，
+// 不直接持有区块链索引器连接，便于将来替换成其他数据源。
 package junglebus
 
 import (

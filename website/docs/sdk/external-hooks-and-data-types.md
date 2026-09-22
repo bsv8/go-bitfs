@@ -21,8 +21,8 @@ port:
 ```go
 // package protocol
 type Signer interface {
-    // PublicKey 返回本 Signer 固定的压缩公钥；workflow 构造时固定并验证它，
-    // 生命周期内不得变化。
+    // PublicKey 返回本 Signer 固定的压缩公钥；每次纯函数调用都会绑定并验证它，
+    // 调用生命周期内不得变化。
     PublicKey() PublicKey
     // Sign 对 SDK 已构造好的 32 字节 digest 做 secp256k1 签名，返回不带
     // 交易 sighash flag 的 low-S DER。Signer 绝不能自行哈希。
@@ -40,16 +40,14 @@ SDK. Local software keys enter through the only provided adapter:
 
 ```go
 signer, err := protocol.NewPrivateKeySigner(privateKey) // privateKey 为 *ec.PrivateKey
-buyerWorkflow, err := buyer.NewWorkflow(signer)
-sellerWorkflow, err := seller.NewWorkflow(signer)
-arbiterWorkflow, err := arbiter.NewWorkflow(signer)
+outbound, terms, err := seller.CreateQuote(ctx, facts, signer, draft)
+kind2, evidence, err := buyer.PrepareOpening(ctx, input, signer)
 ```
 
-Each constructor fixes and validates the compressed public key derived from the
-signer; that key becomes the workflow's role-bound identity: every later method
-re-checks that supplied opening evidence belongs to this key's role before
-computing anything. The public key MUST NOT change during the workflow's
-lifetime.
+Each pure-function entry receives the signer per call; the SDK binds and
+validates the compressed public key derived from that signer for the duration of
+the call only, and re-checks that supplied opening evidence belongs to the
+signer's role before signing anything. No cross-step object retains the signer.
 
 The SDK never accepts a seed, key-export callback, or signature-verifier
 callback either. Every ordinary message signature follows one fixed path inside
@@ -66,36 +64,32 @@ substitutable.
 
 ## Persistence belongs to the application
 
-There is no Store interface in the SDK. Workflows return opaque checkpoints and
-verified values — for example `buyer.OpeningCheckpoint`,
-`buyer.PoolCheckpoint`, `buyer.AuthorizationCheckpoint`,
-`seller.OpeningCheckpoint`, `seller.DeliveryCheckpoint`, `content.VerifiedQuote`,
-and `pool.VerifiedOpening` — and require them again as explicit arguments in
-later steps. Applications persist their evidence bytes in their own database
-keyed by `RefundTemplateTxID` (or by authorization ID), serialize concurrent
-work per pool, and implement retries, outboxes, and crash recovery themselves;
-the buyer package exposes restore entries that rebuild every checkpoint from
-exact persisted evidence with full re-verification
-(`RestoreOpeningCheckpoint`, `RestorePoolCheckpoint`,
-`RestoreAuthorizationCheckpoint`). The SDK adds no locks, leases, mutexes, or
-process-serialization of any kind: calling the same method twice concurrently
-yields two independently valid results, and deduplication is an application
-responsibility.
+There is no Store interface and no checkpoint class in the SDK. Every step
+returns plain evidence packages — for example `buyer.BuyerOpeningEvidence`,
+`buyer.BuyerPoolEvidence`, `buyer.BuyerAuthorizationEvidence`,
+`seller.SellerOpeningEvidence`, `seller.SellerDeliveryEvidence`, and
+`arbiter.PreparedArbitrationEvidence` — that contain raw bytes and explicit
+fields only, and require them again as explicit arguments in later steps.
+Applications persist those evidence bytes in their own database keyed by
+`RefundTemplateTxID` (or by authorization ID), serialize concurrent work per
+pool, and implement retries, outboxes, and crash recovery themselves. Every step
+re-verifies the complete evidence from raw bytes before acting, so restore is
+just passing the persisted data back in; the SDK adds no locks, leases, mutexes,
+or process-serialization of any kind.
 
 ## Content bytes are caller-supplied
 
 The seller reads seed/block payload bytes from its own storage and passes them
-as an ordered batch via `seller.DeliveryCommand.ContentPayloads`; the buyer
-passes ordered content hashes via `buyer.RequestContentCommand.ContentHashes`
-and verified seeds via `Seed`. The workflows derive every content kind from
+as an ordered batch via `seller.DeliveryInput.ContentPayloads`; the buyer passes
+ordered content hashes via `buyer.RequestContentInput.ContentHashes` and
+verified seeds via `Seed`. The pure steps derive every content kind from
 evidence (a hash equal to the quote SeedHash is the seed, everything else must
 be committed by that seed), verify hashes, seed structure, block membership,
 expected lengths, quote terms, and request/delivery signatures against those
-explicit bytes, and accept or reject the whole batch atomically.
-Verification results return the verified payload batch as data
-(`PaymentPreparationResult.Payloads`, in authorized order); saving it to final
-storage is the application's job, and a failed save means the business step
-must not be treated as complete.
+explicit bytes, and accept or reject the whole batch atomically. Verification
+returns the verified payload batch as data (the first result of
+`buyer.VerifyDelivery`, in authorized order); saving it to final storage is the
+application's job.
 
 ## Time and height facts are explicit inputs
 
@@ -109,31 +103,27 @@ fabricate a value.
 
 ## Protocol input and result types
 
-The role APIs accept command structs and return unified results with outbound
-Artifacts plus opaque checkpoints to persist first:
+The pure steps accept raw wire bytes plus plain input structs and return raw
+wire bytes plus plain evidence packages to persist first:
 
-- `PrepareOpeningCommand` carries the verified quote, raw funding bytes, expiry
-  locktime, fee rate, and seller/arbiter public keys; `PreparePoolOpeningResult`
-  returns `Outbound wire.Artifact` plus `OpeningCheckpoint` — persist the
-  checkpoint before sending.
-- `RequestContentCommand` carries the verified quote, pool checkpoint, ordered
-  content hashes, delivery deadline, and seed; `RequestContentResult` returns
-  `Outbound`, the typed `AuthorizationID`, and an `AuthorizationCheckpoint`
-  holding the exact signed 003.
-- `VerifyDeliveryCommand` verifies the exact Kind 6 delivery against the
-  persisted authorization checkpoint; `PaymentPreparationResult` returns the
-  verified payloads, the single outbound Kind 7 credential, and an audit-only
-  unsigned candidate.
-- `DeliveryCommand` / `DeliveryResult` on the seller side return the outbound
-  Kind 6 Artifact plus a lock-free `DeliveryCheckpoint` recording exactly the
-  protocol context (pool correlation ID, authorization ID, target payment
-  sequence, absolute cumulative seller amount) needed later by
-  `CompletePayment`. It carries no owner/lease/expiry semantics.
-- pool.UnsignedPayment and pool.SignedPayment distinguish locally rebuilt
-  unsigned states, detached signatures, and complete transactions. Workflow
-  methods return complete transaction bytes wrapped in
-  `pool.VerifiedSignedTransaction` for the application to broadcast; nothing is
-  ever named "submitted" or "accepted" inside the SDK.
+- `buyer.PrepareOpeningInput` carries raw funding bytes, expiry locktime, fee
+  rate, and seller/arbiter public keys; the step returns the outbound exact
+  Kind 2 Artifact plus `buyer.BuyerOpeningEvidence` — persist the evidence
+  before sending.
+- `buyer.RequestContentInput` carries the exact Kind 1 quote bytes, pool
+  evidence, ordered content hashes, delivery deadline, and seed; the step
+  returns the outbound Kind 5 Artifact plus `buyer.BuyerAuthorizationEvidence`
+  holding the exact signed Kind 5.
+- `buyer.VerifyDeliveryInput` verifies the exact Kind 6 delivery against the
+  persisted authorization evidence; the step returns the verified payloads and
+  the single outbound Kind 7 credential.
+- `seller.DeliveryInput` / `seller.SellerDeliveryEvidence` on the seller side
+  return the outbound Kind 6 Artifact plus the exact Kind 1/Kind 5/Kind 6 bytes
+  needed later by `seller.CompletePayment` and `seller.PrepareArbitration`.
+- `pool.UnsignedPayment` and `pool.SignedPayment` distinguish locally rebuilt
+  unsigned states, detached signatures, and complete transactions. Steps return
+  complete transaction bytes for the application to broadcast; nothing is ever
+  named "submitted" or "accepted" inside the SDK.
 
 The correlation field across these types is `pool.RefundTemplateTxID` — a
 dedicated `[32]byte` type carrying the canonical TxID of the refund template
@@ -156,6 +146,6 @@ transaction engine hook, lease or locker, content source/sink, backend port,
 private-key provider, or application-supplied transaction-ID calculator. Those
 abstractions would allow a caller to replace business rules that define the
 protocol, or would smuggle infrastructure side effects back into the SDK. Only
-key custody crosses this boundary, once, at construction time through the
-constrained `protocol.Signer` port; everything else flows through explicit
-inputs, explicit facts, and returned results.
+key custody crosses this boundary, per call, through the constrained
+`protocol.Signer` port; everything else flows through explicit inputs, explicit
+facts, and returned raw bytes/evidence.

@@ -13,18 +13,18 @@ import (
 	"github.com/bsv8/go-bitfs/wire"
 )
 
-// Workflow 是持有 Arbiter 签名能力的 007/008 角色编排。除固定的 Signer 公钥
+// workflow 是持有 Arbiter 签名能力的 007/008 角色编排。除固定的 Signer 公钥
 // 外它不持有任何状态；没有持久化、网络、节点或时钟注入点。所有时间/高度
 // 判断使用调用方显式传入的 Facts。
-type Workflow struct {
+type workflow struct {
 	signer    protocol.Signer
 	publicKey protocol.PublicKey
 }
 
-// NewWorkflow 固定并验证 Signer 公钥后返回角色编排。Signer 公钥在生命周期内
+// newWorkflow 固定并验证 Signer 公钥后返回角色编排。Signer 公钥在生命周期内
 // 不得变化；后续任何签名返回都会针对该公钥自验。
-func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
-	const op = "arbiter.NewWorkflow"
+func newWorkflow(signer protocol.Signer) (*workflow, error) {
+	const op = "arbiter.newWorkflow"
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "arbiter workflow requires a signer")
 	}
@@ -34,11 +34,11 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
 	publicKey := bound.PublicKey()
-	return &Workflow{signer: bound, publicKey: publicKey}, nil
+	return &workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
-func (workflow *Workflow) PublicKey() []byte {
+func (workflow *workflow) PublicKey() []byte {
 	if workflow == nil {
 		return nil
 	}
@@ -50,8 +50,8 @@ func (workflow *Workflow) PublicKey() []byte {
 // 独立重建 candidate、Claim 归属本 Arbiter、交付截止未过（Facts.Now）、退款
 // 模板尚未到期（只读取锁定类型对应的事实）。本步骤不签名也无长计算，因此不
 // 接收 context。应用必须在调用 SignPreparedArbitration 之前先持久化 exact
-// 托管证据（PreparedArbitration.RequestCBOR、Claim ID、费用与 payload bundle）。
-func (workflow *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (*PreparedArbitration, error) {
+// 托管证据（preparedArbitration.RequestCBOR、Claim ID、费用与 payload bundle）。
+func (workflow *workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (*preparedArbitration, error) {
 	const op = "arbiter.PrepareArbitration"
 	if workflow == nil || workflow.signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeUnauthorized, 8, "workflow", "arbitration workflow is required")
@@ -89,7 +89,7 @@ func (workflow *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []by
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedArbitration{
+	return &preparedArbitration{
 		request: request, claim: claim, unsigned: cloneUnsigned(unsigned), payloads: cloneByteSlices(payloads),
 		arbitrationClaimID: claimID, paymentAuthorizationID: authID, arbiterAmountSatoshis: fee,
 		arbiterPublicKey:    append([]byte(nil), keys.ArbiterPublicKey...),
@@ -102,7 +102,7 @@ func (workflow *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []by
 // 独立重建交易与 digest，重新比较 Claim ID、费用、角色、deadline（用本次
 // 显式 Facts.Now）与 candidate，然后按固定顺序签名——先仲裁交易签名，再编码
 // 回执，最后生成并自验统一回执消息签名。绝不信任缓存的 mutable candidate。
-func (workflow *Workflow) SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared *PreparedArbitration) (wire.Artifact, error) {
+func (workflow *workflow) SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared *preparedArbitration) (wire.Artifact, error) {
 	const op = "arbiter.SignPreparedArbitration"
 	if workflow == nil || workflow.signer == nil {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeUnauthorized, 9, "workflow", "arbitration workflow is required")
@@ -199,7 +199,7 @@ func (workflow *Workflow) SignPreparedArbitration(ctx context.Context, facts pro
 // AuthenticateRetrieval 仅完成 Buyer 鉴权，用于 not_ready / gone 分支：
 // 时间无关，不需要 Kind 9 存在。rawKind10 与 storedKind8 都是 exact bytes；
 // 鉴权失败返回 invalid_signature/unauthorized/invalid_evidence 分类错误。
-func (workflow *Workflow) AuthenticateRetrieval(rawKind10 []byte, storedKind8 []byte) error {
+func (workflow *workflow) AuthenticateRetrieval(rawKind10 []byte, storedKind8 []byte) error {
 	const op = "arbiter.AuthenticateRetrieval"
 	if workflow == nil || workflow.signer == nil {
 		return protocol.Errorf(op, protocol.CodeUnauthorized, 10, "workflow", "arbitration workflow is required")
@@ -218,7 +218,7 @@ func (workflow *Workflow) AuthenticateRetrieval(rawKind10 []byte, storedKind8 []
 // VerifyRetrievableCustody 对完整托管证据（exact Kind 8 + exact Kind 9）做
 // 时间无关全量验证，再鉴权 exact Kind 10，最后返回 verified custody/payload。
 // 过期的 deadline 或已到期的退款锁定不会拒绝仍在保留窗口内的已签托管证据。
-func (workflow *Workflow) VerifyRetrievableCustody(rawKind10 []byte, storedKind8 []byte, storedKind9 []byte) (*arbitration.VerifiedCustodiedContent, error) {
+func (workflow *workflow) VerifyRetrievableCustody(rawKind10 []byte, storedKind8 []byte, storedKind9 []byte) (*arbitration.VerifiedCustodiedContent, error) {
 	const op = "arbiter.VerifyRetrievableCustody"
 	if workflow == nil || workflow.signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeUnauthorized, 0, "workflow", "arbitration workflow is required")
@@ -247,7 +247,7 @@ func (workflow *Workflow) VerifyRetrievableCustody(rawKind10 []byte, storedKind8
 
 // BuildUnavailableRetrieval 构造并签署 valid Kind 11 unavailable Artifact：
 // 只携带结构合法的 request ID 与诚实 reason，无 Claim、无角色公钥、无记录元数据。
-func (workflow *Workflow) BuildUnavailableRetrieval(ctx context.Context, requestID protocol.ContentRetrievalRequestID, reason arbitration.ContentRetrievalUnavailableReason) (wire.Artifact, error) {
+func (workflow *workflow) BuildUnavailableRetrieval(ctx context.Context, requestID protocol.ContentRetrievalRequestID, reason arbitration.ContentRetrievalUnavailableReason) (wire.Artifact, error) {
 	const op = "arbiter.BuildUnavailableRetrieval"
 	if ctx == nil {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeCanceled, 11, "ctx", "a non-nil context is required")
@@ -265,7 +265,7 @@ func (workflow *Workflow) BuildUnavailableRetrieval(ctx context.Context, request
 // BuildAvailableRetrieval 构造并签署 valid Kind 11 available Artifact，直接
 // 附带经 content_payloads_id 绑定的 verified exact payloads。available 分支
 // 不产生也不携带任何付款凭证。
-func (workflow *Workflow) BuildAvailableRetrieval(ctx context.Context, requestID protocol.ContentRetrievalRequestID, verifiedCustody *arbitration.VerifiedCustodiedContent) (wire.Artifact, error) {
+func (workflow *workflow) BuildAvailableRetrieval(ctx context.Context, requestID protocol.ContentRetrievalRequestID, verifiedCustody *arbitration.VerifiedCustodiedContent) (wire.Artifact, error) {
 	const op = "arbiter.BuildAvailableRetrieval"
 	if ctx == nil {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeCanceled, 11, "ctx", "a non-nil context is required")

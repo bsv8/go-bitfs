@@ -7,7 +7,7 @@ title: 01 · Protocol foundations and CBOR
 
 Return to the [SDK API framework](sdk-api-framework-design.md).
 
-The current implementation provides the boundaries described here: `protocol`, `content`, `pool`, `arbitration`, `buyer.Workflow`, `seller.Workflow`, `arbiter.Workflow`, and `wire` are ready to use. Pseudocode on this page explains responsibilities; it does not replace the actual Go signatures.
+The current implementation provides the boundaries described here: `protocol`, `content`, `pool`, `arbitration`, the pure role steps in `buyer`, `seller`, `arbiter`, and `wire` are ready to use. Pseudocode on this page explains responsibilities; it does not replace the actual Go signatures.
 
 ## Design goal
 
@@ -25,7 +25,7 @@ Seller signs a quote
 
 ## Package boundaries
 
-The API has four layers: shared protocol foundations, pure domain packages, an exact-bytes wire layer, and the role workflows that are the only recommended application path.
+The API has four layers: shared protocol foundations, pure domain packages, an exact-bytes wire layer, and the pure role step functions that are the only recommended application path.
 
 ```text
 protocol/     Shared foundations: constrained Signer port (+ NewPrivateKeySigner),
@@ -40,7 +40,7 @@ arbitration/  Pure 007/008 custody-evidence domain functions; no role state
 wire/         Typed encoders and strict decoders over exact bytes returning
               immutable wire.Artifact values
 buyer/, seller/, arbiter/
-              Role workflow facades; produce the next Artifact, transaction, or
+              Pure role steps; produce the next Artifact, transaction, or
               opaque checkpoint to persist. Delivery-context serialization is the
               calling application's responsibility
 ```
@@ -140,7 +140,7 @@ Wire v1 is unchanged: every complete message starts with `[protocol.WireVersion,
 
 006 introduces no application-level close message. Closing uses raw transactions already retained from 002 and 005; applications should not invent a CBOR `CloseRequest`.
 
-A parsed Artifact answers only whether bytes conform to a message schema. The role workflows subsequently validate signatures, quote expiry, payment-pool inputs, and amounts with the SDK's fixed verifiers — there are no caller-supplied verifier callbacks to configure. A decoder MUST NOT expose "decoded" as "verified" or "paid."
+A parsed Artifact answers only whether bytes conform to a message schema. The pure role steps subsequently validate signatures, quote expiry, payment-pool inputs, and amounts with the SDK's fixed verifiers — there are no caller-supplied verifier callbacks to configure. A decoder MUST NOT expose "decoded" as "verified" or "paid."
 
 Every protocol identity public key is encoded as a valid 33-byte compressed secp256k1 key. The fixed validation layer rejects 65-byte uncompressed keys before they can enter signed 001/003/004 terms or 002 pool evidence.
 
@@ -181,4 +181,4 @@ func CheckContentRequestTiming(requestTerms *PaymentAuthorization, quoteTerms *F
 func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error)
 ```
 
-The role workflows in [03 · Role workflow API](role-workflow-api.md) compose these pieces; applications should prefer them over calling domain functions directly.
+The pure role steps in [03 · Role pure-function API](role-workflow-api.md) compose these pieces; applications should prefer them over calling domain functions directly.

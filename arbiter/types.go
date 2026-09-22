@@ -17,12 +17,12 @@ import (
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
-// PreparedArbitration 是 PrepareArbitration 的不透明结果：完整验证通过但尚未
+// preparedArbitration 是 PrepareArbitration 的不透明结果：完整验证通过但尚未
 // 签名的托管证据。所有导出访问都经防御性复制 getter，调用方可以安全地把证据
 // 持久化，却拿不到可变引用去篡改签名输入。它不是 wire 报文，也不携带任何
-// WireVersion 字段；跨进程恢复必须走 RestorePreparedArbitration 从 exact bytes
+// WireVersion 字段；跨进程恢复必须走 restorePreparedArbitration 从 exact bytes
 // 全量重验。
-type PreparedArbitration struct {
+type preparedArbitration struct {
 	request                *arbitration.ArbitrationRequest
 	claim                  *arbitration.ArbitrationClaim
 	unsigned               *pool.UnsignedPayment
@@ -37,7 +37,7 @@ type PreparedArbitration struct {
 
 // Request 返回深拷贝的 exact Kind 8 托管请求（含 Claim、卖方签名与 payload
 // attachment）。应用必须先持久化它的 canonical 编码再调用 SignPreparedArbitration。
-func (prepared *PreparedArbitration) Request() *arbitration.ArbitrationRequest {
+func (prepared *preparedArbitration) Request() *arbitration.ArbitrationRequest {
 	if prepared == nil {
 		return nil
 	}
@@ -47,15 +47,15 @@ func (prepared *PreparedArbitration) Request() *arbitration.ArbitrationRequest {
 // RequestCBOR 返回 exact Kind 8 的 canonical wire 字节；发送与持久化都用它。
 // （PreparedAt 之类的观测元数据由应用连同其 Facts 来源自行保存，不属于可
 // 验证协议证据，因此不在本值上。）
-func (prepared *PreparedArbitration) RequestCBOR() ([]byte, error) {
+func (prepared *preparedArbitration) RequestCBOR() ([]byte, error) {
 	if prepared == nil || prepared.request == nil {
-		return nil, protocol.Errorf("arbiter.PreparedArbitration.RequestCBOR", protocol.CodeInvalidEvidence, 8, "request", "prepared arbitration is empty")
+		return nil, protocol.Errorf("arbiter.preparedArbitration.RequestCBOR", protocol.CodeInvalidEvidence, 8, "request", "prepared arbitration is empty")
 	}
 	return arbitration.MarshalRequest(prepared.request)
 }
 
 // Claim 返回深拷贝的已解码 Claim 证据。
-func (prepared *PreparedArbitration) Claim() *arbitration.ArbitrationClaim {
+func (prepared *preparedArbitration) Claim() *arbitration.ArbitrationClaim {
 	if prepared == nil {
 		return nil
 	}
@@ -63,7 +63,7 @@ func (prepared *PreparedArbitration) Claim() *arbitration.ArbitrationClaim {
 }
 
 // RefundTemplateTxID 返回从退款模板派生的费用池统一关联 ID 副本。
-func (prepared *PreparedArbitration) RefundTemplateTxID() []byte {
+func (prepared *preparedArbitration) RefundTemplateTxID() []byte {
 	if prepared == nil || prepared.unsigned == nil {
 		return nil
 	}
@@ -71,7 +71,7 @@ func (prepared *PreparedArbitration) RefundTemplateTxID() []byte {
 }
 
 // ArbitrationClaimID 返回 SHA-256(exact_claim_cbor)，Kind 8 文档 typed ID。
-func (prepared *PreparedArbitration) ArbitrationClaimID() protocol.ArbitrationClaimID {
+func (prepared *preparedArbitration) ArbitrationClaimID() protocol.ArbitrationClaimID {
 	if prepared == nil {
 		return protocol.ArbitrationClaimID{}
 	}
@@ -79,7 +79,7 @@ func (prepared *PreparedArbitration) ArbitrationClaimID() protocol.ArbitrationCl
 }
 
 // PaymentAuthorizationID 返回被托管付款授权的 SHA-256 typed ID。
-func (prepared *PreparedArbitration) PaymentAuthorizationID() protocol.PaymentAuthorizationID {
+func (prepared *preparedArbitration) PaymentAuthorizationID() protocol.PaymentAuthorizationID {
 	if prepared == nil {
 		return protocol.PaymentAuthorizationID{}
 	}
@@ -87,7 +87,7 @@ func (prepared *PreparedArbitration) PaymentAuthorizationID() protocol.PaymentAu
 }
 
 // FeeSatoshis 返回冻结的绝对仲裁费（output[2] 金额）；成功路径恒为正数。
-func (prepared *PreparedArbitration) FeeSatoshis() protocol.Satoshis {
+func (prepared *preparedArbitration) FeeSatoshis() protocol.Satoshis {
 	if prepared == nil {
 		return 0
 	}
@@ -95,7 +95,7 @@ func (prepared *PreparedArbitration) FeeSatoshis() protocol.Satoshis {
 }
 
 // ContentPayloadsCBOR 返回 exact content_payloads_cbor attachment 字节副本。
-func (prepared *PreparedArbitration) ContentPayloadsCBOR() []byte {
+func (prepared *preparedArbitration) ContentPayloadsCBOR() []byte {
 	if prepared == nil || prepared.request == nil {
 		return nil
 	}
@@ -103,7 +103,7 @@ func (prepared *PreparedArbitration) ContentPayloadsCBOR() []byte {
 }
 
 // ContentPayloads 返回按授权顺序深拷贝的 payload 内容。
-func (prepared *PreparedArbitration) ContentPayloads() [][]byte {
+func (prepared *preparedArbitration) ContentPayloads() [][]byte {
 	if prepared == nil {
 		return nil
 	}
@@ -112,7 +112,7 @@ func (prepared *PreparedArbitration) ContentPayloads() [][]byte {
 
 // DeadlineUnixSeconds 返回买方授权携带的交付截止时间（UTC Unix 秒）；是否
 // 已经过期由调用方用自己的显式事实判断。
-func (prepared *PreparedArbitration) DeadlineUnixSeconds() content.UnixSeconds {
+func (prepared *preparedArbitration) DeadlineUnixSeconds() content.UnixSeconds {
 	if prepared == nil {
 		return 0
 	}
@@ -120,7 +120,7 @@ func (prepared *PreparedArbitration) DeadlineUnixSeconds() content.UnixSeconds {
 }
 
 // ArbiterPublicKey 返回 Claim 锁定脚本中恢复的仲裁方压缩公钥副本。
-func (prepared *PreparedArbitration) ArbiterPublicKey() []byte {
+func (prepared *preparedArbitration) ArbiterPublicKey() []byte {
 	if prepared == nil {
 		return nil
 	}

@@ -1,9 +1,9 @@
 // Command buyer parses and verifies a BitFS 001 file quote.
 //
-// 输入是 exact Kind 1 Artifact 的 hex。新角色 API：买方用
-// buyer.NewWorkflow(...).AcceptQuote(facts, raw) 一次完成严格解析、卖方
-// 验签与过期判断，得到不可变 VerifiedQuote；wire.Parse 仅用于展示层打印报文
-// 自描述 Kind。
+// 输入是 exact Kind 1 Artifact 的 hex。纯函数 API：买方用
+// buyer.AcceptQuote(facts, raw) 一次完成严格解析、卖方验签与过期判断，得到
+// 不可变 VerifiedQuote；它不绑定买方身份，调用方自行比较 Terms。
+// BuyerPublicKey。wire.Parse 仅用于展示层打印报文自描述 Kind。
 package main
 
 import (
@@ -60,14 +60,6 @@ func run(input io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("create buyer signer from BUYER_PRIVATE_KEY_HEX: %w", err)
 	}
-	signer, err := protocol.NewPrivateKeySigner(privateKey)
-	if err != nil {
-		return fmt.Errorf("create buyer signer: %w", err)
-	}
-	buyerWorkflow, err := buyer.NewWorkflow(signer)
-	if err != nil {
-		return fmt.Errorf("create buyer workflow: %w", err)
-	}
 
 	// 展示层打印：wire.Parse 自读版本与 Kind 并分派严格 decoder；
 	// 业务验证完全交给角色 API。
@@ -78,9 +70,10 @@ func run(input io.Reader) error {
 	debugf("[parse] self-described kind: %d (FileQuote=%d)", artifact.Kind(), wire.FileQuote)
 
 	// 显式事实：过期判断只依赖调用方传入的 Facts.Now。
+	// AcceptQuote 不接收身份参数；买方绑定由调用方自行比较。
 	now := time.Now().UTC()
 	facts := protocol.Facts{Now: now, BlockHeight: blockHeight}
-	verified, err := buyerWorkflow.AcceptQuote(facts, rawQuote)
+	verified, err := buyer.AcceptQuote(facts, rawQuote)
 	if err != nil {
 		return fmt.Errorf("[verify seller signature/expiry] rejected: %w", err)
 	}

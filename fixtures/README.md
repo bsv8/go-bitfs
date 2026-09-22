@@ -9,6 +9,10 @@
 - `protocol_schema`：Wire v1 的 CDDL 规范路径。
 - `transport_profile`：bitcoin-libp2p Protocol ID、uvarint 分帧和接收上限真值路径。
 - `invalid_wire`：Go/TypeScript 必须映射到相同稳定错误分类的畸形输入。
+- `role_manifest`：固定 Signer 下的角色纯函数真值（Kind 1–11 报文与交易原文）、
+  计价向量（seed/整块/末块/组合/边界/溢出）与语义拒绝向量（两语言必须同码拒绝）。
 
 清单路径均相对仓库根目录。两种语言不得复制或在各自目录维护第二份期望值。
 更新 frozen JSON 必须经过协议兼容性审查，不能为了让测试通过而自动重写。
+`role-v1.json` 由 `go test ./internal/conformance -run TestRoleFixtureMatchesFrozenFile -update-role-fixtures`
+在人工审查后重建；TypeScript 只消费，不生成。

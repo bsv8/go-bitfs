@@ -6,7 +6,7 @@ title: BitFS SDK API framework
 # BitFS SDK API framework
 
 go-bitfs is the executable protocol specification for 001–008. It is a
-**stateless, infrastructure-side-effect-free protocol SDK**: role workflows in
+**stateless, infrastructure-side-effect-free protocol SDK**: pure role steps in
 `buyer`, `seller`, and `arbiter` hold only the constrained signer fixed at
 construction (`protocol.Signer`; local software keys enter through
 `protocol.NewPrivateKeySigner`) and perform deterministic Build/Verify/Sign/Merge
@@ -34,10 +34,10 @@ arbitration/ Pure 007/008 custody-evidence domain functions (no role state)
 wire/        Typed encoders and strict decoders returning immutable
              wire.Artifact values over exact bytes
 buyer/, seller/, arbiter/
-             Role workflows: the only recommended application entry path
+             Pure role steps: the only recommended application entry path
 ```
 
-Role workflows are the single recommended surface for applications. Domain
+The pure role steps are the single recommended surface for applications. Domain
 packages stay public for wallets, auditors, and tooling, but every ordinary
-purchase should flow through the workflow methods described in
+purchase should flow through the step functions described in
 [03 · Role workflow API](role-workflow-api.md).

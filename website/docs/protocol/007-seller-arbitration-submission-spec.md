@@ -120,9 +120,9 @@ Arbiter flow is two phase:
 
 ```text
 application computes arbiter_amount_sat from its own fee policy
-arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
+arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
   -> application atomically persists exact Kind 8, Claim ID, fee, and payload bundle
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
   -> persist/send exact Kind 9
 ```
 

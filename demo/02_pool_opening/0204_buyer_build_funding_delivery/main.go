@@ -1,9 +1,9 @@
 // 0204 是开池流程中公开完整 FundingTransactionRaw 的买方动作。
 //
 // 本命令从 stdin 读取 0203 输出的 REFUND_TEMPLATE_TXID_HEX，按该关联 ID 从买
-// 方自己的 checkpoint 加载已验证的池证据（canonical opening proof + 完整付款
-// 状态 raw tx，经 buyer.RestorePoolCheckpoint 全量重验恢复），显式传给角色 API
-// 构造 Kind 4 资金交付。调用方不能伪造 delivery 字段；SDK 会复核 proof 与 hash。
+// 方自己的 checkpoint 加载已验证的池证据包（canonical opening proof + 完整付款
+// 状态 raw tx，恢复时全量重验），显式传给纯函数 API 构造 Kind 4 资金交付。
+// 调用方不能伪造 delivery 字段；SDK 会复核 proof 与 hash。
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
 	"github.com/bsv8/go-bitfs/pool"
@@ -47,7 +48,7 @@ func main() {
 	var refundTemplateTxID pool.RefundTemplateTxID
 	copy(refundTemplateTxID[:], refundTemplateTxIDRaw)
 	checkpointPath := poolopening.BuyerPoolCheckpointPath()
-	poolCheckpoint, err := poolopening.LoadBuyerPoolCheckpoint(checkpointPath, refundTemplateTxID)
+	poolEvidence, err := poolopening.LoadBuyerPoolCheckpoint(checkpointPath, refundTemplateTxID)
 	if err != nil {
 		fail(fmt.Errorf("load buyer pool checkpoint (caller state): %w", err))
 	}
@@ -55,7 +56,7 @@ func main() {
 	// PrepareFundingDelivery 复核 opening proof 的所有权、完整性和 hash 一致性，
 	// 然后从 proof 携带的 FundingTransactionRaw 构造 exact Kind 4 Artifact；
 	// 它不会重新签名资金交易。广播边界属于应用。
-	deliveryArtifact, err := session.Buyer.PrepareFundingDelivery(poolCheckpoint)
+	deliveryArtifact, err := buyer.PrepareFundingDelivery(poolEvidence)
 	if err != nil {
 		fail(fmt.Errorf("buyer.PrepareFundingDelivery: %w", err))
 	}

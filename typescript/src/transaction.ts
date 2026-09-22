@@ -173,7 +173,7 @@ class Reader {
     if (!Number.isSafeInteger(length) || length < 0 || this.#offset + length > this.raw.byteLength) throw new WireError('malformed_wire', 0, 'raw_transaction', '交易原文被截断')
     const result = this.raw.slice(this.#offset, this.#offset + length); this.#offset += length; return result
   }
-  u32 (): number { const value = this.take(4); return value[0]! | (value[1]! << 8) | (value[2]! << 16) | (value[3]! * 0x1000000) }
+  u32 (): number { const value = this.take(4); return (value[0]! | (value[1]! << 8) | (value[2]! << 16) | (value[3]! << 24)) >>> 0 }
   u64 (): bigint { const value = this.take(8); let result = 0n; for (let index = 7; index >= 0; index--) result = (result << 8n) | BigInt(value[index]!); return result }
   varInt (): bigint {
     const first = this.take(1)[0]!

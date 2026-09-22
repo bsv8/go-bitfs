@@ -7,7 +7,7 @@ title: 01 · 协议基础与 CBOR
 
 返回 [SDK API 框架入口](sdk-api-framework-design.md)。
 
-当前代码已落地本页的全部边界：`protocol`、`content`、`pool`、`arbitration`、`buyer.Workflow`、`seller.Workflow`、`arbiter.Workflow` 和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
+当前代码已落地本页的全部边界：`protocol`、`content`、`pool`、`arbitration`、`buyer`/`seller`/`arbiter` 的纯函数步骤和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
 
 ## 设计目标
 
@@ -25,7 +25,7 @@ title: 01 · 协议基础与 CBOR
 
 ## 包边界
 
-新 API 采用四层结构：共享协议基础、纯领域包、exact bytes wire 层，以及作为唯一推荐应用入口的角色 workflow。
+新 API 采用四层结构：共享协议基础、纯领域包、exact bytes wire 层，以及作为唯一推荐应用入口的角色纯函数步骤。
 
 ```text
 protocol/     共享基础：受约束 Signer 端口（+ NewPrivateKeySigner）、显式
@@ -39,7 +39,7 @@ arbitration/  007/008 托管证据的纯领域函数；无角色状态
 wire/         面向 exact bytes 的类型化 encoder 与严格 decoder，返回不可变
               wire.Artifact
 buyer/, seller/, arbiter/
-              角色 workflow 门面：产生下一个待发送 Artifact、交易或必须持久化
+              角色纯函数步骤：产生下一个待发送 Artifact、交易或普通证据包
               的 opaque checkpoint。交付上下文的串行化由调用方应用负责
 ```
 
@@ -138,7 +138,7 @@ Wire v1 保持不变：每条完整报文都以 `[protocol.WireVersion, wire_kin
 
 006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。
 
-解析得到的 Artifact 只回答“字节是否符合某类报文模式”；随后由角色 workflow 使用 SDK 固定验证器校验签名、报价有效期、费用池输入和金额——不存在需要调用方配置的签名验证回调。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
+解析得到的 Artifact 只回答“字节是否符合某类报文模式”；随后由角色纯函数步骤使用 SDK 固定验证器校验签名、报价有效期、费用池输入和金额——不存在需要调用方配置的签名验证回调。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
 所有协议身份公钥都必须编码为合法的 33 字节压缩 secp256k1 公钥。固定验证层会在它们进入签名的 001/003/004 条款或 002 费用池证据前拒绝 65 字节未压缩公钥。
 
@@ -175,4 +175,4 @@ func CheckContentRequestTiming(requestTerms *PaymentAuthorization, quoteTerms *F
 func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error)
 ```
 
-[03 · 角色 workflow API](role-workflow-api.md) 中的角色 workflow 负责组合以上能力；普通应用应优先使用角色 API，而不是直接调用领域函数。
+[03 · 角色纯函数 API](role-workflow-api.md) 中的步骤函数负责组合以上能力；普通应用应优先使用它们，而不是直接调用领域函数。

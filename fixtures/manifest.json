@@ -6,11 +6,13 @@
     "transaction_manifest": "费用池交易、签名、preimage 与 txid 真值",
     "protocol_schema": "Wire v1 CDDL 协议结构真值",
     "transport_profile": "Go/TypeScript 共用的 bitcoin-libp2p stream 配置真值",
-    "invalid_wire": "两种语言必须返回相同稳定错误分类的畸形 wire 真值"
+    "invalid_wire": "两种语言必须返回相同稳定错误分类的畸形 wire 真值",
+    "role_manifest": "固定 Signer 下的角色纯函数真值、计价向量与语义拒绝向量"
   },
   "wire_manifest": "wire/testdata/v1/golden_messages.json",
   "transaction_manifest": "pool/testdata/v1/transactions.json",
   "protocol_schema": "spec/v1/wire-messages.cddl",
   "transport_profile": "fixtures/transport-v1.json",
-  "invalid_wire": "fixtures/invalid-wire-v1.json"
+  "invalid_wire": "fixtures/invalid-wire-v1.json",
+  "role_manifest": "fixtures/role-v1.json"
 }

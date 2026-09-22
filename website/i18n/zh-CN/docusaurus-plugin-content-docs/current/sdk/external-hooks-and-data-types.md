@@ -1,24 +1,31 @@
 ---
 id: external-hooks-and-data-types
-title: 02 · 外部钩子与数据类型
+title: 02 · External hooks and data types
 ---
 
-# 02 · 外部钩子与数据类型
+# 02 · External hooks and data types
 
-SDK 是无状态协议库：它拥有消息编码、签名验证、定价、交易构造与协议验证；调用方应用拥有持久化、并发控制、内容存储、传输、节点广播以及时间与区块高度的观测。SDK 没有 Verifier 回调、没有 Store、没有节点钩子，也没有时钟钩子；一切外部事实都以显式方法输入、`protocol.Facts{Now, BlockHeight}` 值或唯一 Signer 端口的形式跨越边界。
+The SDK is a stateless protocol library: it owns message encoding, signature
+verification, pricing, transaction construction, and protocol validation, while
+the calling application owns persistence, concurrency, content storage,
+transport, node broadcasting, and the observation of time and block heights.
+There is no Verifier callback, no Store, no node hook, and no clock hook; every
+external fact crosses the boundary either as an explicit method input, as a
+`protocol.Facts{Now, BlockHeight}` value, or through the single signer port.
 
-## 签名与私钥保管：唯一端口
+## Signing and key custody: one port
 
-SDK 中唯一的密钥托管能力是受约束的 `protocol.Signer` 端口：
+The only key-custody capability in the SDK is the constrained `protocol.Signer`
+port:
 
 ```go
 // package protocol
 type Signer interface {
-    // PublicKey 返回本 Signer 固定的压缩公钥；workflow 构造时固定并验证它，
-    // 生命周期内不得变化。
+    // PublicKey 返回本 Signer 固定的压缩公钥；每次纯函数调用都会绑定并验证它，
+    // 调用生命周期内不得变化。
     PublicKey() PublicKey
-    // Sign 对 SDK 已构造好的 32 字节 digest 做 secp256k1 签名，返回不带交易
-    // sighash flag 的 low-S DER。Signer 绝不能自行哈希。
+    // Sign 对 SDK 已构造好的 32 字节 digest 做 secp256k1 签名，返回不带
+    // 交易 sighash flag 的 low-S DER。Signer 绝不能自行哈希。
     Sign(ctx context.Context, request SigningRequest) ([]byte, error)
 }
 
@@ -26,47 +33,119 @@ type Signer interface {
 // 只供 HSM/KMS 策略审计，不替代任何既定签名预映像。
 ```
 
-Signer 是**能力端口，不是可替换的协议策略**。它不能提供自定义哈希函数、preimage、sighash flag、verifier、CBOR encoder、价格规则或角色判断；所有验证固定在 SDK 内部执行。本地软件私钥经唯一提供的适配器进入：
+The signer is a **capability port, not a replaceable protocol policy**. It can
+never supply a custom hash function, preimage, sighash flag, verifier, CBOR
+encoder, price rule, or role decision; all verification stays fixed inside the
+SDK. Local software keys enter through the only provided adapter:
 
 ```go
 signer, err := protocol.NewPrivateKeySigner(privateKey) // privateKey 为 *ec.PrivateKey
-buyerWorkflow, err := buyer.NewWorkflow(signer)
-sellerWorkflow, err := seller.NewWorkflow(signer)
-arbiterWorkflow, err := arbiter.NewWorkflow(signer)
+outbound, terms, err := seller.CreateQuote(ctx, facts, signer, draft)
+kind2, evidence, err := buyer.PrepareOpening(ctx, input, signer)
 ```
 
-每个构造器固定并验证由 Signer 派生的压缩公钥；该公钥成为 workflow 的角色绑定身份：后续每个方法都会先复核传入的开池证据属于该密钥对应角色，再进行计算。公钥在 workflow 生命周期内不得变化。
+Each pure-function entry receives the signer per call; the SDK binds and
+validates the compressed public key derived from that signer for the duration of
+the call only, and re-checks that supplied opening evidence belongs to the
+signer's role before signing anything. No cross-step object retains the signer.
 
-SDK 同样绝不接收种子、密钥导出回调或签名验证回调。SDK 内部所有普通消息签名都走一条固定路径：先一次性构造类型化签名输入的 digest，交给 Signer 签名，规范化为 low-S DER，并在返回前对照固定的角色公钥复验。调用方不得在签名前再做一次哈希。交易签名一律使用固定的 MultisigPool sighash（`ForkID|All`），绝不做二次哈希。
+The SDK never accepts a seed, key-export callback, or signature-verifier
+callback either. Every ordinary message signature follows one fixed path inside
+the SDK: the digest over the typed signing input is constructed once, handed to
+the Signer, normalized to low-S DER, and re-verified against the fixed role key
+before returning. Callers must not hash a second time before signing.
+Transaction signatures always use the fixed MultisigPool sighash (`ForkID|All`)
+and are never hashed a second time.
 
-报价、开池证据、内容请求或付款状态中的公钥都是协议证据。调用方不能替换参与者验证逻辑，也不能重新配置买方/卖方/仲裁方角色：验签固定且不可替换。
+Public keys in a quote, opening proof, content request, or payment state are
+protocol evidence. Callers cannot replace participant verification or
+reconfigure the buyer/seller/arbiter roles: verification is fixed and not
+substitutable.
 
-## 持久化属于应用
+## Persistence belongs to the application
 
-SDK 中不存在任何 Store 接口。workflow 返回 opaque checkpoint 与 verified 值——例如 `buyer.OpeningCheckpoint`、`buyer.PoolCheckpoint`、`buyer.AuthorizationCheckpoint`、`seller.OpeningCheckpoint`、`seller.DeliveryCheckpoint`、`content.VerifiedQuote` 与 `pool.VerifiedOpening`——并在后续步骤中要求把它们作为显式参数再次传入。应用以 `RefundTemplateTxID`（或授权 ID）为键在自己的数据库中保存其 evidence 字节，按池串行化并发工作，并自行实现重试、outbox 与崩溃恢复；buyer 包提供从 exact 持久化字节全量重验重建各 checkpoint 的 Restore 入口（`RestoreOpeningCheckpoint`、`RestorePoolCheckpoint`、`RestoreAuthorizationCheckpoint`）。SDK 不提供任何锁、租约、mutex 或进程内/跨进程串行化：同一方法被并发调用两次会产生两份各自合法的计算结果，去重是应用的责任。
+There is no Store interface and no checkpoint class in the SDK. Every step
+returns plain evidence packages — for example `buyer.BuyerOpeningEvidence`,
+`buyer.BuyerPoolEvidence`, `buyer.BuyerAuthorizationEvidence`,
+`seller.SellerOpeningEvidence`, `seller.SellerDeliveryEvidence`, and
+`arbiter.PreparedArbitrationEvidence` — that contain raw bytes and explicit
+fields only, and require them again as explicit arguments in later steps.
+Applications persist those evidence bytes in their own database keyed by
+`RefundTemplateTxID` (or by authorization ID), serialize concurrent work per
+pool, and implement retries, outboxes, and crash recovery themselves. Every step
+re-verifies the complete evidence from raw bytes before acting, so restore is
+just passing the persisted data back in; the SDK adds no locks, leases, mutexes,
+or process-serialization of any kind.
 
-## 内容字节由调用方提供
+## Content bytes are caller-supplied
 
-卖方从自己的存储读取 seed/块 payload 字节，并以有序批次通过 `seller.DeliveryCommand.ContentPayloads` 传入；买方通过 `buyer.RequestContentCommand.ContentHashes` 提供有序内容哈希，并通过 `Seed` 提供已验证的 seed。workflow 从证据推导每个内容类型（等于报价 SeedHash 的哈希即 seed，其余必须由该 seed 提交），针对这些显式字节验证哈希、seed 结构、块成员资格、期望长度、报价条款以及请求/交付签名，并原子地整批接受或拒绝。验收以数据形式返回已验证的 payload 批次（`PaymentPreparationResult.Payloads`，按授权顺序排列）；把它保存到最终存储是应用的职责，保存失败意味着该业务步骤不得视为已完成。
+The seller reads seed/block payload bytes from its own storage and passes them
+as an ordered batch via `seller.DeliveryInput.ContentPayloads`; the buyer passes
+ordered content hashes via `buyer.RequestContentInput.ContentHashes` and
+verified seeds via `Seed`. The pure steps derive every content kind from
+evidence (a hash equal to the quote SeedHash is the seed, everything else must
+be committed by that seed), verify hashes, seed structure, block membership,
+expected lengths, quote terms, and request/delivery signatures against those
+explicit bytes, and accept or reject the whole batch atomically. Verification
+returns the verified payload batch as data (the first result of
+`buyer.VerifyDelivery`, in authorized order); saving it to final storage is the
+application's job.
 
-## 时间与高度事实是显式输入
+## Time and height facts are explicit inputs
 
-SDK 没有时钟注入，不访问节点，也不读取系统时间。每个时间敏感调用都接收一份显式的 `protocol.Facts{Now, BlockHeight}`；只需要时间的操作会拒绝零值 Now，需要高度的操作会拒绝零值 BlockHeight。SDK 绝不向节点查询当前高度，绝不回退系统时钟，也绝不伪造数值。高度来源故障时应延迟或改道退款操作，绝不能伪造数值继续执行。
+The SDK has no clock injection and no node access, and it reads no system time.
+Every time-sensitive call receives one explicit `protocol.Facts{Now, BlockHeight}`
+value; operations that need only a time reject a zero `Now`, and operations that
+need a height reject a zero `BlockHeight`. The SDK never queries a node for the
+current height, never falls back to the system clock, and never fabricates a
+value. A height-source outage must delay or reroute refund operations, never
+fabricate a value.
 
-## 协议输入与结果类型
+## Protocol input and result types
 
-角色 API 接收 Command 结构体，返回统一 Result：待发送 Artifact 加必须先持久化的 opaque checkpoint。
+The pure steps accept raw wire bytes plus plain input structs and return raw
+wire bytes plus plain evidence packages to persist first:
 
-- `PrepareOpeningCommand` 携带已验收报价、资金交易原文、到期锁定、费率与卖方/仲裁公钥；`PreparePoolOpeningResult` 返回 `Outbound wire.Artifact` 与 `OpeningCheckpoint`——发送前先持久化 checkpoint。
-- `RequestContentCommand` 携带已验收报价、池 checkpoint、有序内容哈希、交付截止与 seed；`RequestContentResult` 返回 `Outbound`、typed `AuthorizationID` 以及持有 exact 已签 003 的 `AuthorizationCheckpoint`。
-- `VerifyDeliveryCommand` 用已持久化的授权 checkpoint 验收 exact Kind 6 交付；`PaymentPreparationResult` 返回已验证 payload、整批唯一的出站 Kind 7 凭证与仅供审计的未签名 candidate。
-- 卖方侧 `DeliveryCommand` / `DeliveryResult` 返回出站 Kind 6 Artifact 与无锁的 `DeliveryCheckpoint`——它恰好记录后续 `CompletePayment` 所需的协议上下文（费用池关联 ID、授权 ID、目标付款序号、绝对累计卖方金额），不携带任何 owner/lease/expiry 语义。
-- pool.UnsignedPayment 与 pool.SignedPayment 区分本地重建的未签名状态、分离签名和完整交易。workflow 方法把完整交易字节包装为 `pool.VerifiedSignedTransaction` 返回，供应用广播；SDK 内部绝不存在名为"submitted"或"accepted"的声明。
+- `buyer.PrepareOpeningInput` carries raw funding bytes, expiry locktime, fee
+  rate, and seller/arbiter public keys; the step returns the outbound exact
+  Kind 2 Artifact plus `buyer.BuyerOpeningEvidence` — persist the evidence
+  before sending.
+- `buyer.RequestContentInput` carries the exact Kind 1 quote bytes, pool
+  evidence, ordered content hashes, delivery deadline, and seed; the step
+  returns the outbound Kind 5 Artifact plus `buyer.BuyerAuthorizationEvidence`
+  holding the exact signed Kind 5.
+- `buyer.VerifyDeliveryInput` verifies the exact Kind 6 delivery against the
+  persisted authorization evidence; the step returns the verified payloads and
+  the single outbound Kind 7 credential.
+- `seller.DeliveryInput` / `seller.SellerDeliveryEvidence` on the seller side
+  return the outbound Kind 6 Artifact plus the exact Kind 1/Kind 5/Kind 6 bytes
+  needed later by `seller.CompletePayment` and `seller.PrepareArbitration`.
+- `pool.UnsignedPayment` and `pool.SignedPayment` distinguish locally rebuilt
+  unsigned states, detached signatures, and complete transactions. Steps return
+  complete transaction bytes for the application to broadcast; nothing is ever
+  named "submitted" or "accepted" inside the SDK.
 
-贯穿这些类型的关联字段是 `pool.RefundTemplateTxID`——专用的 `[32]byte` 类型，承载未嵌入角色签名的规范退款模板交易的 TxID（CDDL 标签 `refund-template-txid`）。它不是原始字节的 SHA-256，也不是字节反转哈希，更不是最终广播退款交易的链上 txid。
+The correlation field across these types is `pool.RefundTemplateTxID` — a
+dedicated `[32]byte` type carrying the canonical TxID of the refund template
+transaction without embedded role signatures (CDDL label
+`refund-template-txid`). It is not a SHA-256 of raw bytes, not a byte-reversed
+hash, and not the txid of the final broadcast refund transaction.
 
-wire 包把领域值映射为规范的 Kind 1–11 CBOR Artifact；其 `Bytes()` 被原样传输与保存，不做二次编码。可选 `transport` 包把这些 exact bytes 绑定到共享 `/bitfs/wire/1.0.0` bitcoin-libp2p stream profile，并使用 unsigned-varint 长度分帧。host 生命周期、路由、重试、HTTP、队列、数据库与浏览器 session 策略仍由应用负责；任何传输都不得重编码 Artifact，也不得附加隐藏的 pool/session 身份。
+The wire package maps domain values to canonical Kind 1–11 CBOR as immutable
+Artifacts whose `Bytes()` are transmitted and stored unchanged. The optional
+`transport` package binds those exact bytes to the shared
+`/bitfs/wire/1.0.0` bitcoin-libp2p stream profile with unsigned-varint length
+framing. Host lifecycle, routing, retries, HTTP, queues, databases, and browser
+session policy remain application-owned; no transport may re-encode an
+Artifact or add a hidden pool/session identity.
 
-## 什么不是扩展点
+## What is not an extension point
 
-不存在 verifier 策略、workflow 时钟、store/repository 钩子、交易引擎钩子、租约或锁、内容 source/sink、后端端口、私钥 provider 或应用提供的交易 ID 计算器。这些抽象会让调用方替换定义协议本身的业务规则，或者把基础设施副作用重新 smuggle 回 SDK。只有密钥保管跨越这条边界，且仅在构造时经受约束的 `protocol.Signer` 端口进入一次；其余一切都通过显式输入、显式事实和返回结果流转。
+There is no verifier strategy, workflow clock, store/repository hook,
+transaction engine hook, lease or locker, content source/sink, backend port,
+private-key provider, or application-supplied transaction-ID calculator. Those
+abstractions would allow a caller to replace business rules that define the
+protocol, or would smuggle infrastructure side effects back into the SDK. Only
+key custody crosses this boundary, per call, through the constrained
+`protocol.Signer` port; everything else flows through explicit inputs, explicit
+facts, and returned raw bytes/evidence.

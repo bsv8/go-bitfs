@@ -16,6 +16,7 @@ type manifest struct {
 	ProtocolSchema      string `json:"protocol_schema"`
 	TransportProfile    string `json:"transport_profile"`
 	InvalidWire         string `json:"invalid_wire"`
+	RoleManifest        string `json:"role_manifest"`
 }
 
 // FixturePath 从 start 开始向父目录查找根 fixtures/manifest.json，并解析 key
@@ -52,7 +53,7 @@ func findAndRead(start, key string) (string, string, error) {
 			values := map[string]string{
 				"wire_manifest": decoded.WireManifest, "transaction_manifest": decoded.TransactionManifest,
 				"protocol_schema": decoded.ProtocolSchema, "transport_profile": decoded.TransportProfile,
-				"invalid_wire": decoded.InvalidWire,
+				"invalid_wire": decoded.InvalidWire, "role_manifest": decoded.RoleManifest,
 			}
 			value, ok := values[key]
 			if !ok {

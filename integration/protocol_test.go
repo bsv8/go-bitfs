@@ -17,13 +17,13 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	masterseed "github.com/bsv8/MasterSeed"
-	"github.com/bsv8/go-bitfs/arbiter"
 	"github.com/bsv8/go-bitfs/arbitration"
-	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/content"
+	"github.com/bsv8/go-bitfs/internal/flowtest/arbiter"
+	"github.com/bsv8/go-bitfs/internal/flowtest/buyer"
+	"github.com/bsv8/go-bitfs/internal/flowtest/seller"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
-	"github.com/bsv8/go-bitfs/seller"
 	"github.com/bsv8/go-bitfs/wire"
 )
 

@@ -38,64 +38,68 @@ The current CDDL is under `spec/v1/`; retired iterations are archived under `spe
 
 ## Quick start
 
-The only recommended path is the role workflow API. Keys enter through one constrained signer port (`protocol.Signer`; local software keys use `protocol.NewPrivateKeySigner`), time and height enter through one explicit facts value, and every outbound message is an exact-bytes `wire.Artifact` that the application persists before sending:
+SDK = 无状态计算器 + 验钞机：每个入口只接收原始报文字节、普通证据包与一次调用专用的受约束 Signer，返回原始报文字节或普通证据包。SDK 不持有跨步骤对象、不保存进度、不定价策略、不碰钱包、不广播、不读时钟、不访问存储。应用负责进度、状态机、存储、恢复、重试、对账与广播。
 
 ```go
 // ---- 步骤 1：三方密钥 → 受约束 Signer（唯一密钥托管端口）。----
 signerSeller, err := protocol.NewPrivateKeySigner(sellerKey) // sellerKey 为 *ec.PrivateKey
 signerBuyer, err := protocol.NewPrivateKeySigner(buyerKey)
 
-// ---- 步骤 2：角色 workflow 只持有 Signer；无存储、无时钟、无网络。----
-sellerWf, err := seller.NewWorkflow(signerSeller)
-buyerWf, err := buyer.NewWorkflow(signerBuyer)
-
-// ---- 步骤 3：显式事实（时间 + 高度）由调用方观测并传入；SDK 不读钟、不查节点。----
+// ---- 步骤 2：显式事实（时间 + 高度）由调用方观测并传入；SDK 不读钟、不查节点。----
 facts := protocol.Facts{Now: observedTimeUTC, BlockHeight: 900000}
 
-// ---- 步骤 4（卖方）：签署 001 报价，得到待发送 Artifact。----
-qr, err := sellerWf.CreateQuote(ctx, facts, seller.QuoteDraft{
+// ---- 步骤 3（卖方）：签署 001 报价；返回待发送 exact Kind 1 与最终条款。----
+outbound, terms, err := seller.CreateQuote(ctx, facts, signerSeller, seller.QuoteDraft{
     SeedHash:                   seedHash,
     BuyerPublicKey:             buyerPubKey,
     SeedPriceSatoshis:          100,
     FullBlockPriceSatoshis:     1000,
     FileSizeBytes:              uint64(len(fileBytes)),
-    QuoteExpiresAtUnixSeconds:  facts.Now.Add(time.Hour).Unix(),
-    SupportedArbiterPublicKeys: [][]byte{arbiterPubKey},
+    QuoteExpiresAtUnixSeconds:  content.UnixSeconds(facts.Now.Add(time.Hour).Unix()),
+    SupportedArbiterPublicKeys: []protocol.PublicKey{arbiterPubKey},
     RecommendedFilename:        "file.bin", // 先 sanitize 再进入签名条款
 })
-rawKind1 := qr.Outbound.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
+rawKind1 := outbound.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
 
-// ---- 步骤 5（买方）：从 exact bytes 验收，得到不可变 VerifiedQuote。----
-vq, err := buyerWf.AcceptQuote(ctx, facts, rawKind1)
+// ---- 步骤 4（买方）：从 exact bytes 验收；应用自行核对 terms.BuyerPublicKey。----
+vq, err := buyer.AcceptQuote(facts, rawKind1)
 
-// ---- 步骤 6–7：开池（买方 PreparePoolOpening → 卖方 PreparePoolOpening
-//      → 买方 CompletePoolOpening → PrepareFundingDelivery → 卖方
-//      VerifyFundingDelivery），每个 Result 都先持久化 Checkpoint 再发送
-//      Outbound；广播边界属于应用。----
+// ---- 步骤 5–6：开池。每一步只接收原始报文与普通证据包，返回普通证据包；
+//      SDK 不保存进度，应用先持久化返回的 evidence 再发送 outbound。----
+kind2, buyerOpening, err := buyer.PrepareOpening(ctx, buyer.PrepareOpeningInput{
+    FundingTransactionRaw: fundingRaw, ExpiryLockTime: expiry,
+    MinerFeeRateSatoshisPerKilobyte: 1,
+    SellerPublicKey: sellerPubKey, ArbiterPublicKey: arbiterPubKey,
+}, signerBuyer)
+kind3, sellerOpening, err := seller.PreparePresign(ctx, kind2.Bytes(), signerSeller)
+buyerOpening, buyerPool, err := buyer.CompleteOpening(buyerOpening, kind3.Bytes())
+kind4, err := buyer.PrepareFundingDelivery(buyerPool)
+fundingRaw, sellerPool, err := seller.VerifyFunding(kind4.Bytes(), sellerOpening)
 
-// ---- 步骤 8–10：一轮购买。----
-rc, err := buyerWf.RequestContent(ctx, facts, buyer.RequestContentCommand{
-    Quote: vq, Pool: poolCheckpoint, ContentHashes: hashes,
+// ---- 步骤 7–9：一轮购买（003→004→005）。----
+kind5, authorization, err := buyer.PrepareContentRequest(ctx, facts, buyer.RequestContentInput{
+    QuoteRaw: rawKind1, Pool: buyerPool, ContentHashes: hashes,
     DeliveryDeadline: deadlineUnixSeconds, Seed: seedBytes,
-})                                   // → Kind 5 Artifact + AuthorizationCheckpoint
-dr, err := sellerWf.DeliverContent(ctx, facts, seller.DeliveryCommand{
-    Quote: signedQuote, Pool: sellerPool, RequestRaw: rawKind5,
+}, signerBuyer)                              // → exact Kind 5 + 普通授权证据包
+kind6, delivery, err := seller.PrepareDelivery(ctx, facts, seller.DeliveryInput{
+    QuoteRaw: rawKind1, Pool: sellerPool, RequestRaw: kind5.Bytes(),
     ContentPayloads: payloads, Seed: seedBytes,
-})                                   // → Kind 6 Artifact + DeliveryCheckpoint
-pp, err := buyerWf.VerifyDeliveryAndPreparePayment(ctx, facts, buyer.VerifyDeliveryCommand{
-    Quote: vq, Pool: poolCheckpoint, Request: rc.Checkpoint,
-    DeliveryRaw: rawKind6, Seed: seedBytes,
-})                                   // → 验证 payload + 唯一 Kind 7 凭证
-cp, err := sellerWf.CompletePayment(ctx, facts, seller.PaymentCommand{
-    Pool: sellerPool, Request: signedRequest, UpdateRaw: rawKind7,
-    Checkpoint: dr.Checkpoint,
-})                                   // → 完整付款交易 + 双方推进后的池 checkpoint
+}, signerSeller)                             // → exact Kind 6 + 普通交付证据包
+payloads, kind7, err := buyer.VerifyDelivery(ctx, facts, buyer.VerifyDeliveryInput{
+    Authorization: authorization, Pool: buyerPool,
+    DeliveryRaw: kind6.Bytes(), Seed: seedBytes,
+}, signerBuyer)                              // → 已验证 payload + 唯一 exact Kind 7
+paymentRaw, sellerPool, err := seller.CompletePayment(ctx, facts, seller.CompletePaymentInput{
+    Pool: sellerPool, RequestRaw: kind5.Bytes(), UpdateRaw: kind7.Bytes(),
+}, signerSeller)                             // → 完整付款交易 + 付款后的普通证据包
 ```
+
+买方推进池状态的唯一方式：从链上取得完整付款交易原文，作为普通证据包的 `LatestPaymentRawTx` 传入下一步，由 SDK 全量重验；不存在跳过链上结果的入口。
 
 Error handling branches on stable categories, never on error text:
 
 ```go
-if _, err := buyerWf.AcceptQuote(ctx, facts, raw); err != nil {
+if _, err := buyer.AcceptQuote(facts, raw); err != nil {
     switch {
     case protocol.IsCode(err, protocol.CodeExpired):
         // 报价过期：按业务策略重新要报价。
@@ -110,9 +114,9 @@ if _, err := buyerWf.AcceptQuote(ctx, facts, raw); err != nil {
 ## Packages
 
 - `protocol/`: shared foundations — constrained `Signer` port (+ `NewPrivateKeySigner`), explicit `Facts`, typed IDs, structured errors with `ErrorCode` classification.
-- `content/`: quote and content credentials, seeds, hashes, pricing, and evidence validation (001/003/004), plus the immutable `VerifiedQuote`.
-- `pool/`: independent 002/005/006 settlement state machine and transaction engine with opaque verified values.
-- `buyer/`, `seller/`, `arbiter/`: role workflows — the only recommended entry path for applications.
+- `content/`: quote and content credentials, seeds, hashes, pricing, and evidence validation (001/003/004), plus the immutable `VerifiedQuote` and exported `ClassifyContentHashes`.
+- `pool/`: independent 002/005/006 settlement state machine and transaction engine with verified payment-state helpers.
+- `buyer/`, `seller/`, `arbiter/`: pure step functions — each entry takes raw wire bytes, plain evidence packages, and a per-call constrained signer.
 - `arbitration/`: pure 007/008 custody-evidence domain functions; `wire/`: typed encoders and strict decoders returning `wire.Artifact` values.
 
 Run the test suite with:

@@ -16,7 +16,7 @@ test-typescript:
 
 # conformance 明确表示 Go 与 TypeScript 消费同一套 fixtures。
 conformance:
-	go test ./internal/conformance ./wire ./pool -run 'Manifest|SharedInvalidWireFixtures'
+	go test ./internal/conformance ./wire ./pool -run 'Manifest|RoleFixture|RoleReject|SharedInvalidWireFixtures'
 	npm run test:conformance --prefix typescript
 
 fmt-check-go:

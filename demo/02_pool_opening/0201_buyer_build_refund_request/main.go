@@ -3,10 +3,10 @@
 // 这个子项目负责两件事：先在买方本地准备一笔真实的 FundingTransactionRaw，再
 // 用角色 API 构造退款预签请求（Kind 2）。需要特别注意的是，FundingTransactionRaw
 // 的原文不会放进本次发给卖方的报文，报文中只公开其交易 ID；这样卖方可以先验
-// 证退款条件，但要等买方把 OpeningCheckpoint 的证据写入自己的 checkpoint 之后，
-// 才会收到完整的资金交易（见 0204）。
+// 证退款条件，但要等买方把开池证据写入自己的 checkpoint 之后，才会收到完整的
+// 资金交易（见 0204）。
 //
-// 流程：load（密钥/UTXO）→ buyer.PreparePoolOpening → persist（exact Kind 2
+// 流程：load（密钥/UTXO）→ buyer.PrepareOpening → persist（exact Kind 2
 // bytes + 私有资金交易原文）→ send。
 package main
 
@@ -17,9 +17,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/wire"
 )
 
 // nowUTC 返回当前 UTC 时间；demo 应用允许读取系统时钟并把它作为显式事实
@@ -32,11 +34,11 @@ func main() {
 	if err := demoenv.Load(); err != nil {
 		fail(err)
 	}
-	// 使用一个贯穿本次命令的 context，供 JungleBus 查询和 buyer workflow
+	// 使用一个贯穿本次命令的 context，供 JungleBus 查询和 buyer 纯函数 API
 	// 传递取消信号。这个演示是一次性命令，因此使用 Background 即可。
 	ctx := context.Background()
 	// NewBuyer 会加载三方密钥并经 protocol.NewPrivateKeySigner 组装只含
-	// Signer 的 buyer.Workflow。跨进程状态由本 demo 的 checkpoint 函数保存，
+	// Signer 的买方会话。跨进程状态由本 demo 的 checkpoint 函数保存，
 	// 不经过 SDK。
 	session, err := poolopening.NewBuyer(ctx)
 	if err != nil {
@@ -68,7 +70,7 @@ func main() {
 		debug("[buyer] funding address: %s", addresses.SelectedAddress)
 		// PrepareFunding 在 demo 层查询 JungleBus，重建地址的已确认 UTXO，
 		// 选择一个可用输出，并使用买方私钥签名真实 FundingTransactionRaw。它不是协议报文，
-		// 只在买方本地短暂持有，稍后随 OpeningCheckpoint 进入买方 checkpoint。
+		// 只在买方本地短暂持有，稍后随买方开池证据包进入 demo checkpoint。
 		funding, fundErr := session.PrepareFunding(ctx)
 		if fundErr != nil {
 			fail(fmt.Errorf("prepare real funding transaction: %w", fundErr))
@@ -115,22 +117,33 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("build opening command: %w", err))
 	}
-	// buyer.PreparePoolOpening 返回待发送的 exact Kind 2 Artifact 与必须先
-	// 持久化的 OpeningCheckpoint。SDK 不做任何保存；应用必须先持久化
-	// checkpoint 的证据，再发送 Outbound。这里由 demo checkpoint 承担
+	// buyer.PrepareOpening 返回待发送的 exact Kind 2 Artifact 与必须先持久化
+	// 的普通证据包。SDK 不做任何保存；应用必须先持久化证据包（exact 请求 +
+	// 私有资金交易），再发送 Outbound。这里由 demo checkpoint 承担
 	// “应用数据库”的角色。
-	prepared, err := session.Buyer.PreparePoolOpening(ctx, openingCommand)
+	preparedArtifact, evidence, err := buyer.PrepareOpening(ctx, openingCommand, session.BuyerSigner)
 	if err != nil {
-		fail(fmt.Errorf("buyer.PreparePoolOpening: %w", err))
+		fail(fmt.Errorf("buyer.PrepareOpening: %w", err))
 	}
 	checkpointPath := poolopening.BuyerOpeningCheckpointPath()
-	if err := poolopening.SaveBuyerOpeningCheckpoint(checkpointPath, prepared); err != nil {
+	if err := poolopening.SaveBuyerOpeningCheckpoint(checkpointPath, evidence); err != nil {
 		fail(fmt.Errorf("save buyer opening checkpoint (caller responsibility): %w", err))
 	}
-	raw := prepared.Outbound.Bytes() // exact Kind 2 bytes：先持久化 checkpoint 再发送
-	debug("[buyer] OpeningCheckpoint 已保存到应用 checkpoint %s", checkpointPath)
-	refundTemplateTxID := prepared.Checkpoint.RefundTemplateTxID()
-	debug("[buyer] RefundTemplateRaw bytes: %d", len(prepared.Checkpoint.Request().RefundTemplateRaw))
+	raw := preparedArtifact.Bytes() // exact Kind 2 bytes：先持久化 checkpoint 再发送
+	debug("[buyer] opening evidence 已保存到应用 checkpoint %s", checkpointPath)
+	requestArtifact, err := wire.ParseAs(wire.RefundPresignRequest, evidence.RawKind2)
+	if err != nil {
+		fail(fmt.Errorf("parse persisted opening request: %w", err))
+	}
+	request, err := wire.DecodeRefundPresignRequest(requestArtifact)
+	if err != nil {
+		fail(fmt.Errorf("decode persisted opening request: %w", err))
+	}
+	refundTemplateTxID, err := pool.DeriveRefundTemplateTxIDFromRequest(request)
+	if err != nil {
+		fail(fmt.Errorf("derive opening correlation id: %w", err))
+	}
+	debug("[buyer] RefundTemplateRaw bytes: %d", len(request.RefundTemplateRaw))
 	debug("[buyer] RefundTemplateTxID (pool correlation ID): %s", hex.EncodeToString(refundTemplateTxID[:]))
 	debug("[buyer] FundingTxID (derived from RefundTemplateRaw): %s", fundingTransaction.TxID().String())
 	debug("[buyer] FundingTransactionRaw 原文尚未进入报文：yes（仅保存在买方私有 checkpoint）")

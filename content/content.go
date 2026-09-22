@@ -582,21 +582,21 @@ func mapMasterSeedError(err error) error {
 		return nil
 	}
 	if masterseed.CodeOf(err) == masterseed.Aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeCanceled, 0, "")
+		return protocol.Wrap(err, "content.VerifyContentPayloads", protocol.CodeCanceled, 0, "")
 	}
 	if masterseed.CodeOf(err) == masterseed.BlockNotInSeed {
-		return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeInvalidEvidence, 0, "payload")
+		return protocol.Wrap(err, "content.VerifyContentPayloads", protocol.CodeInvalidEvidence, 0, "payload")
 	}
-	return protocol.Wrap(err, "content.VerifyContentPayloadsContext", protocol.CodeInvalidEvidence, 0, "")
+	return protocol.Wrap(err, "content.VerifyContentPayloads", protocol.CodeInvalidEvidence, 0, "")
 }
 
-// VerifyContentPayloadsContext 验证交付批次：数量严格等于授权哈希数量、顺序
+// VerifyContentPayloads 验证交付批次：数量严格等于授权哈希数量、顺序
 // 一一对应、逐项 SHA-256、seed/block 归属与协议期望长度。当批次内携带与报价
 // SeedHash 对应的 seed payload 时，先完整验证它，再用它做块成员校验；返回值
 // 是实际用于成员校验的 seed 深复制，调用方可用它继续计算聚合价格。ctx 仅用
 // 于可取消的大 payload 计算。
-func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
-	const op = "content.VerifyContentPayloadsContext"
+func VerifyContentPayloads(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error) {
+	const op = "content.VerifyContentPayloads"
 	// 导出入口自身 fail-closed：外部直接调用时同样强制协议数组约束
 	//（1..64、32 字节宽度、不重复；payload 非空且不超过一个块长）。
 	if err := validateContentHashes(contentHashes); err != nil {
@@ -664,6 +664,39 @@ func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerm
 		return nil, nil
 	}
 	return append([]byte(nil), effectiveSeed...), nil
+}
+
+// ClassifiedContent 是一个内容哈希的证据派生分类：类型与计价所需长度永远
+// 来自报价与已验证 seed，绝不来自发送方声明，也不读取发送方提供的任何元数据。
+type ClassifiedContent struct {
+	// IsSeed 报告该哈希是否等于报价 SeedHash（按整份 seed 计价，无 BlockSize）。
+	IsSeed bool
+	// BlockSize 是该块在 seed 中的协议期望长度（字节，1..262144）；
+	// IsSeed 为 true 时恒为 0。
+	BlockSize uint64
+}
+
+// ClassifyContentHashes 导出分类入口：把有序内容哈希逐项映射为 seed 或
+// 已知协议期望长度的块。seed 条目直接按 SeedHash 判定；其余哈希必须能在
+// 已验证 seed 的块列表中找到，且同一哈希命中的位置不得给出冲突长度。
+// 它是纯证据函数，调用方可用它独立复算内容类型而不需要价格策略。
+func ClassifyContentHashes(ctx context.Context, terms *FileQuoteTerms, contentHashes [][]byte, seed []byte) ([]ClassifiedContent, error) {
+	if ctx == nil {
+		return nil, protocol.Errorf("content.ClassifyContentHashes", protocol.CodeCanceled, 0, "ctx", "a non-nil context is required for seed scanning")
+	}
+	const op = "content.ClassifyContentHashes"
+	if err := validateContentHashes(contentHashes); err != nil {
+		return nil, invalidEvidence(op, err)
+	}
+	items, err := classifyContentHashes(ctx, terms, contentHashes, seed)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ClassifiedContent, len(items))
+	for index, item := range items {
+		result[index] = ClassifiedContent{IsSeed: item.IsSeed, BlockSize: item.BlockSize}
+	}
+	return result, nil
 }
 
 // classifiedContent records the evidence-derived kind and expected protocol

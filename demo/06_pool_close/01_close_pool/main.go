@@ -37,30 +37,29 @@ func main() {
 	latest := f.LatestPayment
 	debug("[state] latest non-final payment has been merged and saved by the caller")
 	debug("[buyer] buyer.PrepareClose creates final unsigned transaction and buyer signature from explicit state")
-	closePrep, err := f.Buyer.PrepareClose(ctx, f.Facts(now), buyer.PrepareCloseCommand{
+	unsignedRaw, buyerSignature, err := buyer.PrepareClose(ctx, f.Facts(now), buyer.PrepareCloseInput{
 		Pool:                       f.BuyerPool,
-		Base:                       latest,
 		TargetSellerAmountSatoshis: protocol.Satoshis(latest.SellerAmountSatoshis),
-	})
+	}, f.BuyerSigner)
 	if err != nil {
 		fail(fmt.Errorf("buyer.PrepareClose: %w", err))
 	}
-	debug("[close] unsigned transaction bytes: %d", len(closePrep.Unsigned.RawTx))
+	debug("[close] unsigned transaction bytes: %d", len(unsignedRaw))
 	debug("[close] buyer signature produced (detached; persisted before sending)")
 	debug("[seller] seller.CompleteClose adds seller signature without broadcasting")
-	closed, err := f.Seller.CompleteClose(ctx, f.Facts(now), seller.CloseCommand{
+	closedRaw, err := seller.CompleteClose(ctx, f.Facts(now), seller.CompleteCloseInput{
 		Pool:           f.SellerPool,
-		Unsigned:       closePrep.Unsigned,
-		BuyerSignature: closePrep.BuyerSignature,
-	})
+		UnsignedRaw:    unsignedRaw,
+		BuyerSignature: buyerSignature,
+	}, f.SellerSigner)
 	if err != nil {
 		fail(fmt.Errorf("seller.CompleteClose: %w", err))
 	}
 	debug("[close] seller signature produced and merged")
 	debug("[buyer] buyer.VerifyCompletedClose verifies the fully signed final transaction; the caller broadcasts it")
-	verifiedClose, err := f.Buyer.VerifyCompletedClose(buyer.VerifyCloseCommand{
-		Pool:  f.BuyerPool,
-		Close: &pool.SignedPayment{State: *closed.State(), RawTx: closed.RawTx()},
+	verifiedClose, err := buyer.VerifyCompletedClose(buyer.VerifyCompletedCloseInput{
+		Pool:     f.BuyerPool,
+		CloseRaw: closedRaw,
 	})
 	if err != nil {
 		fail(fmt.Errorf("buyer.VerifyCompletedClose: %w", err))

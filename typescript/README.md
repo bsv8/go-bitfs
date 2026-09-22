@@ -16,31 +16,55 @@
 网络使用 `bitcoin-libp2p` 的标准 Noise/Yamux 身份宿主和 uvarint stream 分帧。
 BitFS transport 只投递 exact Artifact bytes，不增加 session、pool ID 或 JSON envelope。
 
-## 角色工作流
+## 纯函数边界
 
-应用代码应优先使用 `BuyerWorkflow`、`SellerWorkflow`、`ArbiterWorkflow`，而不是
-自行拆解 CBOR 或手工调用验签函数。三个对象分别固定一个受约束 `Signer`：
+SDK 不再提供 `BuyerWorkflow`/`SellerWorkflow`/`ArbiterWorkflow` 等跨步骤对象。角色
+步骤是无状态纯函数：原始报文/交易字节与一次调用专用的受约束 `Signer` 进，原始报文/
+交易字节或普通证据包出。应用自行持有进度、存储、重试与广播。
 
-- `BuyerWorkflow`：验证报价、开池预签与合并、资金交付、创建付款授权、准备付款/关闭、
-  验证内容交付、创建仲裁取回请求；
-- `SellerWorkflow`：创建报价、完成开池预签、验收资金交易、验证付款授权、完成付款/关闭、
-  交付内容、提交仲裁托管证据；
-- `ArbiterWorkflow`：验证完整托管证据、签署回执、认证取回请求、返回可用或不可用结果，
-  并完成 Seller/Arbiter 仲裁交易签名合并；
-- `WorkflowFacts.nowUnixSeconds`：调用方显式传入的 UTC Unix 秒，SDK 不读取系统时钟；
-- `VerifiedQuote`、`VerifiedContentRequest`、`VerifiedArbitrationRequest`：完成对应验证后的
-  不可变语义结果；所有公开字节均为副本。
+公开面：
 
-角色 API 和底层 typed encoder 使用同一个严格 `parse` 末端门禁。Kind 8 解析会验证
-角色顺序锁定脚本、规范退款模板、付款序号与余额边界，以及买方 Kind 5 签名；仲裁方
-工作流再验证卖方 Kind 8 签名和每个 payload 的授权哈希。
+- `content`：`sanitizeRecommendedFilename`、`validateFileQuoteTerms`、
+  `classifyContentHashes`、`contentHashesPriceSatoshis`、
+  `verifyContentRequestEvidence`、`checkContentRequestTiming`、
+  `verifyContentPayloads` 等算价与证据函数；
+- `steps`：卖方（`createSellerQuote`、`prepareSellerPresign`、`verifySellerFunding`、
+  `prepareSellerDelivery`、`completeSellerPayment`、`completeSellerClose`、
+  `prepareSellerArbitration`、`completeSellerArbitratedPayment`）、买方
+  （`acceptBuyerQuote`、`prepareBuyerOpening`、`completeBuyerOpening`、
+  `prepareBuyerFundingDelivery`、`prepareBuyerContentRequest`、`verifyBuyerDelivery`、
+  `prepareBuyerClose`、`verifyBuyerCompletedClose`、`buildBuyerMaturedRefund`、
+  `requestBuyerArbitratedContent`、`verifyBuyerArbitratedContent`、`generateRetrievalNonce`、
+  `newRetrievalNonce`）与仲裁方（`prepareArbiterArbitration`、
+  `signArbiterPreparedArbitration`、`authenticateArbiterRetrieval`、
+  `buildArbiterAvailableRetrieval`、`buildArbiterUnavailableRetrieval`、
+  `completeArbiterArbitratedPayment`）步骤；
+- `evidence`：`BuyerOpeningEvidence`、`BuyerPoolEvidence`、`BuyerAuthorizationEvidence`、
+  `SellerOpeningEvidence`、`SellerPoolEvidence`、`SellerDeliveryEvidence`、
+  `PreparedArbitrationEvidence`、`SignedArbitrationEvidence` 与全部输入类型；它们
+  只是可序列化的普通数据，无行为、无令牌；
+- `PureFunctionFacts.nowUnixSeconds`：调用方显式传入的 UTC Unix 秒，SDK 不读取系统时钟；
+- `VerifiedQuote`：完成证据验证后的不可变语义结果；所有公开字节均为副本。
+
+每个签名入口都按调用绑定 Signer：先校验其 33 字节压缩公钥、必要时再与协议角色比对，
+并在任何密钥操作之前完成全部证据重验。任一类验证失败时签名能力不会被调用；等价于
+每个步骤都从原始证据全量重验，绝不信任调用方缓存的派生字段。纯验证入口
+（`acceptBuyerQuote`、`verifyBuyerCompletedClose`、`buildBuyerMaturedRefund`、
+`verifyBuyerArbitratedContent`、`verifySellerFunding`）不需要 Signer：`acceptBuyerQuote`
+不绑定买方身份，调用方必须自行比较 `terms.buyerPublicKey` 与本地身份；
+`verifyBuyerArbitratedContent` 用开池证据中的买方公钥验证 exact Kind 10 签名。
 
 安全状态约束：
 
-- Workflow 构造时冻结 Signer 公钥；后续签名前若底层 Signer 换钥，会在调用签名能力前
-  返回 `unauthorized`，不会静默切换角色；
+- `prepareBuyerOpening` 先用 exact Kind 1 报价条款绑定买方身份、卖方公钥与受支持
+  仲裁方，拒绝把资金池开给报价之外的角色；
+- `completeSellerPayment` 要求传入生成本批次 Kind 6 时保存的交付证据包，并交叉核对
+  exact Kind 5 与已发 Kind 6 的授权 ID 逐字节一致，不能只凭 Kind 7 自证；
 - 卖方接收 Kind 4 时会重建退款模板，并验证 funding output[0] 金额、三方脚本、outpoint、
   fee rate 和双方退款签名，不能只凭 `refund_template_txid` 接受资金交易；
-- Kind 9 只能由 `prepareArbitration` 返回的 `PreparedArbitration` 进入
-  `signPreparedArbitration`；不存在接受任意 `receiptCBOR` 或调用方 candidate 的公开签名
-  入口。candidate 由退款模板、付款授权和仲裁费在 SDK 内部唯一重建。
+- `PreparedArbitrationEvidence` 是普通数据；`signArbiterPreparedArbitration` 从其中
+  的 exact Kind 8 独立重建交易与 digest 后才签名，不存在接受任意 `receiptCBOR` 或
+  调用方 candidate 的公开签名入口；candidate 由退款模板、付款授权和仲裁费在 SDK
+  内部唯一重建；
+- 买方推进池状态的唯一方式是从链上取得完整付款交易原文并按 `latestPaymentRawTx`
+  传入下一步，由 SDK 全量重验；不存在跳过链上结果的入口。

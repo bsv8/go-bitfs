@@ -53,8 +53,8 @@ var ErrSignerUnavailable = errors.New("signer did not return a signature")
 // 签名。Signer 不能提供自定义 hash、preimage、sighash、Verifier、CBOR
 // encoder、价格规则或角色判断；所有验签固定在 SDK 内部执行。
 type Signer interface {
-	// PublicKey 返回本 Signer 的固定压缩公钥；Workflow 构造时固定并验证它，
-	// 生命周期内不得变化。
+	// PublicKey 返回本 Signer 的固定压缩公钥；每次纯函数调用都会绑定并验证它，
+	// 调用生命周期内不得变化。
 	PublicKey() PublicKey
 	// Sign 对 request.Digest 做 secp256k1 签名，返回不带 sighash flag 的
 	// DER 字节。context 只用于取消远程签名或长计算；实现遇到托管故障时
@@ -62,9 +62,9 @@ type Signer interface {
 	Sign(ctx context.Context, request SigningRequest) ([]byte, error)
 }
 
-// boundSigner 是构造时冻结公钥的 Signer 包装器：PublicKey 永远返回绑定值，
-// 与底层实现后续可能发生的密钥轮换完全解耦。Workflow 构造时用它包装外部
-// Signer，保证所有下游自验（普通消息签名与交易 sighash）都固定对照角色
+// boundSigner 是绑定调用时冻结公钥的 Signer 包装器：PublicKey 永远返回绑定值，
+// 与底层实现后续可能发生的密钥轮换完全解耦。纯函数入口在每次调用时用它包装
+// 外部 Signer，保证所有下游自验（普通消息签名与交易 sighash）都固定对照角色
 // 公钥——远程托管中途换钥只会得到 invalid_signature/unauthorized，绝不可能
 // 把新身份静默写入任何 Kind。
 type boundSigner struct {
@@ -80,8 +80,8 @@ func (s *boundSigner) Sign(ctx context.Context, request SigningRequest) ([]byte,
 
 var _ Signer = (*boundSigner)(nil)
 
-// BindSigner 冻结并校验一个 Signer 的当前公钥，返回生命周期内公钥不变的
-// 绑定视图。nil 或无效公钥直接拒绝。角色 Workflow 必须经它进入签名能力。
+// BindSigner 冻结并校验一个 Signer 的当前公钥，返回本次调用内公钥不变的
+// 绑定视图。nil 或无效公钥直接拒绝。角色纯函数入口必须经它进入签名能力。
 func BindSigner(signer Signer) (Signer, error) {
 	if signer == nil {
 		return nil, Errorf("protocol.BindSigner", CodeSignerUnavailable, 0, "signer", "signer is required")

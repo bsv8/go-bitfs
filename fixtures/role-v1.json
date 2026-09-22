@@ -1,0 +1,324 @@
+{
+  "protocol": "bitfs.protocol.v1",
+  "wire_version": 1,
+  "fixed_keys": "buyer=0x44*32 seller=0x22*32 arbiter=0x33*32 retrieval-buyer=0x55*32; funding input 0x01*32 placeholder",
+  "facts_now_unix_seconds": 1999999000,
+  "facts_block_height": 900000,
+  "delivery_deadline_unix_seconds": 1999999500,
+  "expiry_lock_time": 2000000000,
+  "pool_output_satoshis": 20000,
+  "quote": {
+    "kind1_hex": "85010158828858202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a4214582103eb2774617e6f89a5ac18dfcfda98ceb51d4610497f2cf09ef8810cbaf71e331318641903e81910001a7735940058248158210296a0b0f825e67323a9f807237acd5d95ba21108e38b5930ce06206decc6017416866696c652e62696e582103dc7e9e4a972a5b805b842998a734bd3bb5cb388be401cdc089e210cea325ef0d5846304402207ef0e97bb5859c3219e797810b5a453359ae650c31b6cf96d78dfd5f51db1e14022045316e802b1c23e1a559fc000ca6887ce15e9b9eb51116ad1ac7432ee1687296",
+    "terms_cbor_hex": "8858202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a4214582103eb2774617e6f89a5ac18dfcfda98ceb51d4610497f2cf09ef8810cbaf71e331318641903e81910001a7735940058248158210296a0b0f825e67323a9f807237acd5d95ba21108e38b5930ce06206decc6017416866696c652e62696e",
+    "terms_id": "220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d282",
+    "recommended_filename": "file.bin",
+    "seed_hash_hex": "2f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a4214",
+    "seed_hex": "d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e",
+    "file_size_bytes": 4096
+  },
+  "seller_opening_kind2": {
+    "hex": "88010258990100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf189851336000000000002000000031f4e0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac00000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88ac00943577582103eb2774617e6f89a5ac18dfcfda98ceb51d4610497f2cf09ef8810cbaf71e3313582103dc7e9e4a972a5b805b842998a734bd3bb5cb388be401cdc089e210cea325ef0d58210296a0b0f825e67323a9f807237acd5d95ba21108e38b5930ce06206decc601741015847304402205aa7658942e266be6716d0f3b706429e2d476d095cbd371ddc96cf36b2177f4b02206ded55c1c88e1acfeb735c41472d638efaedb3cfe7f12b0809495cf9e2bbeed841"
+  },
+  "seller_presign_kind3": {
+    "hex": "8401035820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478558483045022100d4e9f855ec48142942ec26d67c019027f3243e64c81092f169eabf9090a91a7c02200f59064cc3cab981a6fe479c7bb437202af4db9a608a75facf7cce98e25b4a2441"
+  },
+  "funding_delivery_kind4": {
+    "hex": "8401045820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478558a5010000000101010101010101010101010101010101010101010101010101010101010101010000000000ffffffff01204e00000000000069522103eb2774617e6f89a5ac18dfcfda98ceb51d4610497f2cf09ef8810cbaf71e33132103dc7e9e4a972a5b805b842998a734bd3bb5cb388be401cdc089e210cea325ef0d210296a0b0f825e67323a9f807237acd5d95ba21108e38b5930ce06206decc60174153ae00000000"
+  },
+  "buyer_request_kind5": {
+    "kind5_hex": "8401055872865820220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d2825820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478503186458238158202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a42141a7735920c5845304302205c62d43c25da5538a55df9f0ddfa5d9305abcc9a9d939eadc16b8b4294707888021f4dfd87a28f85e435663a8bdb2f2a8dc930d6ded3be966139b59fc5744be6c7",
+    "authorization_id": "7be19b66db772b90381dbe0980c9b6606ce76e90e0efdc96a6efa473cbb83b54"
+  },
+  "seller_delivery_kind6": {
+    "hex": "85010658238158207be19b66db772b90381dbe0980c9b6606ce76e90e0efdc96a6efa473cbb83b545846304402206e5b0eca3cf20c19a60e8c1bc04cf1823e7059afcc48caebd8e7004a6b39295902203456e9fb4ba0025cf66e3c850f5a079de8228a4bc20d0c27cc9ea67d9928ae965823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e"
+  },
+  "buyer_payment_kind7": {
+    "hex": "84010758207be19b66db772b90381dbe0980c9b6606ce76e90e0efdc96a6efa473cbb83b5458483045022100ebd04b106479864a16f0364f90606b55af30a30e18aa928792f09ad113a7bf030220143d208f96770b76cc8d0862db398d7b284bad73c3751c11f7924a525a60f90c41"
+  },
+  "payment_merged_raw": {
+    "hex": "0100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf189851336000000009200483045022100ebd04b106479864a16f0364f90606b55af30a30e18aa928792f09ad113a7bf030220143d208f96770b76cc8d0862db398d7b284bad73c3751c11f7924a525a60f90c4147304402200bbb7dd8c82cede8cd7c68fa4c927f09adbc165d8b38754f586511fca2984fe7022077d4ff5fed2c5a788dc3de7d3fb134e118172bd963f5278d41becacfa5277805410300000003bb4d0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac64000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88ac00943577"
+  },
+  "close_unsigned_raw": {
+    "hex": "0100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf1898513360000000000ffffffff03894d0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac96000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88acffffffff"
+  },
+  "close_signed_raw": {
+    "hex": "0100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf189851336000000009300483045022100d473ba1b12ded426c3a80c0ddb031f58902ed7504e06a711eeb8b5cdab037cc2022043628e3bee9b3a4c46a30df4bef9e806eca94db94493b9d66ff6fe3a25cf4bd7414830450221008434a7dd7f4ca180396bb2ae3262f6fb12d4e4772686badea988b7f5ea8f208f022028552278e6b770fd5c1b1817d8e8904d7aa3b54cb831af188df2ac03a910d11341ffffffff03894d0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac96000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88acffffffff"
+  },
+  "refund_matured_raw": {
+    "hex": "0100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf18985133600000000920047304402205aa7658942e266be6716d0f3b706429e2d476d095cbd371ddc96cf36b2177f4b02206ded55c1c88e1acfeb735c41472d638efaedb3cfe7f12b0809495cf9e2bbeed841483045022100d4e9f855ec48142942ec26d67c019027f3243e64c81092f169eabf9090a91a7c02200f59064cc3cab981a6fe479c7bb437202af4db9a608a75facf7cce98e25b4a244102000000031f4e0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac00000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88ac00943577"
+  },
+  "arbitration": {
+    "kind8_hex": "8501085901c585194e205869522103eb2774617e6f89a5ac18dfcfda98ceb51d4610497f2cf09ef8810cbaf71e33132103dc7e9e4a972a5b805b842998a734bd3bb5cb388be401cdc089e210cea325ef0d210296a0b0f825e67323a9f807237acd5d95ba21108e38b5930ce06206decc60174153ae58990100000001accc6415d60fa302ce4cadc28e8de6e263e2fef908f43a3700b6cbf189851336000000000002000000031f4e0000000000001976a91469e88a7a115208c28b96456ce9fc80200a054af388ac00000000000000001976a914150ad53b527c17121d3a6610e10dba337dab155d88ac00000000000000001976a91438406f79a0e51a78acd275d6a12fc3f1b6c5f68b88ac009435775872865820220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d2825820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478503186458238158202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a42141a7735920c5845304302205c62d43c25da5538a55df9f0ddfa5d9305abcc9a9d939eadc16b8b4294707888021f4dfd87a28f85e435663a8bdb2f2a8dc930d6ded3be966139b59fc5744be6c7584730450221008399e836d29d7b0346807d4114d4cd15bfb281053718c75e2c89f778ae0988e402205165b0f4fd1fa32c8a71ad7ba7cf50578b7ce4239d72b62d4dcd201dfc77f1015823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e",
+    "kind9_hex": "840109586f8358205501cba98a41de1bce6dff0ab80cf06add5391e1e3e7b484178162b5a121fc701901f45847304402204711407ecad8f1f82185bdb6ac5af3bc2ab845286df206b1e97e25b40179f59b02205d12efdaecebb010fb8405f068686262794edb9cb259a49031f1111950a369584158473045022100fac63b7ffc78214f78782bf29c74e5e5cdddc1e3b11c7eef446314ca5d38a41102203ea0fa5527be7903d760e4aa5959ff726c1c49be076087c6a4ac3459087c4f0b",
+    "claim_id": "5501cba98a41de1bce6dff0ab80cf06add5391e1e3e7b484178162b5a121fc70",
+    "retrieval_kind10_hex": "84010a58458258205501cba98a41de1bce6dff0ab80cf06add5391e1e3e7b484178162b5a121fc705820a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7584730450221008c83a3066ba47aa7755a08af50fdb9af94e3ae7a2cf99f2dd848311a7942d4a102200639ea2080e4a0f6d867c2a4e62b351c13eca2faa2d14278fb5b0d9e0c1a9434",
+    "retrieval_request_id": "52fc181561444999f7e06fd57eb379d7cb1b0f15b41f035dea722186b559ed20",
+    "available_kind11_hex": "85010b584683582052fc181561444999f7e06fd57eb379d7cb1b0f15b41f035dea722186b559ed20015820f947f03ebf2cbf57c5f9e5efd58e31dcd4d1bef4db20f98e5ef695a3c7a4949f58473045022100e305fd3700347cf0f146423821f8a5fa7a78bc974a8f725b2e836ab83ef9cd8a022035accfab8daa1a5cb84ca06d3e4e7fbe4a408a3cbb78f129612ccdcc00ba23325823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e",
+    "unavailable_kind11_hex": "84010b582583582052fc181561444999f7e06fd57eb379d7cb1b0f15b41f035dea722186b559ed20000158463044022038abb7917ac2611a3e66c3e0b4699ec7b8e0c3430b23b64a0bd20fb4e3cd1fde02205f24af76753b075b49265ae6f258cc30f60bf7606a13e61070b1fe12a6816269",
+    "unavailable_reason_code": 1
+  },
+  "malicious": {
+    "kind5_decrease_hex": "8401055872865820220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d2825820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478504183258238158202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a42141a7735920c58473045022100adaeebc415b488fd2ecc72cfa7d536d6143df17c09731bfa4390265c29a0f096022077fa723b96f74b58d7ee6ce5842bb19994f28fcfa5456be58bb217df9f678a03",
+    "kind6_decrease_hex": "85010658238158209d499d692f6c748d78c34d91d31e5831ebf4b8760c0093289defe05106df9c6a58463044022000b08cba0b1edb30ce19d1b3af67a5d98c4baf4749b8a3776ef129c5c5ab163e02201dd5ed0b578cf05cb177b404adcb542cb2588d3991110a8b3c24606e22fe3cde5823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e",
+    "kind7_decrease_hex": "84010758209d499d692f6c748d78c34d91d31e5831ebf4b8760c0093289defe05106df9c6a58483045022100ebd04b106479864a16f0364f90606b55af30a30e18aa928792f09ad113a7bf030220143d208f96770b76cc8d0862db398d7b284bad73c3751c11f7924a525a60f90c41",
+    "kind5_capacity_hex": "8401055873865820220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d2825820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f478504194e2158238158202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a42141a7735920c58463044022004bdf39b0a1e0286bb42ef09ea59f4fbb13b3db1a2819d766a79370b67a699c6022059a2fda95dac8b561d094d4e542308ae354f09caf05d284663333de0b2735e91",
+    "kind6_capacity_hex": "85010658238158204a85141451f23f263585f444d47257f5183ee99300fdd4085186fbf2194e33eb58463044022035cc979c63854a0390e379c62320af46619c054bf0d5ffc0b8c7816f517bc2350220608970a9ec8afcda2bc44ea6201944e3672c6dd2984d2f70d43c2d4ae14895885823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e",
+    "kind7_capacity_hex": "84010758204a85141451f23f263585f444d47257f5183ee99300fdd4085186fbf2194e33eb58483045022100ebd04b106479864a16f0364f90606b55af30a30e18aa928792f09ad113a7bf030220143d208f96770b76cc8d0862db398d7b284bad73c3751c11f7924a525a60f90c41",
+    "kind5_price_mismatch_hex": "8401055873865820220e39a78f90abd01eaad7c4657cb4c914748760d3ecba4ca2459359d771d2825820d1f4e1b919b3fe392355982bfb6e993c98cdb00cd4b025679ff986d11b1f47850419015e58238158202f480efaa2957f05f31349539e8bbf832745990568e6bb35ba16ee312e3a42141a7735920c58463044022013757c2e0f9d4c6147346595c2c1759c8f9869e2675e80d4602d51761ea706cf022045a45ef8e5ea87137484f34198103927015aabb2b3ed331554cb3f52839ad09f",
+    "kind6_price_mismatch_hex": "8501065823815820f3509b4bf5d18a4e569503e617d5d1e7ac98b487d2f46fdb0ac09a34a79686e158473045022100c9c9e37e42969658f9195896fbdaa5d0b85e63f97fe943159b610d1a814d76cd022046e46a43e5f2911baa8380f1f585150d24ce90e4f7fac2bb7df9ffc6d54908d65823815820d41d438c379110c7f7b2c561b1f04f26c1b4549110791f8e022f48974280c13e"
+  },
+  "price_vectors": [
+    {
+      "name": "seed_only",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 0,
+      "seed_hex": "",
+      "hashes_hex": [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ],
+      "expect_classification": [
+        {
+          "is_seed": true,
+          "block_size": 0
+        }
+      ],
+      "expect_price_satoshis": "100"
+    },
+    {
+      "name": "full_block",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 262144,
+      "seed_hex": "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be",
+      "hashes_hex": [
+        "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be"
+      ],
+      "expect_classification": [
+        {
+          "is_seed": false,
+          "block_size": 262144
+        }
+      ],
+      "expect_price_satoshis": "1000"
+    },
+    {
+      "name": "tail_block",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 4096,
+      "seed_hex": "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78"
+      ],
+      "expect_classification": [
+        {
+          "is_seed": false,
+          "block_size": 4096
+        }
+      ],
+      "expect_price_satoshis": "15"
+    },
+    {
+      "name": "combination",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 266240,
+      "seed_hex": "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "ef8c153936e310e73b0ea784edfaf841a7ef53b34e3d66f097bd9061df154a9c",
+        "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be",
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78"
+      ],
+      "expect_classification": [
+        {
+          "is_seed": true,
+          "block_size": 0
+        },
+        {
+          "is_seed": false,
+          "block_size": 262144
+        },
+        {
+          "is_seed": false,
+          "block_size": 4096
+        }
+      ],
+      "expect_price_satoshis": "1115"
+    },
+    {
+      "name": "zero_full_block_price_tail",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 0,
+      "file_size_bytes": 4096,
+      "seed_hex": "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78"
+      ],
+      "expect_classification": [
+        {
+          "is_seed": false,
+          "block_size": 4096
+        }
+      ],
+      "expect_price_satoshis": "0"
+    },
+    {
+      "name": "block_not_in_seed",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 4096,
+      "seed_hex": "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      ],
+      "expect_error_code": "invalid_evidence"
+    },
+    {
+      "name": "missing_seed",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 4096,
+      "seed_hex": "",
+      "hashes_hex": [
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78"
+      ],
+      "expect_error_code": "invalid_evidence"
+    },
+    {
+      "name": "duplicate_hash",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 4096,
+      "seed_hex": "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78"
+      ],
+      "expect_error_code": "invalid_evidence"
+    },
+    {
+      "name": "wrong_hash_width",
+      "seed_price_satoshis": 100,
+      "full_block_price_satoshis": 1000,
+      "file_size_bytes": 4096,
+      "seed_hex": "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae78",
+      "hashes_hex": [
+        "769bd186841c10e5b1106b55986206c0e87fc05a7f565fdee01b5abcaff6ae"
+      ],
+      "expect_error_code": "invalid_evidence"
+    },
+    {
+      "name": "overflow",
+      "seed_price_satoshis": 18446744073709551615,
+      "full_block_price_satoshis": 18446744073709551615,
+      "file_size_bytes": 262144,
+      "seed_hex": "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be",
+      "hashes_hex": [
+        "da4f7882bd4814cf416c21ce73638d43c3e8d4c75a1959f5964bce662b16ebf4",
+        "c6a68609e7e9bf598a7e12a826337bd08f29200bc8c37f0c4ebe26b7dfc8c4be"
+      ],
+      "expect_error_code": "insufficient_balance"
+    }
+  ],
+  "evidence_reject_vectors": [
+    {
+      "name": "kind1_expired",
+      "artifact": "kind1",
+      "mutation": "facts_at_expiry",
+      "error_code": "expired",
+      "description_zh": "报价在 facts.now 当秒已失效"
+    },
+    {
+      "name": "kind5_signature_flip",
+      "artifact": "kind5",
+      "mutation": "signature_last_byte_flip",
+      "error_code": "invalid_signature",
+      "description_zh": "买方授权签名被翻转"
+    },
+    {
+      "name": "kind5_deadline_beyond_quote",
+      "artifact": "kind5",
+      "mutation": "delivery_deadline_beyond_quote",
+      "error_code": "invalid_evidence",
+      "description_zh": "交付截止晚于报价失效"
+    },
+    {
+      "name": "kind6_payload_flip",
+      "artifact": "kind6",
+      "mutation": "payload_last_byte_flip",
+      "error_code": "invalid_evidence",
+      "description_zh": "payload 与授权哈希不符"
+    },
+    {
+      "name": "kind7_authorization_id_flip",
+      "artifact": "kind7",
+      "mutation": "authorization_id_first_byte_flip",
+      "error_code": "state_conflict",
+      "description_zh": "付款更新引用了不同授权"
+    },
+    {
+      "name": "kind9_receipt_signature_flip",
+      "artifact": "kind9",
+      "mutation": "receipt_signature_last_byte_flip",
+      "error_code": "invalid_signature",
+      "description_zh": "仲裁回执签名被翻转"
+    },
+    {
+      "name": "kind10_zero_nonce",
+      "artifact": "kind10",
+      "mutation": "zero_nonce",
+      "error_code": "invalid_evidence",
+      "description_zh": "取回 nonce 全零"
+    },
+    {
+      "name": "kind11_available_attachment_flip",
+      "artifact": "kind11_available",
+      "mutation": "attachment_last_byte_flip",
+      "error_code": "invalid_evidence",
+      "description_zh": "available attachment 哈希不符"
+    },
+    {
+      "name": "foreign_seller_signer",
+      "artifact": "kind2",
+      "mutation": "foreign_seller_signer",
+      "error_code": "unauthorized",
+      "description_zh": "角色不符：卖方 Signer 与请求角色不一致"
+    },
+    {
+      "name": "kind2_refund_template_flip",
+      "artifact": "kind2",
+      "mutation": "kind2_refund_template_flip",
+      "error_code": "invalid_evidence",
+      "description_zh": "模板/费率错误：退款模板被篡改，买方签名不再覆盖重建结果"
+    },
+    {
+      "name": "stale_sequence_second_round",
+      "artifact": "kind7",
+      "mutation": "stale_sequence_second_round",
+      "error_code": "state_conflict",
+      "description_zh": "序号陈旧：第二轮复用第一轮授权"
+    },
+    {
+      "name": "amount_decrease_second_round",
+      "artifact": "kind7",
+      "mutation": "amount_decrease_second_round",
+      "error_code": "invalid_evidence",
+      "description_zh": "金额倒退：买方签署更低累计金额"
+    },
+    {
+      "name": "capacity_insufficient_second_round",
+      "artifact": "kind7",
+      "mutation": "capacity_insufficient_second_round",
+      "error_code": "insufficient_balance",
+      "description_zh": "容量不足：授权金额超过费用池输出"
+    },
+    {
+      "name": "price_mismatch_second_round",
+      "artifact": "kind6",
+      "mutation": "price_mismatch_second_round",
+      "error_code": "invalid_evidence",
+      "description_zh": "价格不符：授权金额与内容哈希价格不一致"
+    }
+  ]
+}

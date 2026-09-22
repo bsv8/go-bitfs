@@ -1,9 +1,9 @@
 // Command seller builds a signed BitFS 001 file quote.
 //
 // 全部二进制输入输出使用 hex。卖方私钥从 SELLER_PRIVATE_KEY_HEX 读取且绝不
-// 打印。新角色 API：protocol.NewPrivateKeySigner → seller.NewWorkflow →
-// CreateQuote(QuoteDraft)，返回待发送的 exact Kind 1 Artifact；应用先持久化
-// 其字节再发送（demo 中以 stdout hex 表示“发送”）。
+// 打印。纯函数 API：protocol.NewPrivateKeySigner → seller.CreateQuote(ctx,
+// facts, signer, QuoteDraft)，返回待发送的 exact Kind 1 Artifact 与最终条款；
+// 应用先持久化其字节再发送（demo 中以 stdout hex 表示“发送”）。
 package main
 
 import (
@@ -115,17 +115,13 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 	debugf("[quote] created at UTC    : %s", now.Format(time.RFC3339))
 	debugf("[quote] expires at UTC    : %s", time.Unix(expiresAt, 0).UTC().Format(time.RFC3339))
 
-	// 角色 workflow 只持有受约束 Signer；QuoteDraft 是唯一的条款来源，
-	// SDK 先 sanitize 文件名再编码并签署。
+	// Signer 是单次调用专用能力；QuoteDraft 是唯一的条款来源，SDK 先
+	// sanitize 文件名再编码并签署。
 	signer, err := protocol.NewPrivateKeySigner(privateKey)
 	if err != nil {
 		return fmt.Errorf("create seller signer: %w", err)
 	}
-	sellerWorkflow, err := seller.NewWorkflow(signer)
-	if err != nil {
-		return fmt.Errorf("create seller workflow: %w", err)
-	}
-	quoteResult, err := sellerWorkflow.CreateQuote(context.Background(), facts, seller.QuoteDraft{
+	quoteArtifact, terms, err := seller.CreateQuote(context.Background(), facts, signer, seller.QuoteDraft{
 		SeedHash:                   seedHash,
 		BuyerPublicKey:             mustPublicKey(buyerPubkey),
 		SeedPriceSatoshis:          protocol.Satoshis(seedPrice),
@@ -139,11 +135,11 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 		return fmt.Errorf("seller.CreateQuote: %w", err)
 	}
 
-	rawQuote := quoteResult.Outbound.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
-	// QuoteResult.Terms 是最终规范化并已签署的条款快照（展示实际签署值）。
-	debugf("[quote] recommended name (signed): %q", quoteResult.Terms.RecommendedFilename)
-	debugf("[quote] expires at (signed)      : %d", quoteResult.Terms.QuoteExpiresAtUnixSeconds)
-	debugf("[quote] seed price / block price : %d / %d satoshis", quoteResult.Terms.SeedPriceSatoshis, quoteResult.Terms.FullBlockPriceSatoshis)
+	rawQuote := quoteArtifact.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
+	// terms 是最终规范化并已签署的条款快照（展示实际签署值）。
+	debugf("[quote] recommended name (signed): %q", terms.RecommendedFilename)
+	debugf("[quote] expires at (signed)      : %d", terms.QuoteExpiresAtUnixSeconds)
+	debugf("[quote] seed price / block price : %d / %d satoshis", terms.SeedPriceSatoshis, terms.FullBlockPriceSatoshis)
 	debugf("[quote] complete Kind 1 artifact : %d bytes", len(rawQuote))
 	debugf("[output] exact Kind 1 artifact hex is written to stdout")
 	debugf("[output] debug information is written to stderr")

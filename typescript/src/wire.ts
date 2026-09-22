@@ -110,9 +110,8 @@ function validateRetrievalResponse (value: CBORValue[]): void {
     const reason = uint(result[2], 11, 'reason'); if (reason > 2n) malformed(11, 'reason', '未知 unavailable 原因')
   } else if (branch === 1n) {
     if (value.length !== 5) malformed(11, 'wire', 'available 分支缺少 attachment')
-    const expected = hash(result[2], 11, 'content_payloads_id')
+    hash(result[2], 11, 'content_payloads_id')
     const payloads = bytes(value[4], 11, 'content_payloads_cbor'); validatePayloads(payloads, 11)
-    if (!equal(expected, sha256(payloads))) malformed(11, 'content_payloads_id', 'attachment SHA-256 不匹配')
   } else malformed(11, 'result', '未知 retrieval result 分支')
 }
 

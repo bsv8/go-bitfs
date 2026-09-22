@@ -329,7 +329,7 @@ func ValidatePaymentUpdate(update *PaymentUpdate) error {
 		return invalid("payment update is required")
 	}
 	if update.PaymentAuthorizationID.IsZero() {
-		return fmt.Errorf("%w: payment_authorization_id", protocol.ErrZeroIdentifier)
+		return protocol.Errorf("pool.ValidatePaymentUpdate", protocol.CodeInvalidEvidence, 7, "payment_authorization_id", "%w", protocol.ErrZeroIdentifier)
 	}
 	if len(update.BuyerPaymentTransactionSignature) == 0 {
 		return invalid("buyer payment transaction signature is required")

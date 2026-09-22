@@ -45,12 +45,15 @@ func (a Artifact) IsZero() bool { return a.raw == nil }
 // 载整包（payload 上限 + Claim 上限 + 签名上限 + 外壳开销）分别决定两个下
 // 界；任何超限输入直接以 malformed_wire 拒绝，保证超大不可信输入不会消耗解
 // 码内存与 CPU。应用可设置更小的传输层限额，但不得静默抬高本值。
-const maxWireParseBytes = max(content.MaxContentPayloadsCBORBytes+1024, arbitration.MaxArbitrationRequestBytes)
+// MaxWireParseBytes 是完整 BitFS 报文的协议解析上限，也是 bitcoin-libp2p
+// uvarint transport 的默认单帧接收上限。应用可以配置更小的本地限额，但不能
+// 配置得更大后绕过 wire parser 的协议边界。
+const MaxWireParseBytes = max(content.MaxContentPayloadsCBORBytes+1024, arbitration.MaxArbitrationRequestBytes)
 
 // enforceWireSizeLimit 在任何 CBOR 解码之前执行。
 func enforceWireSizeLimit(op string, raw []byte) error {
-	if len(raw) > maxWireParseBytes {
-		return protocol.Errorf(op, protocol.CodeMalformedWire, 0, "wire", "message exceeds the protocol size limit %d bytes", maxWireParseBytes)
+	if len(raw) > MaxWireParseBytes {
+		return protocol.Errorf(op, protocol.CodeMalformedWire, 0, "wire", "message exceeds the protocol size limit %d bytes", MaxWireParseBytes)
 	}
 	return nil
 }

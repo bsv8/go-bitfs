@@ -1,0 +1,14 @@
+# BitFS 双语言共享测试真值
+
+本目录是 Go 与 TypeScript 一致性测试的唯一入口。`manifest.json` 中的字段含义：
+
+- `format`：fixture 集合格式名；用于防止误读其他项目的测试数据。
+- `version`：fixture 清单版本；它不等同于 wire 协议版本。
+- `wire_manifest`：Kind 1–11 完整 CBOR 报文、SHA-256 与子文档 ID 的冻结真值路径。
+- `transaction_manifest`：开池、付款、关闭、仲裁交易与签名的冻结真值路径。
+- `protocol_schema`：Wire v1 的 CDDL 规范路径。
+- `transport_profile`：bitcoin-libp2p Protocol ID、uvarint 分帧和接收上限真值路径。
+- `invalid_wire`：Go/TypeScript 必须映射到相同稳定错误分类的畸形输入。
+
+清单路径均相对仓库根目录。两种语言不得复制或在各自目录维护第二份期望值。
+更新 frozen JSON 必须经过协议兼容性审查，不能为了让测试通过而自动重写。

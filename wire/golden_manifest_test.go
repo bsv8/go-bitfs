@@ -13,6 +13,7 @@ import (
 
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/content"
+	"github.com/bsv8/go-bitfs/internal/conformance"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 	wire "github.com/bsv8/go-bitfs/wire"
@@ -211,7 +212,10 @@ func testContext() context.Context { return context.Background() }
 
 func TestGoldenMessagesManifestMatchesFrozenFile(t *testing.T) {
 	manifest := buildGoldenManifest(t)
-	path := filepath.Join("testdata", "v1", "golden_messages.json")
+	path, err := conformance.FixturePath(".", "wire_manifest")
+	if err != nil {
+		t.Fatalf("resolve wire_manifest from fixtures/manifest.json: %v", err)
+	}
 	if *goldenUpdate {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

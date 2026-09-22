@@ -1,6 +1,23 @@
-# go-bitfs
+# go-bitfs / TypeScript BitFS SDK
 
-go-bitfs is the source of truth for the BitFS Wire Protocol v1 Go implementation: file exchange, arbitration, and 2-of-3 MultisigPool settlement. The implementation uses strict deterministic CBOR and preserves the exact signed bytes required for offline verification.
+本仓库现在同时维护 Go 与 TypeScript 两种 BitFS Wire Protocol v1 实现。两端使用
+strict deterministic CBOR，保留离线验签所需的 exact signed bytes，并共同消费
+`fixtures/manifest.json` 指向的 wire、交易、CDDL 与 libp2p transport 真值。
+
+目录与字段含义：
+
+- `protocol/`、`content/`、`pool/`、`buyer/`、`seller/`、`arbiter/`、`wire/`：Go SDK。
+- `typescript/src/`：TypeScript 的 Artifact、Kind 1–11 typed encoder、签名域和网络绑定。
+- `fixtures/manifest.json`：两种语言测试的唯一真值索引；不能在语言目录复制期望值。
+- `transport/` 与 `typescript/src/transport.ts`：`bitcoin-libp2p` uvarint stream 适配。
+- `BITFS_PROTOCOL_ID` / `transport.ProtocolID`：libp2p stream 协议标识 `/bitfs/wire/1.0.0`。
+- `maxInboundFrameBytes` / `wire.MaxWireParseBytes`：本地单帧接收上限，不发给对端。
+
+网络层直接复用 `github.com/bsv8/bitcoin-libp2p/streamio` 与 npm
+`bitcoin-libp2p/stream`。Noise、Yamux、Identify、PeerId 与身份 signer 由
+`bitcoin-libp2p` 负责；BitFS 层只发送
+`uvarint(exact Artifact 字节数) || exact Artifact bytes`，不增加 JSON envelope、
+session ID 或隐藏 pool ID。
 
 The protocol is documented in the multilingual [Docusaurus site](website/README.md). English is the normative website language; Simplified Chinese is maintained under `website/i18n/zh-CN/`.
 
@@ -17,7 +34,7 @@ The protocol is documented in the multilingual [Docusaurus site](website/README.
 
 Step 008 is read-only content recovery from arbiter custody. It is **not** a buyer arbitration close: when the seller is unreachable, the buyer either waits or broadcasts its presigned RefundTx after `nLockTime`.
 
-The current CDDL is under `spec/v1/`; retired iterations are archived under `spec/legacy/`. Every complete wire message starts with `[protocol.WireVersion, wire_kind, ...]` and travels as a parsed `wire.Artifact` whose `Bytes()` returns an immutable copy of the exact bytes. Transaction scripts, fees, signatures, and state construction are delegated to the published `github.com/bsv8/MultisigPool/v4` implementation. Network, queue, WebSocket, database adapters, time sources, and block-height sources remain application-owned interfaces supplied explicitly as `protocol.Facts{Now, BlockHeight}` per call.
+The current CDDL is under `spec/v1/`; retired iterations are archived under `spec/legacy/`. Every complete wire message starts with `[protocol.WireVersion, wire_kind, ...]` and travels as a parsed `wire.Artifact` whose `Bytes()` returns an immutable copy of the exact bytes. Transaction scripts, fees, signatures, and state construction are delegated to the published MultisigPool v4 implementations. The optional libp2p byte transport is standardized by this repository's thin `transport` adapters over `bitcoin-libp2p`; host lifecycle, routing, retries, database adapters, time sources, and block-height sources remain application-owned. Protocol time and height enter explicitly as `protocol.Facts{Now, BlockHeight}` per Go call.
 
 ## Quick start
 
@@ -101,5 +118,8 @@ if _, err := buyerWf.AcceptQuote(ctx, facts, raw); err != nil {
 Run the test suite with:
 
 ```bash
+make test
+# 或分别运行：
 go test ./...
+npm ci --prefix typescript && npm test --prefix typescript
 ```

@@ -65,7 +65,7 @@ SDK 没有时钟注入，不访问节点，也不读取系统时间。每个时�
 
 贯穿这些类型的关联字段是 `pool.RefundTemplateTxID`——专用的 `[32]byte` 类型，承载未嵌入角色签名的规范退款模板交易的 TxID（CDDL 标签 `refund-template-txid`）。它不是原始字节的 SHA-256，也不是字节反转哈希，更不是最终广播退款交易的链上 txid。
 
-wire 包把领域值映射为规范的 001–008 CBOR Artifact；其 `Bytes()` 被原样传输与保存，不做二次编码。传输层（HTTP、WebSocket、队列、CLI 或浏览器消息）刻意缺席；所有环境承载相同字节并使用相同的角色方法。
+wire 包把领域值映射为规范的 Kind 1–11 CBOR Artifact；其 `Bytes()` 被原样传输与保存，不做二次编码。可选 `transport` 包把这些 exact bytes 绑定到共享 `/bitfs/wire/1.0.0` bitcoin-libp2p stream profile，并使用 unsigned-varint 长度分帧。host 生命周期、路由、重试、HTTP、队列、数据库与浏览器 session 策略仍由应用负责；任何传输都不得重编码 Artifact，也不得附加隐藏的 pool/session 身份。
 
 ## 什么不是扩展点
 

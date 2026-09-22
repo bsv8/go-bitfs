@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go.sum
+      - run: test -z "$(gofmt -l $(find . -path ./vendor -prune -o -path ./typescript -prune -o -name '*.go' -print))"
+      - run: go vet ./...
+      - run: go test ./...
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci --prefix typescript
+      - run: npm run typecheck --prefix typescript
+      - run: npm run build --prefix typescript
+      - run: npm test --prefix typescript
+
+  conformance:
+    name: Go/TypeScript 跨语言一致性门禁
+    needs: [go, typescript]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci --prefix typescript
+      - name: Go 消费根清单与共享无效 wire 真值
+        run: go test ./internal/conformance ./wire ./pool -run 'Manifest|SharedInvalidWireFixtures'
+      - name: TypeScript 消费同一清单、wire、交易与 transport 真值
+        run: npm run test:conformance --prefix typescript

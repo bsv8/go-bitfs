@@ -1,0 +1,70 @@
+{
+  "name": "go-bitfs",
+  "version": "0.2.0",
+  "description": "BitFS Wire Protocol v1 TypeScript SDK（字段中文说明见 README 与类型注释）",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bsv8/go-bitfs.git",
+    "directory": "typescript"
+  },
+  "homepage": "https://github.com/bsv8/go-bitfs#readme",
+  "bugs": {
+    "url": "https://github.com/bsv8/go-bitfs/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "import": "./dist/transport.js"
+    },
+    "./wire": {
+      "types": "./dist/wire.d.ts",
+      "import": "./dist/wire.js"
+    },
+    "./pool": {
+      "types": "./dist/pool.d.ts",
+      "import": "./dist/pool.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./messages": {
+      "types": "./dist/messages.d.ts",
+      "import": "./dist/messages.js"
+    },
+    "./roles": {
+      "types": "./dist/roles.d.ts",
+      "import": "./dist/roles.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:conformance": "vitest run test/shared-fixtures.test.ts",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+  },
+  "dependencies": {
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
+    "@bsv/sdk": "2.0.5",
+    "bitcoin-libp2p": "0.3.0",
+    "keymaster-multisig-pool": "4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "5.7.2",
+    "vitest": "4.1.11"
+  }
+}

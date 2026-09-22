@@ -141,10 +141,13 @@ transaction without embedded role signatures (CDDL label
 `refund-template-txid`). It is not a SHA-256 of raw bytes, not a byte-reversed
 hash, and not the txid of the final broadcast refund transaction.
 
-The wire package maps domain values to canonical 001–008 CBOR as immutable
-Artifacts whose `Bytes()` are transmitted and stored unchanged. Transport
-(HTTP, WebSocket, queue, CLI, or browser messaging) is deliberately absent;
-all environments carry the same bytes and use the same role methods.
+The wire package maps domain values to canonical Kind 1–11 CBOR as immutable
+Artifacts whose `Bytes()` are transmitted and stored unchanged. The optional
+`transport` package binds those exact bytes to the shared
+`/bitfs/wire/1.0.0` bitcoin-libp2p stream profile with unsigned-varint length
+framing. Host lifecycle, routing, retries, HTTP, queues, databases, and browser
+session policy remain application-owned; no transport may re-encode an
+Artifact or add a hidden pool/session identity.
 
 ## What is not an extension point
 

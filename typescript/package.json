@@ -1,6 +1,6 @@
 {
   "name": "go-bitfs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "BitFS Wire Protocol v1 TypeScript SDK（字段中文说明见 README 与类型注释）",
   "license": "AGPL-3.0-only",
   "repository": {

@@ -69,6 +69,38 @@ type DeliveryInput struct {
 	Seed []byte
 }
 
+// InspectDeliveryRequestInput 携带预检一次 exact Kind 5 所需的原始证据。
+// 它不要求 payload；调用方可先用返回清单读取内容仓库，再调用 PrepareDelivery。
+type InspectDeliveryRequestInput struct {
+	// QuoteRaw 是与费用池绑定的 exact Kind 1 报价字节。
+	QuoteRaw []byte
+	// Pool 是包含开池证明与当前链上付款状态的卖方证据。
+	Pool SellerPoolEvidence
+	// RequestRaw 是买方签署的 exact Kind 5 付款授权字节。
+	RequestRaw []byte
+}
+
+// DeliveryRequestSummary 是已通过 Kind 5、报价、开池、签名、时序与当前池状态
+// 预检的摘要。它不证明 payload 可用、属于 seed 或与授权价格相符；签署 Kind 6
+// 前仍必须调用 PrepareDelivery 完成全量内容验收。
+type DeliveryRequestSummary struct {
+	// PaymentAuthorizationID 是 SHA-256(exact payment_authorization_cbor)，用于
+	// 关联本次授权；它不同于目标付款状态序号 PaymentSequence。
+	PaymentAuthorizationID protocol.PaymentAuthorizationID
+	// FileQuoteTermsID 是该授权所引用的 exact 报价条款 ID。
+	FileQuoteTermsID protocol.FileQuoteTermsID
+	// RefundTemplateTxID 是该授权绑定的费用池 ID。
+	RefundTemplateTxID pool.RefundTemplateTxID
+	// PaymentSequence 是目标付款状态序号，必须等于当前状态序号加一。
+	PaymentSequence protocol.PaymentSequence
+	// SellerAmountAfterSatoshis 是交付后卖方的绝对累计金额，单位 satoshi。
+	SellerAmountAfterSatoshis protocol.Satoshis
+	// DeliveryDeadlineUnixSeconds 是授权签入的交付截止时间（UTC Unix 秒）。
+	DeliveryDeadlineUnixSeconds content.UnixSeconds
+	// ContentHashes 是授权签入的有序内容哈希副本，按此顺序读取和传入 payload。
+	ContentHashes [][]byte
+}
+
 // CompletePaymentInput 携带完成一笔累计付款所需的全部普通证据。
 type CompletePaymentInput struct {
 	// Pool 是当前池普通证据包。
@@ -170,6 +202,36 @@ func VerifyFunding(rawKind4 []byte, opening SellerOpeningEvidence) ([]byte, Sell
 	return bytes.Clone(result.FundingTransactionRaw), poolEvidence, nil
 }
 
+// InspectDeliveryRequest 严格解析并预检买方 exact Kind 5，返回授权 ID、目标付款
+// 序号和有序内容哈希，使应用能在读取内容仓库前完成协议门禁。预检验证报价、开池、
+// 买家签名、截止时间、当前付款状态与容量；它不读取内容、不签名、不生成 Kind 6。
+// 调用方读取 payload 后仍须把同一请求和当前池证据传给 PrepareDelivery，由其验证
+// payload 哈希、seed/block 归属、长度与价格后再签署交付。
+func InspectDeliveryRequest(facts protocol.Facts, input InspectDeliveryRequestInput) (*DeliveryRequestSummary, error) {
+	const op = "seller.InspectDeliveryRequest"
+	quote, err := decodeKind1Quote(input.QuoteRaw)
+	if err != nil {
+		return nil, err
+	}
+	checkpoint, err := internalPoolCheckpoint(input.Pool)
+	if err != nil {
+		return nil, err
+	}
+	preflight, err := preflightDeliveryRequest(op, facts, quote, checkpoint, input.RequestRaw)
+	if err != nil {
+		return nil, err
+	}
+	return &DeliveryRequestSummary{
+		PaymentAuthorizationID:      preflight.authorizationID,
+		FileQuoteTermsID:            preflight.authorization.FileQuoteTermsID,
+		RefundTemplateTxID:          preflight.refundTemplateTxID,
+		PaymentSequence:             protocol.PaymentSequence(preflight.authorization.PaymentSequence),
+		SellerAmountAfterSatoshis:   protocol.Satoshis(preflight.authorization.SellerAmountAfterSatoshis),
+		DeliveryDeadlineUnixSeconds: content.UnixSeconds(preflight.authorization.DeliveryDeadlineUnixSeconds),
+		ContentHashes:               cloneByteBatch(preflight.contentHashes),
+	}, nil
+}
+
 // PrepareDelivery 完成 quote/opening/时序/序号/容量/价格/payload 全量校验后
 // 签署 Kind 6，返回待发送 exact Kind 6 与普通证据包。Send 之前应用必须先
 // 持久化 payload 与本证据包。
@@ -190,7 +252,7 @@ func PrepareDelivery(ctx context.Context, facts protocol.Facts, input DeliveryIn
 		Quote:           signedQuote,
 		Pool:            checkpoint,
 		RequestRaw:      bytes.Clone(input.RequestRaw),
-		ContentPayloads: clonePayloads(input.ContentPayloads),
+		ContentPayloads: cloneByteBatch(input.ContentPayloads),
 		Seed:            bytes.Clone(input.Seed),
 	})
 	if err != nil {
@@ -421,8 +483,8 @@ func verifyStoredDelivery(op string, opening *pool.OpeningProof, deliveryEvidenc
 	return nil
 }
 
-// clonePayloads 深拷贝 payload 批次，保证调用方持有的切片与结果解耦。
-func clonePayloads(values [][]byte) [][]byte {
+// cloneByteBatch 深拷贝字节批次，保证调用方持有的切片与结果解耦。
+func cloneByteBatch(values [][]byte) [][]byte {
 	cloned := make([][]byte, len(values))
 	for index := range values {
 		cloned[index] = bytes.Clone(values[index])

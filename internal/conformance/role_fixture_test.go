@@ -710,6 +710,88 @@ func TestRoleFixtureMatchesFrozenFile(t *testing.T) {
 	}
 }
 
+// TestRoleFixtureInspectDeliveryRequest verifies the Go preflight API against
+// the same frozen Kind 1/2/3/4/5 evidence consumed by the TypeScript test.
+func TestRoleFixtureInspectDeliveryRequest(t *testing.T) {
+	frozen := loadFrozenRoleFixture(t)
+	kind1 := decodeHex(t, frozen.Quote.Kind1Hex)
+	kind2 := decodeHex(t, frozen.SellerOpening.Hex)
+	kind3 := decodeHex(t, frozen.SellerPresign.Hex)
+	kind4 := decodeHex(t, frozen.FundingDelivery.Hex)
+	kind5 := decodeHex(t, frozen.BuyerRequest.Kind5Hex)
+
+	_, sellerPool, err := seller.VerifyFunding(kind4, seller.SellerOpeningEvidence{RawKind2: kind2, RawKind3: kind3})
+	if err != nil {
+		t.Fatalf("rebuild seller pool from shared opening fixture: %v", err)
+	}
+	input := seller.InspectDeliveryRequestInput{QuoteRaw: kind1, Pool: sellerPool, RequestRaw: kind5}
+	summary, err := seller.InspectDeliveryRequest(roleFacts(frozen.FactsNowUnix), input)
+	if err != nil {
+		t.Fatalf("inspect shared Kind 5 fixture: %v", err)
+	}
+	if got := hexEncode(summary.PaymentAuthorizationID[:]); got != frozen.BuyerRequest.AuthorizationID {
+		t.Fatalf("authorization ID = %s, want %s", got, frozen.BuyerRequest.AuthorizationID)
+	}
+	artifact, err := wire.ParseAs(wire.ContentRequest, kind5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := wire.DecodeContentRequest(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := content.DecodePaymentAuthorization(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedHashes, err := content.DecodeContentHashes(authorization.ContentHashesCBOR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PaymentSequence != protocol.PaymentSequence(authorization.PaymentSequence) ||
+		summary.SellerAmountAfterSatoshis != protocol.Satoshis(authorization.SellerAmountAfterSatoshis) ||
+		summary.DeliveryDeadlineUnixSeconds != content.UnixSeconds(authorization.DeliveryDeadlineUnixSeconds) ||
+		!bytes.Equal(summary.FileQuoteTermsID[:], authorization.FileQuoteTermsID[:]) ||
+		!bytes.Equal(summary.RefundTemplateTxID[:], authorization.RefundTemplateTxID) ||
+		!equalHashBatches(summary.ContentHashes, expectedHashes) {
+		t.Fatal("inspection summary does not match the strictly decoded Kind 5 authorization")
+	}
+
+	// The returned hashes are caller-owned copies.
+	originalHash := bytes.Clone(summary.ContentHashes[0])
+	summary.ContentHashes[0][0] ^= 0xff
+	second, err := seller.InspectDeliveryRequest(roleFacts(frozen.FactsNowUnix), input)
+	if err != nil {
+		t.Fatalf("re-inspect shared Kind 5 fixture: %v", err)
+	}
+	if !bytes.Equal(second.ContentHashes[0], originalHash) {
+		t.Fatal("mutating the summary changed a later inspection result")
+	}
+
+	tampered := tamperKind5Signature(t, kind5)
+	if _, err := seller.InspectDeliveryRequest(roleFacts(frozen.FactsNowUnix), seller.InspectDeliveryRequestInput{QuoteRaw: kind1, Pool: sellerPool, RequestRaw: tampered}); !protocol.IsCode(err, protocol.CodeInvalidSignature) {
+		t.Fatalf("tampered buyer signature inspection error = %v", err)
+	}
+
+	stalePool := sellerPool
+	stalePool.LatestPaymentRawTx = decodeHex(t, frozen.PaymentMerged.Hex)
+	if _, err := seller.InspectDeliveryRequest(roleFacts(frozen.FactsNowUnix), seller.InspectDeliveryRequestInput{QuoteRaw: kind1, Pool: stalePool, RequestRaw: kind5}); !protocol.IsCode(err, protocol.CodeStateConflict) {
+		t.Fatalf("stale request inspection error = %v", err)
+	}
+}
+
+func equalHashBatches(left, right [][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !bytes.Equal(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(value)

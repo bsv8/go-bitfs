@@ -249,18 +249,24 @@ func verifyFundingDelivery(proof *pool.OpeningProof, rawKind4 []byte) (*fundingV
 	}, nil
 }
 
-// DeliverContent 验证买方 003 全链证据后构造并签署 Kind 6：返回待发送
-// Artifact 与必须先持久化的 deliveryCheckpoint（先保存后发送）。
-func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Facts, command deliveryCommand) (*deliveryResult, error) {
-	const op = "seller.DeliverContent"
-	if err := workflow.requireSelf(op); err != nil {
-		return nil, err
-	}
+type deliveryRequestPreflight struct {
+	authorization      *content.PaymentAuthorization
+	quoteTerms         *content.FileQuoteTerms
+	contentHashes      [][]byte
+	authorizationID    protocol.PaymentAuthorizationID
+	refundTemplateTxID pool.RefundTemplateTxID
+	expectedPrice      uint64
+}
+
+// preflightDeliveryRequest 是 InspectDeliveryRequest 与 DeliverContent 共用的
+// 无 payload 校验：从 exact evidence 重验请求签名、报价/开池绑定、时间、当前池
+// 状态、目标序号和容量，并从规范授权文档派生授权 ID 与有序内容哈希。
+func preflightDeliveryRequest(op string, facts protocol.Facts, quote *content.SignedFileQuote, checkpoint *poolCheckpoint, rawKind5 []byte) (*deliveryRequestPreflight, error) {
 	now, err := facts.RequireNow()
 	if err != nil {
 		return nil, err
 	}
-	requestArtifact, err := wire.ParseAs(wire.ContentRequest, command.RequestRaw)
+	requestArtifact, err := wire.ParseAs(wire.ContentRequest, rawKind5)
 	if err != nil {
 		return nil, err
 	}
@@ -268,16 +274,13 @@ func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	opening := command.Pool.Opening()
-	previous := command.Pool.Payment()
-	localQuote := content.CloneSignedFileQuote(command.Quote)
+	opening := checkpoint.Opening()
+	previous := checkpoint.Payment()
+	localQuote := content.CloneSignedFileQuote(quote)
 	if localQuote == nil || opening == nil || previous == nil {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "command", "quote and pool checkpoint are required")
 	}
-	if err := workflow.ensureOwnership(op, opening); err != nil {
-		return nil, err
-	}
-	engine, err := workflow.engineFor(opening)
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opening.BuyerPublicKey, SellerPublicKey: opening.SellerPublicKey, ArbiterPublicKey: opening.ArbiterPublicKey})
 	if err != nil {
 		return nil, err
 	}
@@ -291,52 +294,77 @@ func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err := refundGate(op, facts, deliveryLockDetails.RefundLockTime); err != nil {
 		return nil, err
 	}
-	requestTerms, quoteTerms, err := content.VerifyContentRequestEvidence(request, localQuote, opening)
+	authorization, quoteTerms, err := content.VerifyContentRequestEvidence(request, localQuote, opening)
 	if err != nil {
 		return nil, err
 	}
-	if err := content.CheckContentRequestTiming(requestTerms, quoteTerms, now); err != nil {
+	if err := content.CheckContentRequestTiming(authorization, quoteTerms, now); err != nil {
 		return nil, err
 	}
-	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(requestTerms.RefundTemplateTxID))
-	if previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 != requestTerms.PaymentSequence {
+	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(authorization.RefundTemplateTxID))
+	if previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 != authorization.PaymentSequence {
 		return nil, staleSequenceErr(op)
 	}
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	if requestTerms.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
+	if authorization.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "seller_amount_after_satoshis", "authorization amount cannot decrease")
 	}
-	expectedPrice := requestTerms.SellerAmountAfterSatoshis - previous.SellerAmountSatoshis
-	if err := engine.CheckPaymentCapacity(pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSatoshis: requestTerms.SellerAmountAfterSatoshis}); err != nil {
+	if err := engine.CheckPaymentCapacity(pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: authorization.PaymentSequence, SellerAmountAfterSatoshis: authorization.SellerAmountAfterSatoshis}); err != nil {
 		return nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}
-	contentHashes, err := content.DecodeContentHashes(requestTerms.ContentHashesCBOR)
+	contentHashes, err := content.DecodeContentHashes(authorization.ContentHashesCBOR)
 	if err != nil {
 		return nil, err
 	}
+	authorizationID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return &deliveryRequestPreflight{
+		authorization:      authorization,
+		quoteTerms:         quoteTerms,
+		contentHashes:      contentHashes,
+		authorizationID:    authorizationID,
+		refundTemplateTxID: refundTemplateTxID,
+		expectedPrice:      authorization.SellerAmountAfterSatoshis - previous.SellerAmountSatoshis,
+	}, nil
+}
+
+// DeliverContent 验证买方 003 全链证据后构造并签署 Kind 6：返回待发送
+// Artifact 与必须先持久化的 deliveryCheckpoint（先保存后发送）。
+func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Facts, command deliveryCommand) (*deliveryResult, error) {
+	const op = "seller.DeliverContent"
+	if err := workflow.requireSelf(op); err != nil {
+		return nil, err
+	}
+	opening := command.Pool.Opening()
+	if err := workflow.ensureOwnership(op, opening); err != nil {
+		return nil, err
+	}
+	preflight, err := preflightDeliveryRequest(op, facts, command.Quote, command.Pool, command.RequestRaw)
+	if err != nil {
+		return nil, err
+	}
+	previous := command.Pool.Payment()
 	payloads := make([][]byte, len(command.ContentPayloads))
 	for index := range command.ContentPayloads {
 		payloads[index] = append([]byte(nil), command.ContentPayloads[index]...)
 	}
 	seed := append([]byte(nil), command.Seed...)
-	effectiveSeed, err := content.VerifyContentPayloads(ctx, quoteTerms, contentHashes, payloads, seed)
+	effectiveSeed, err := content.VerifyContentPayloads(ctx, preflight.quoteTerms, preflight.contentHashes, payloads, seed)
 	if err != nil {
 		return nil, err
 	}
-	price, err := content.ContentHashesPriceSatoshis(ctx, quoteTerms, contentHashes, effectiveSeed)
+	price, err := content.ContentHashesPriceSatoshis(ctx, preflight.quoteTerms, preflight.contentHashes, effectiveSeed)
 	if err != nil {
 		return nil, fmt.Errorf("calculate aggregate content price: %w", err)
 	}
-	if price != expectedPrice || requestTerms.SellerAmountAfterSatoshis != previous.SellerAmountSatoshis+price {
+	if price != preflight.expectedPrice || preflight.authorization.SellerAmountAfterSatoshis != previous.SellerAmountSatoshis+price {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "seller_amount_after_satoshis", "authorization amount or sequence does not match verified content price")
 	}
-	authID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
-	if err != nil {
-		return nil, err
-	}
-	delivery, err := content.NewSignedContentDelivery(ctx, authID, payloads, workflow.signer)
+	delivery, err := content.NewSignedContentDelivery(ctx, preflight.authorizationID, payloads, workflow.signer)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +372,7 @@ func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	checkpoint := &deliveryCheckpoint{refundTemplateTxID: refundTemplateTxID, authorizationID: authID, paymentSequence: protocol.PaymentSequence(requestTerms.PaymentSequence), sellerAmountAfterSatoshis: protocol.Satoshis(requestTerms.SellerAmountAfterSatoshis)}
+	checkpoint := &deliveryCheckpoint{refundTemplateTxID: preflight.refundTemplateTxID, authorizationID: preflight.authorizationID, paymentSequence: protocol.PaymentSequence(preflight.authorization.PaymentSequence), sellerAmountAfterSatoshis: protocol.Satoshis(preflight.authorization.SellerAmountAfterSatoshis)}
 	return &deliveryResult{Outbound: outbound, Checkpoint: checkpoint}, nil
 }
 

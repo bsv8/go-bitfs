@@ -119,6 +119,11 @@ func PreparePresign(ctx context.Context, rawKind2 []byte, signer protocol.Signer
 // output[0] 金额/脚本与退款模板重建一致，并解析初始链上付款状态。
 func VerifyFunding(rawKind4 []byte, opening SellerOpeningEvidence) (fundingRaw []byte, evidence SellerPoolEvidence, err error)
 
+// InspectDeliveryRequest 在读取内容仓库前预检 exact Kind 5：验证报价、开池、买家
+// 签名、截止时间、当前付款状态、序号与容量，返回授权 ID、目标序号和有序哈希。
+// 此摘要不证明 payload 有效；应用读取后仍须调用 PrepareDelivery 完成全量验收。
+func InspectDeliveryRequest(facts protocol.Facts, input InspectDeliveryRequestInput) (summary *DeliveryRequestSummary, err error)
+
 // PrepareDelivery 完成 quote/opening/时序/序号/容量/价格/payload 全量校验后
 // 签署 exact Kind 6（发送前应用必须先持久化 payload 与证据包）。
 func PrepareDelivery(ctx context.Context, facts protocol.Facts, input DeliveryInput, signer protocol.Signer) (outbound wire.Artifact, evidence SellerDeliveryEvidence, err error)

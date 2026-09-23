@@ -215,6 +215,34 @@ export interface DeliveryInput {
   seed?: Uint8Array
 }
 
+/** 预检一次 exact Kind 5 所需的原始证据；不要求先读取或提供 payload。 */
+export interface InspectDeliveryRequestInput {
+  /** 与费用池绑定的 exact Kind 1 报价字节。 */
+  quoteRaw: Uint8Array
+  /** 包含完整开池证明和当前链上付款状态的卖方证据。 */
+  pool: SellerPoolEvidence
+  /** 买方签署的 exact Kind 5 付款授权字节。 */
+  requestRaw: Uint8Array
+}
+
+/** 已通过 Kind 5、报价、开池、签名、时间、付款状态与容量预检的摘要。 */
+export interface DeliveryRequestSummary {
+  /** SHA-256(exact payment_authorization_cbor)，授权查找 ID；不同于付款序号。 */
+  paymentAuthorizationID: Uint8Array
+  /** 授权引用的 exact 报价条款 ID。 */
+  fileQuoteTermsID: Uint8Array
+  /** 授权绑定的费用池 ID。 */
+  refundTemplateTxID: Uint8Array
+  /** 目标付款状态序号，必须等于当前序号加一。 */
+  paymentSequence: number
+  /** 交付后卖方的绝对累计金额，单位 satoshi。 */
+  sellerAmountAfterSatoshis: bigint
+  /** 授权签入的交付截止时间，UTC Unix 秒。 */
+  deliveryDeadlineUnixSeconds: bigint
+  /** 授权签入的有序内容哈希；调用方按此顺序读取和传入 payload。 */
+  contentHashes: Uint8Array[]
+}
+
 /** 完成一笔累计付款所需的全部普通证据。 */
 export interface CompletePaymentInput {
   /** 当前池普通证据包。 */

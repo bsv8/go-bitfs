@@ -22,6 +22,7 @@ import {
 } from './content.js'
 import type {
   ArbitratedContentInput,
+  DeliveryRequestSummary,
   RequestContentInput,
   BuyerAuthorizationEvidence,
   BuyerOpeningEvidence,
@@ -30,6 +31,7 @@ import type {
   CompleteCloseInput,
   CompletePaymentInput,
   DeliveryInput,
+  InspectDeliveryRequestInput,
   OpeningProof,
   PrepareArbitrationInput,
   PrepareCloseInput,
@@ -183,6 +185,60 @@ export async function verifySellerFunding (rawKind4: Uint8Array, opening: Seller
   }
 }
 
+interface SellerDeliveryPreflight {
+  authorization: PaymentAuthorization
+  quoteTerms: FileQuoteTerms
+  contentHashes: Uint8Array[]
+  authorizationID: Uint8Array
+  refundTemplateTxID: Uint8Array
+  expectedPrice: bigint
+}
+
+/** Inspect 与 Prepare 共用的无 payload 门禁，避免两入口的证据校验发生漂移。 */
+async function preflightSellerDelivery (facts: Readonly<PureFunctionFacts>, quote: SignedFileQuote, checkpoint: PoolCheckpoint, rawKind5: Uint8Array): Promise<SellerDeliveryPreflight> {
+  const now = requireNow(facts)
+  const opening = checkpoint.opening
+  const previous = checkpoint.payment
+  const details = await deriveOpeningDetails(opening)
+  checkRefundNotExpired(facts, details.refundLockTime)
+  const request = decodeKind5Request(rawKind5)
+  const { authorization, quoteTerms } = await verifyContentRequestEvidence(request, quote, opening)
+  checkContentRequestTiming(authorization, quoteTerms, now)
+  if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence + 1 !== authorization.paymentSequence) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号不是上一状态加一')
+  await verifyAcceptedPayment(previous, opening)
+  if (authorization.sellerAmountAfterSatoshis < previous.sellerAmountSatoshis) throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额不能倒退')
+  await checkPaymentCapacity(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
+  const contentHashes = decodeValidatedHashes(authorization.contentHashes)
+  return {
+    authorization,
+    quoteTerms,
+    contentHashes,
+    authorizationID: sha256(request.paymentAuthorizationCBOR),
+    refundTemplateTxID: new Uint8Array(details.refundTemplateTxId),
+    expectedPrice: authorization.sellerAmountAfterSatoshis - previous.sellerAmountSatoshis
+  }
+}
+
+/**
+ * 严格解析并预检 exact Kind 5，返回授权 ID、目标付款序号与有序内容哈希，
+ * 使应用能在读取内容仓库前完成协议门禁。该摘要不证明 payload 可用、属于
+ * seed 或满足授权价格；调用方仍须把同一请求与池证据传给 PrepareDelivery。
+ */
+export async function inspectSellerDeliveryRequest (facts: Readonly<PureFunctionFacts>, input: InspectDeliveryRequestInput): Promise<DeliveryRequestSummary> {
+  const signedQuote = decodeKind1Quote(input.quoteRaw)
+  const checkpoint = await sellerPoolCheckpoint(input.pool)
+  const preflight = await preflightSellerDelivery(facts, signedQuote, checkpoint, input.requestRaw)
+  return {
+    paymentAuthorizationID: copyBytes(preflight.authorizationID),
+    fileQuoteTermsID: copyBytes(preflight.authorization.fileQuoteTermsID),
+    refundTemplateTxID: copyBytes(preflight.refundTemplateTxID),
+    paymentSequence: preflight.authorization.paymentSequence,
+    sellerAmountAfterSatoshis: preflight.authorization.sellerAmountAfterSatoshis,
+    deliveryDeadlineUnixSeconds: preflight.authorization.deliveryDeadlineUnixSeconds,
+    contentHashes: preflight.contentHashes.map(copyBytes)
+  }
+}
+
 /**
  * 卖方交付：完成 quote/opening/时序/序号/容量/价格/payload 全量校验后签署
  * exact Kind 6，返回待发送报文与普通证据包。Send 之前必须先持久化 payload
@@ -190,29 +246,17 @@ export async function verifySellerFunding (rawKind4: Uint8Array, opening: Seller
  */
 export async function prepareSellerDelivery (facts: Readonly<PureFunctionFacts>, input: DeliveryInput, signer: Signer): Promise<{ outbound: Artifact, evidence: SellerDeliveryEvidence }> {
   const bound = bindSigner(signer, 'seller_signer')
-  const now = requireNow(facts)
   const signedQuote = decodeKind1Quote(input.quoteRaw)
   const checkpoint = await sellerPoolCheckpoint(input.pool)
   const opening = checkpoint.opening
   const previous = checkpoint.payment
   if (!equal(bound.publicKey(), opening.sellerPublicKey)) throw new WireError('unauthorized', 0, 'seller_public_key', 'Signer 与开池卖方不一致')
-  const details = await deriveOpeningDetails(opening)
-  checkRefundNotExpired(facts, details.refundLockTime)
-  const request = decodeKind5Request(input.requestRaw)
-  const { authorization, quoteTerms } = await verifyContentRequestEvidence(request, signedQuote, opening)
-  checkContentRequestTiming(authorization, quoteTerms, now)
-  if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence + 1 !== authorization.paymentSequence) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号不是上一状态加一')
-  await verifyAcceptedPayment(previous, opening)
-  if (authorization.sellerAmountAfterSatoshis < previous.sellerAmountSatoshis) throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额不能倒退')
-  const expectedPrice = authorization.sellerAmountAfterSatoshis - previous.sellerAmountSatoshis
-  await checkPaymentCapacity(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
-  const hashes = decodeValidatedHashes(authorization.contentHashes)
+  const preflight = await preflightSellerDelivery(facts, signedQuote, checkpoint, input.requestRaw)
   const payloads = input.contentPayloads.map(copyBytes)
-  const effectiveSeed = await verifyContentPayloads(quoteTerms, hashes, payloads, input.seed)
-  const price = await contentHashesPriceSatoshis(quoteTerms, hashes, effectiveSeed)
-  if (price !== expectedPrice || authorization.sellerAmountAfterSatoshis !== previous.sellerAmountSatoshis + price) throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额或序号与已验证内容价格不一致')
-  const authorizationID = sha256(request.paymentAuthorizationCBOR)
-  const outbound = await createContentDelivery(bound, authorizationID, payloads)
+  const effectiveSeed = await verifyContentPayloads(preflight.quoteTerms, preflight.contentHashes, payloads, input.seed)
+  const price = await contentHashesPriceSatoshis(preflight.quoteTerms, preflight.contentHashes, effectiveSeed)
+  if (price !== preflight.expectedPrice || preflight.authorization.sellerAmountAfterSatoshis !== previous.sellerAmountSatoshis + price) throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额或序号与已验证内容价格不一致')
+  const outbound = await createContentDelivery(bound, preflight.authorizationID, payloads)
   return {
     outbound,
     evidence: { rawKind1: copyBytes(input.quoteRaw), rawKind5: copyBytes(input.requestRaw), rawKind6: outbound.bytes() }

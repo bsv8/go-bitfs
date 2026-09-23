@@ -29,7 +29,7 @@ SDK 不再提供 `BuyerWorkflow`/`SellerWorkflow`/`ArbiterWorkflow` 等跨步骤
   `verifyContentRequestEvidence`、`checkContentRequestTiming`、
   `verifyContentPayloads` 等算价与证据函数；
 - `steps`：卖方（`createSellerQuote`、`prepareSellerPresign`、`verifySellerFunding`、
-  `prepareSellerDelivery`、`completeSellerPayment`、`completeSellerClose`、
+  `inspectSellerDeliveryRequest`、`prepareSellerDelivery`、`completeSellerPayment`、`completeSellerClose`、
   `prepareSellerArbitration`、`completeSellerArbitratedPayment`）、买方
   （`acceptBuyerQuote`、`prepareBuyerOpening`、`completeBuyerOpening`、
   `prepareBuyerFundingDelivery`、`prepareBuyerContentRequest`、`verifyBuyerDelivery`、
@@ -45,6 +45,13 @@ SDK 不再提供 `BuyerWorkflow`/`SellerWorkflow`/`ArbiterWorkflow` 等跨步骤
   只是可序列化的普通数据，无行为、无令牌；
 - `PureFunctionFacts.nowUnixSeconds`：调用方显式传入的 UTC Unix 秒，SDK 不读取系统时钟；
 - `VerifiedQuote`：完成证据验证后的不可变语义结果；所有公开字节均为副本。
+
+卖方可先调用 `inspectSellerDeliveryRequest(facts, { quoteRaw, pool, requestRaw })`，
+在读取内容仓库前验证 Kind 5，并取得 `paymentAuthorizationID`（授权查找 ID）、
+`paymentSequence`（目标付款序号）与 `contentHashes`（签名绑定的有序哈希清单）。
+授权 ID 与付款序号是两个不同字段。该预检不接收 payload，也不证明内容存在、属于报价
+seed 或满足授权价格；读取后仍须把同一 Kind 5 和池证据连同 payload 交给
+`prepareSellerDelivery` 完成内容和价格验证，SDK 才会签署 Kind 6。
 
 每个签名入口都按调用绑定 Signer：先校验其 33 字节压缩公钥、必要时再与协议角色比对，
 并在任何密钥操作之前完成全部证据重验。任一类验证失败时签名能力不会被调用；等价于

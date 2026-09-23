@@ -23,7 +23,7 @@ import {
   createContentRetrievalUnavailable, createFileQuote, createSellerQuote, decodeContentPayloads,
   decodeFileQuoteTerms, decodePaymentAuthorization, encodeFundingTransactionDelivery, encodePaymentUpdate,
   encodeRefundPresignRequest, encodeRefundPresignResponse, forkIDAllDigest, forkIDAllPreimage,
-  generateRetrievalNonce, MultisigPoolEngine, newRetrievalNonce, parse, parseArbitratedPoolLockingScript,
+  generateRetrievalNonce, inspectSellerDeliveryRequest, MultisigPoolEngine, newRetrievalNonce, parse, parseArbitratedPoolLockingScript,
   parseAs, paymentAuthorizationID, prepareArbiterArbitration, prepareBuyerClose,
   prepareBuyerContentRequest, prepareBuyerFundingDelivery, prepareBuyerOpening, prepareSellerArbitration,
   prepareSellerDelivery, prepareSellerPresign, readArtifacts, requestBuyerArbitratedContent,
@@ -550,6 +550,38 @@ describe('Go 与 TypeScript 共享 wire 真值', () => {
 })
 
 describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
+  it('卖家用共享 Kind 1/5 真值预检授权 ID、序号与有序内容清单', async () => {
+    const funded = await verifySellerFunding(kind4, { rawKind2: kind2, rawKind3: kind3 })
+    const input = { quoteRaw: kind1, pool: funded.pool, requestRaw: kind5 }
+    const summary = await inspectSellerDeliveryRequest(roleFacts, input)
+    const authorization = decodePaymentAuthorization(outer(kind5)[2] as Uint8Array)
+
+    expect(toHex(summary.paymentAuthorizationID)).toBe(roleFixture.buyer_request_kind5.authorization_id)
+    expect(summary.paymentSequence).toBe(authorization.paymentSequence)
+    expect(summary.sellerAmountAfterSatoshis).toBe(authorization.sellerAmountAfterSatoshis)
+    expect(summary.deliveryDeadlineUnixSeconds).toBe(authorization.deliveryDeadlineUnixSeconds)
+    expect(toHex(summary.fileQuoteTermsID)).toBe(toHex(authorization.fileQuoteTermsID))
+    expect(toHex(summary.refundTemplateTxID)).toBe(toHex(authorization.refundTemplateTxID))
+    expect(summary.contentHashes.map(toHex)).toEqual(authorization.contentHashes.map(toHex))
+
+    const originalHash = toHex(summary.contentHashes[0]!)
+    summary.contentHashes[0]![0]! ^= 0xff
+    const repeated = await inspectSellerDeliveryRequest(roleFacts, input)
+    expect(toHex(repeated.contentHashes[0]!)).toBe(originalHash)
+
+    const kind5Outer = outer(kind5)
+    const authorizationFields = decodeCanonical(kind5Outer[2] as Uint8Array)
+    if (!Array.isArray(authorizationFields)) throw new Error('共享授权文档不是 CBOR array')
+    authorizationFields[2] = BigInt(authorization.paymentSequence + 1)
+    const badRequest = encodeCanonical([1n, 5n, encodeCanonical(authorizationFields), kind5Outer[3] as Uint8Array])
+    await expect(inspectSellerDeliveryRequest(roleFacts, { ...input, requestRaw: badRequest }))
+      .rejects.toMatchObject({ code: 'invalid_signature' })
+
+    const stalePool = { ...funded.pool, latestPaymentRawTx: paymentMerged }
+    await expect(inspectSellerDeliveryRequest(roleFacts, { ...input, pool: stalePool }))
+      .rejects.toMatchObject({ code: 'state_conflict' })
+  })
+
   it('固定 Signer 下 Kind 1–11 与全部交易逐字节复现', async () => {
     const funding = new Transaction()
     funding.addInput({ sourceTXID: '01'.repeat(32), sourceOutputIndex: 0, sequence: 0xffffffff, unlockingScript: new UnlockingScript() })

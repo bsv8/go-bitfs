@@ -7,6 +7,7 @@ package seller
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -784,6 +785,22 @@ func TestCompleteCloseGuardsFinalSequenceExpiryAndRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	maliciousLockTime := bytes.Clone(closePrep.Unsigned.RawTx)
+	binary.LittleEndian.PutUint32(maliciousLockTime[len(maliciousLockTime)-4:], ^uint32(0)-1)
+	countedSeller := &countingSigner{delegate: mustSigner(t, f.sellerKey)}
+	closeEvidence := SellerPoolEvidence{
+		Opening:               pool.CloneOpeningProof(p.sellerPool.Opening()),
+		FundingTransactionRaw: bytes.Clone(f.FundingTransactionRaw),
+		LatestPaymentRawTx:    bytes.Clone(latest.RawTx),
+	}
+	if _, err := CompleteClose(ctx, testFacts(testBaseTime), CompleteCloseInput{
+		Pool: closeEvidence, UnsignedRaw: maliciousLockTime, BuyerSignature: closePrep.BuyerSignature,
+	}, countedSeller); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+		t.Fatalf("final sequence with non-final nLockTime error = %v, want invalid_evidence", err)
+	}
+	if calls := countedSeller.callsSnapshot(); calls != 0 {
+		t.Fatalf("seller Signer called %d times for non-final nLockTime candidate, want 0", calls)
+	}
 	expiredFacts := protocol.Facts{Now: time.Unix(int64(f.Expiry), 0), BlockHeight: testBlockHeight}
 	if _, err := f.Seller.CompleteClose(ctx, expiredFacts, CloseCommand{
 		Pool: p.sellerPool, Unsigned: closePrep.Unsigned, BuyerSignature: closePrep.BuyerSignature,
@@ -814,6 +831,52 @@ func TestCompleteCloseGuardsFinalSequenceExpiryAndRoles(t *testing.T) {
 	}
 	if !bytes.Equal(verifiedClose.RawTx(), closed.RawTx()) {
 		t.Fatal("verified close diverged from the seller merge output")
+	}
+
+	// 已 final checkpoint 只接受完全相同的候选和买方签名；精确重放不再次调用 Signer。
+	finalEvidence := closeEvidence
+	finalEvidence.LatestPaymentRawTx = closed.RawTx()
+	replaySigner := &countingSigner{delegate: mustSigner(t, f.sellerKey)}
+	replayed, err := CompleteClose(ctx, expiredFacts, CompleteCloseInput{
+		Pool: finalEvidence, UnsignedRaw: closePrep.Unsigned.RawTx, BuyerSignature: closePrep.BuyerSignature,
+	}, replaySigner)
+	if err != nil || !bytes.Equal(replayed, closed.RawTx()) {
+		t.Fatalf("exact close retry = %x, err %v; want original final transaction", replayed, err)
+	}
+	if calls := replaySigner.callsSnapshot(); calls != 0 {
+		t.Fatalf("exact close retry called seller Signer %d times, want 0", calls)
+	}
+	invalidSignature := bytes.Clone(closePrep.BuyerSignature)
+	invalidSignature[0] ^= 1
+	invalidSigner := &countingSigner{delegate: mustSigner(t, f.sellerKey)}
+	if _, err := CompleteClose(ctx, expiredFacts, CompleteCloseInput{
+		Pool: finalEvidence, UnsignedRaw: closePrep.Unsigned.RawTx, BuyerSignature: invalidSignature,
+	}, invalidSigner); !protocol.IsCode(err, protocol.CodeInvalidSignature) {
+		t.Fatalf("invalid buyer signature on final retry = %v, want invalid_signature", err)
+	}
+	if calls := invalidSigner.callsSnapshot(); calls != 0 {
+		t.Fatalf("invalid final retry called seller Signer %d times, want 0", calls)
+	}
+	if _, err := CompleteClose(ctx, expiredFacts, CompleteCloseInput{
+		Pool: finalEvidence, UnsignedRaw: bytes.Repeat([]byte{1}, 65537), BuyerSignature: closePrep.BuyerSignature,
+	}, invalidSigner); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+		t.Fatalf("oversized direct close = %v, want malformed_wire", err)
+	}
+
+	differentClose, err := f.Buyer.PrepareClose(ctx, testFacts(testBaseTime), buyer.PrepareCloseCommand{
+		Pool: p.buyerPool, Base: latest, TargetSellerAmountSatoshis: protocol.Satoshis(target + 1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictSigner := &countingSigner{delegate: mustSigner(t, f.sellerKey)}
+	if _, err := CompleteClose(ctx, expiredFacts, CompleteCloseInput{
+		Pool: finalEvidence, UnsignedRaw: differentClose.Unsigned.RawTx, BuyerSignature: differentClose.BuyerSignature,
+	}, conflictSigner); !protocol.IsCode(err, protocol.CodeStateConflict) {
+		t.Fatalf("different candidate after final close error = %v, want state_conflict", err)
+	}
+	if calls := conflictSigner.callsSnapshot(); calls != 0 {
+		t.Fatalf("different candidate after final close called seller Signer %d times, want 0", calls)
 	}
 }
 

@@ -17,7 +17,7 @@ const (
 	CodeNonCanonical ErrorCode = "non_canonical"
 	// CodeUnsupportedVersion 表示 wire version 不是 1。
 	CodeUnsupportedVersion ErrorCode = "unsupported_version"
-	// CodeUnsupportedKind 表示 Kind 不在 1..11 或与路由声明不一致。
+	// CodeUnsupportedKind 表示 Kind 不在 1..13 或与路由声明不一致。
 	CodeUnsupportedKind ErrorCode = "unsupported_kind"
 	// CodeInvalidSignature 表示普通消息签名或交易签名验证失败（含
 	// 畸形 DER、high-S、空签名、公钥不匹配）。
@@ -50,7 +50,7 @@ type Error struct {
 	Op string
 	// Code 是稳定错误分类；应用分支只看它。
 	Code ErrorCode
-	// Kind 是相关的 wire Kind（1..11）；无关联时为 0。
+	// Kind 是相关的 wire Kind（1..13）；无关联时为 0。
 	Kind uint16
 	// Field 是安全的相关字段/子文档路径名；可为空。
 	Field string

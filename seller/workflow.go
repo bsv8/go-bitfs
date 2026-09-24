@@ -508,6 +508,9 @@ func (workflow *workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 	if unsigned == nil || unsigned.PaymentSequence != ^uint32(0) {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 0, "unsigned_close", "immediate close must use the final sequence")
 	}
+	if command.Pool == nil || command.Pool.payment == nil {
+		return nil, protocol.Errorf(op, protocol.CodeStateConflict, 0, "pool_checkpoint", "seller pool checkpoint is required")
+	}
 	opening := command.Pool.Opening()
 	if err := workflow.ensureOwnership(op, opening); err != nil {
 		return nil, err
@@ -523,6 +526,15 @@ func (workflow *workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 	if err != nil {
 		return nil, err
 	}
+	if command.Pool.payment.PaymentSequence == ^uint32(0) {
+		if err := engine.VerifyBuyerPayment(unsigned, command.BuyerSignature, opening); err != nil {
+			return nil, protocol.WrapClassified(fmt.Errorf("verify buyer close signature: %w", err), op, 0, "buyer_close_transaction_signature")
+		}
+		if err := engine.PaymentStateMatchesUnsigned(command.Pool.payment, unsigned, opening); err != nil || !bytes.Equal(command.Pool.payment.BuyerTransactionSignature, command.BuyerSignature) {
+			return nil, protocol.Errorf(op, protocol.CodeStateConflict, 0, "payment_sequence", "pool is already final with a different close candidate")
+		}
+		return pool.VerifySignedTransaction(command.Pool.payment.RawTx, opening)
+	}
 	if err := refundGate(op, facts, details.RefundLockTime); err != nil {
 		return nil, err
 	}
@@ -530,7 +542,7 @@ func (workflow *workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 		return nil, protocol.Errorf(op, protocol.CodeInsufficientBalance, 0, "outputs_satoshis", "immediate close outputs exceed the pool capacity")
 	}
 	if err := engine.VerifyBuyerPayment(unsigned, command.BuyerSignature, opening); err != nil {
-		return nil, fmt.Errorf("verify buyer close signature: %w", err)
+		return nil, protocol.WrapClassified(fmt.Errorf("verify buyer close signature: %w", err), op, 0, "buyer_close_transaction_signature")
 	}
 	sellerSignature, err := pool.NewSellerPoolAdapter(engine, workflow.signer).SignSellerPayment(ctx, unsigned, opening)
 	if err != nil {

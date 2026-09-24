@@ -47,8 +47,8 @@ sequenceDiagram
         N-->>S: 返回规范 txid
     end
 
-    B->>S: 006 unsigned close + buyer signature（先持久化）
-    S->>B: 006 fully signed close
+    B->>S: Kind 12 PoolCloseRequest（先持久化 exact Artifact）
+    S->>B: Kind 13 PoolCloseResponse（含双方交易签名）
     B->>N: 广播最终关闭交易
     N-->>B: 返回规范 txid
 
@@ -405,28 +405,30 @@ func classify(err error) error {
 ### 6.3 006 协商关池
 
 ```go
-base := buyerPool.Payment() // 调用方选定的基准状态；SDK 不声称它是业务最新
-
-// 买家构造最终未签名交易和自己的分离签名；两者都要先持久化再发送。
-closePrep, err := buyerWorkflow.PrepareClose(ctx, facts, buyer.PrepareCloseCommand{
-    Pool:                       buyerPool,
-    Base:                       base,
+// 买家构造 exact Kind 12：费用池 ID、未签名关闭交易和买方交易签名。
+kind12, err := buyer.PrepareCloseArtifact(ctx, facts, buyer.PrepareCloseInput{
+    Pool:                       buyerPoolEvidence,
     TargetSellerAmountSatoshis: targetSellerAmountSatoshis,
-})
+}, buyerSigner)
 if err != nil { /* ... */ }
-journal.SaveCloseIntent(closePrep.Unsigned.RawTx, closePrep.BuyerSignature)
+kind12Raw := kind12.Bytes()
+journal.SaveOutbox("kind12", kind12Raw) // 精确字节先持久化再发送
+sendToSeller(kind12Raw)
 
-// 卖家验证买家签名、补充卖方签名并合并；不广播。
-closed, err := sellerWorkflow.CompleteClose(ctx, facts, seller.CloseCommand{
-    Pool:           sellerPool,
-    Unsigned:       closePrep.Unsigned,
-    BuyerSignature: closePrep.BuyerSignature,
-})
+// 卖方严格解析 Kind 12、核对池 ID 和买方签名后补签，返回 exact Kind 13；不广播。
+kind13, err := seller.CompleteCloseArtifact(ctx, facts, seller.CompleteCloseArtifactInput{
+    Pool:       sellerPoolEvidence,
+    RequestRaw: receivedKind12Raw,
+}, sellerSigner)
+if err != nil { /* ... */ }
+kind13Raw := kind13.Bytes()
+journal.SaveOutbox("kind13", kind13Raw)
+sendToBuyer(kind13Raw)
 
-// 买家复核完整最终交易；广播由买家执行。
-verified, err := buyerWorkflow.VerifyCompletedClose(ctx, buyer.VerifyCloseCommand{
-    Pool:  buyerPool,
-    Close: closed,
+// 买家严格解析 Kind 13、核对池 ID 和完整交易；广播由应用执行。
+verified, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+    Pool:        buyerPoolEvidence,
+    ResponseRaw: receivedKind13Raw,
 })
 _, err = broadcaster.Broadcast(verified.RawTx())
 ```

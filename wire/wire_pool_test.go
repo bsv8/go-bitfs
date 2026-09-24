@@ -111,6 +111,25 @@ func TestFundingTransactionDeliveryTypedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPoolCloseEncodersRejectArtifactsAboveGlobalWireLimit(t *testing.T) {
+	oversizedTransaction := bytes.Repeat([]byte{1}, wire.MaxWireParseBytes)
+	request, err := wire.EncodePoolCloseRequest(&pool.PoolCloseRequest{
+		RefundTemplateTxID:             pool.RefundTemplateTxID(bytes.Repeat([]byte{2}, 32)),
+		UnsignedCloseTransactionRaw:    oversizedTransaction,
+		BuyerCloseTransactionSignature: []byte{1},
+	})
+	if !protocol.IsCode(err, protocol.CodeMalformedWire) || !request.IsZero() {
+		t.Fatalf("oversized Kind 12 = artifact %v, err %v; want zero artifact and malformed_wire", request.IsZero(), err)
+	}
+	response, err := wire.EncodePoolCloseResponse(&pool.PoolCloseResponse{
+		RefundTemplateTxID:          pool.RefundTemplateTxID(bytes.Repeat([]byte{2}, 32)),
+		CompleteCloseTransactionRaw: oversizedTransaction,
+	})
+	if !protocol.IsCode(err, protocol.CodeMalformedWire) || !response.IsZero() {
+		t.Fatalf("oversized Kind 13 = artifact %v, err %v; want zero artifact and malformed_wire", response.IsZero(), err)
+	}
+}
+
 func TestArbitrationMessagesTypedRoundTrip(t *testing.T) {
 	request, arbiterWorkflow := wireArbitrationEvidence(t)
 	rawRequest, err := arbitration.MarshalRequest(request)

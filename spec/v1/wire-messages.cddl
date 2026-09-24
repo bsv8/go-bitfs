@@ -1,9 +1,10 @@
 ; BitFS Wire Protocol v1 — 统一报文 CDDL 真值。
-; 与 docs/protocol/wire-messages.zh.md 一一对应；任何改变 wire shape、签名
-; 对象、ID 算法或验收语义的修改都必须提升 protocol.WireVersion。
+; 与 docs/protocol/wire-messages.zh.md 一一对应；改变已有 Kind 的 wire shape、
+; 签名对象、ID 算法或验收语义必须提升 protocol.WireVersion。新增 Kind 是
+; 加法扩展，旧 decoder 会按未知 Kind 拒绝，只有支持该 Kind 的双方才能使用。
 
 wire-version = 1
-wire-kind = 1..11
+wire-kind = 1..13
 
 ; ===================== 公共子结构 =====================
 
@@ -226,6 +227,25 @@ kind-11-available = [             ; 恰好五元，attachment 必须存在且逐
   content-payloads-cbor: bstr .cbor content-payloads,
 ]
 
+; ============ Kind 12 · PoolCloseRequest（Buyer → Seller）============
+
+kind-12-pool-close-request = [
+  wire-version,
+  12,
+  refund-template-txid: sha256,   ; 必须是首个业务字段
+  unsigned-close-transaction-raw: bstr .size (1..65536),
+  buyer-close-transaction-signature: signature, ; detached 交易 sighash 签名
+]
+
+; ============ Kind 13 · PoolCloseResponse（Seller → Buyer）============
+
+kind-13-pool-close-response = [
+  wire-version,
+  13,
+  refund-template-txid: sha256,   ; 必须是首个业务字段
+  complete-close-transaction-raw: bstr .size (1..65536), ; unlocking script 含双方交易签名
+]
+
 ; ===================== 顶层 union =====================
 ; 完整 wire 报文的唯一入口规则：decoder 先严格读外层 version/kind 对，再按
 ; 该 Kind 的唯一分支形状解码；任何未知 Kind 或错误版本都必须拒绝。
@@ -242,6 +262,8 @@ bitfs-wire-message =
   / kind-9-arbitration-response
   / kind-10-content-retrieval-request
   / kind-11-content-retrieval-response
+  / kind-12-pool-close-request
+  / kind-13-pool-close-response
 
 ; ===================== 编码纪律 =====================
 ;

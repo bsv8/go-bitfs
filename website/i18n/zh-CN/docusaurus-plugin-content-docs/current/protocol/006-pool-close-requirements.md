@@ -28,4 +28,4 @@ BitFS 的仲裁提交只执行卖方提供、且可验证的最终付款授权�
 
 仲裁者不是原始参与方，不能只收到一个交易 ID 或 session 标识就相信状态。所有仲裁证据必须绑定费用池的 `RefundTemplateTxID` 关联 ID，该 ID 从 Claim 的 canonical `refund_template_raw` 推导。卖方发起仲裁提交时，必须提供精确 source amount/script、RefundTx、Buyer 签名的 003 条款、Seller Claim 签名和已验证的 004 payload bundle；不得要求买方为本次争议签署 005，也不得在线上携带 OpeningProof、FundingTx、费率、previous state、candidate raw 或 Seller transaction signature。仲裁者独立验证 payload 托管事实，用同一确定性费用池构造器按其明确决定的正费用重建付费 candidate：先签署仲裁交易签名，再把 Claim ID、该费用和交易签名放入回执并通过 `SignWireDocument(1, 9, exact_receipt_cbor)` 签名。完整要求见 007。
 
-具体关闭报文和 BitFS 的未定边界见[费用池无条件关闭规范](006-unconditional-pool-close-spec.md)。
+关池 wire 报文与开池报文统一定义在[002 · 费用池开闭规范](002-pool-opening-spec.md)；关闭交易构造和关池专属验证边界见[费用池协商立即关闭规范](006-unconditional-pool-close-spec.md)。

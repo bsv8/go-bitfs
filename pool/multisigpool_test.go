@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/big"
 	"testing"
 	"time"
 
@@ -381,6 +382,31 @@ func mustUnsignedPaymentFixture(t *testing.T) (*MultisigPoolEngine, *OpeningProo
 		t.Fatal(err)
 	}
 	return engine, proof, unsigned, mustPoolTestKey(t, "11"), mustPoolTestKey(t, "22"), mustPoolTestKey(t, "33")
+}
+
+func TestTransactionVerificationRejectsHighSSignatures(t *testing.T) {
+	ctx := context.Background()
+	engine, proof, unsigned, buyer, _, _ := mustUnsignedPaymentFixture(t)
+	signature, err := NewBuyerPoolAdapter(engine, mustSigner(t, buyer)).SignBuyerPayment(ctx, unsigned, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.VerifyBuyerPayment(unsigned, signature, proof); err != nil {
+		t.Fatalf("valid low-S buyer signature rejected: %v", err)
+	}
+	parsed, err := ec.ParseDERSignature(signature[:len(signature)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	highS := new(big.Int).Sub(ec.S256().Params().N, parsed.S)
+	highDER, err := (&ec.Signature{R: parsed.R, S: highS}).ToDER()
+	if err != nil {
+		t.Fatal(err)
+	}
+	highSignature := append(highDER, signature[len(signature)-1])
+	if err := engine.VerifyBuyerPayment(unsigned, highSignature, proof); !protocol.IsCode(err, protocol.CodeInvalidSignature) {
+		t.Fatalf("high-S buyer signature error = %v, want invalid_signature", err)
+	}
 }
 
 func TestExportedPoolAPIsRejectProofBoundAdversaries(t *testing.T) {

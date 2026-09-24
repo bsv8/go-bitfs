@@ -19,7 +19,7 @@ import (
 	wire "github.com/bsv8/go-bitfs/wire"
 )
 
-// 本文件把 Kind 1–11 冻结为机器可读 manifest（wire/testdata/v1/
+// 本文件把 Kind 1–13 冻结为机器可读 manifest（wire/testdata/v1/
 // golden_messages.json）：exact hex、SHA-256 与关键子文档 typed ID。固定
 // signer 下逐字节相等是兼容边界的验收证据之一；-update 仅允许在单独给出
 // 协议级证据并经人工审查后重建，绝不能为让测试通过而顺手更新。
@@ -85,6 +85,23 @@ func buildGoldenManifest(t *testing.T) *goldenManifest {
 		t.Fatal(err)
 	}
 	add(wire.FundingTransactionDelivery, "funding_transaction_delivery", fundingDelivery, nil)
+	closeRequest, err := wire.EncodePoolCloseRequest(&pool.PoolCloseRequest{
+		RefundTemplateTxID:             pool.RefundTemplateTxID(bytes.Repeat([]byte{0x0c}, 32)),
+		UnsignedCloseTransactionRaw:    []byte{0xaa, 0xbb, 0xcc},
+		BuyerCloseTransactionSignature: []byte{0x30, 0x01, 0x02},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add(wire.PoolCloseRequest, "pool_close_request", closeRequest, nil)
+	closeResponse, err := wire.EncodePoolCloseResponse(&pool.PoolCloseResponse{
+		RefundTemplateTxID:          pool.RefundTemplateTxID(bytes.Repeat([]byte{0x0d}, 32)),
+		CompleteCloseTransactionRaw: []byte{0xdd, 0xee, 0xff},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add(wire.PoolCloseResponse, "pool_close_response", closeResponse, nil)
 
 	quoteArtifact, err := wire.EncodeFileQuote(quote)
 	if err != nil {
@@ -255,5 +272,73 @@ func TestGoldenMessagesManifestMatchesFrozenFile(t *testing.T) {
 		if got.ChildDocHex != want.ChildDocHex || got.ChildID != want.ChildID {
 			t.Fatalf("golden %s child document/id drifted", want.Name)
 		}
+	}
+}
+
+// TestPoolCloseGoldenMessagesRoundTrip consumes the frozen shared bytes directly:
+// Go must parse, decode, and re-encode the same vectors that TypeScript consumes.
+func TestPoolCloseGoldenMessagesRoundTrip(t *testing.T) {
+	path, err := conformance.FixturePath(".", "wire_manifest")
+	if err != nil {
+		t.Fatalf("resolve wire_manifest from fixtures/manifest.json: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frozen goldenManifest
+	if err := json.Unmarshal(raw, &frozen); err != nil {
+		t.Fatal(err)
+	}
+
+	wantNames := map[wire.Kind]string{
+		wire.PoolCloseRequest:  "pool_close_request",
+		wire.PoolCloseResponse: "pool_close_response",
+	}
+	for kind, name := range wantNames {
+		t.Run(name, func(t *testing.T) {
+			var entry *goldenManifestEntry
+			for index := range frozen.Entries {
+				if frozen.Entries[index].Name == name {
+					entry = &frozen.Entries[index]
+					break
+				}
+			}
+			if entry == nil {
+				t.Fatalf("shared wire manifest is missing %s", name)
+			}
+			message, err := hex.DecodeString(entry.ExactHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := hex.EncodeToString(hashBytes(message)); got != entry.SHA256 {
+				t.Fatalf("%s SHA-256 = %s, want %s", name, got, entry.SHA256)
+			}
+			artifact, err := wire.ParseAs(kind, message)
+			if err != nil {
+				t.Fatalf("parse shared %s vector: %v", name, err)
+			}
+			var encoded wire.Artifact
+			switch kind {
+			case wire.PoolCloseRequest:
+				decoded, err := wire.DecodePoolCloseRequest(artifact)
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, err = wire.EncodePoolCloseRequest(decoded)
+			case wire.PoolCloseResponse:
+				decoded, err := wire.DecodePoolCloseResponse(artifact)
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, err = wire.EncodePoolCloseResponse(decoded)
+			}
+			if err != nil {
+				t.Fatalf("re-encode shared %s vector: %v", name, err)
+			}
+			if !bytes.Equal(encoded.Bytes(), message) {
+				t.Fatalf("%s encoded bytes do not match the shared vector", name)
+			}
+		})
 	}
 }

@@ -2,12 +2,12 @@
   "format": "bitfs-cross-language-fixtures",
   "version": 1,
   "field_comments_zh": {
-    "wire_manifest": "Kind 1–11 的完整 wire CBOR 真值",
+    "wire_manifest": "Kind 1–13 的冻结 wire CBOR 向量；Kind 12 为买方费用池 ID、未签关闭交易和买方签名，Kind 13 为卖方费用池 ID 和完整关闭交易",
     "transaction_manifest": "费用池交易、签名、preimage 与 txid 真值",
     "protocol_schema": "Wire v1 CDDL 协议结构真值",
     "transport_profile": "Go/TypeScript 共用的 bitcoin-libp2p stream 配置真值",
     "invalid_wire": "两种语言必须返回相同稳定错误分类的畸形 wire 真值",
-    "role_manifest": "固定 Signer 下的角色纯函数真值、计价向量与语义拒绝向量"
+    "role_manifest": "固定 Signer 下的角色纯函数真值（含买方 Kind 12 请求、卖方 Kind 13 响应）、计价向量与语义拒绝向量"
   },
   "wire_manifest": "wire/testdata/v1/golden_messages.json",
   "transaction_manifest": "pool/testdata/v1/transactions.json",

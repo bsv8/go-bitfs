@@ -67,7 +67,7 @@ func parseHeaderKind(raw []byte) (Kind, error) {
 	if version != protocol.WireVersion {
 		return 0, protocol.Errorf("wire.Parse", protocol.CodeUnsupportedVersion, uint16(kindValue), "wire_version", "unsupported wire version %d", version)
 	}
-	if kindValue == 0 || kindValue > 11 {
+	if kindValue == 0 || kindValue > 13 {
 		return 0, protocol.Errorf("wire.Parse", protocol.CodeUnsupportedKind, uint16(kindValue), "wire_kind", "unsupported wire kind %d", kindValue)
 	}
 	return Kind(kindValue), nil
@@ -109,6 +109,12 @@ func decodeArtifact(artifact Artifact) error {
 		return err
 	case ContentRetrievalResponse:
 		_, err := DecodeContentRetrievalResponse(artifact)
+		return err
+	case PoolCloseRequest:
+		_, err := DecodePoolCloseRequest(artifact)
+		return err
+	case PoolCloseResponse:
+		_, err := DecodePoolCloseResponse(artifact)
 		return err
 	default:
 		return protocol.Errorf("wire.decodeArtifact", protocol.CodeUnsupportedKind, uint16(artifact.Kind()), "wire_kind", "unsupported wire kind %d", artifact.Kind())

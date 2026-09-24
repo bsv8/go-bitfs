@@ -125,6 +125,14 @@ type CompleteCloseInput struct {
 	BuyerSignature []byte
 }
 
+// CompleteCloseArtifactInput 携带 exact Kind 12 买方请求与卖方本地池证据。
+type CompleteCloseArtifactInput struct {
+	// Pool 是用于验证费用池归属与签署权限的普通证据包。
+	Pool SellerPoolEvidence
+	// RequestRaw 是买方发送的 exact Kind 12 关池请求。
+	RequestRaw []byte
+}
+
 // PrepareArbitrationInput 携带构造 exact Kind 8 所需的本地普通证据。
 type PrepareArbitrationInput struct {
 	// Pool 是当前池普通证据包。
@@ -329,19 +337,62 @@ func CompleteClose(ctx context.Context, facts protocol.Facts, input CompleteClos
 	if err != nil {
 		return nil, err
 	}
+	return completeCloseFromCheckpoint(ctx, facts, workflow, checkpoint, input.UnsignedRaw, input.BuyerSignature)
+}
+
+func completeCloseFromCheckpoint(ctx context.Context, facts protocol.Facts, workflow *workflow, checkpoint *poolCheckpoint, unsignedRaw, buyerSignature []byte) ([]byte, error) {
+	if err := pool.ValidateCloseTransactionRaw(unsignedRaw); err != nil {
+		return nil, err
+	}
 	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: checkpoint.opening.BuyerPublicKey, SellerPublicKey: checkpoint.opening.SellerPublicKey, ArbiterPublicKey: checkpoint.opening.ArbiterPublicKey})
 	if err != nil {
 		return nil, err
 	}
-	unsigned, err := engine.ParseUnsignedPayment(input.UnsignedRaw, checkpoint.opening)
+	unsigned, err := engine.ParseUnsignedPayment(unsignedRaw, checkpoint.opening)
 	if err != nil {
 		return nil, err
 	}
-	verified, err := workflow.CompleteClose(ctx, facts, closeCommand{Pool: checkpoint, Unsigned: unsigned, BuyerSignature: bytes.Clone(input.BuyerSignature)})
+	verified, err := workflow.CompleteClose(ctx, facts, closeCommand{Pool: checkpoint, Unsigned: unsigned, BuyerSignature: bytes.Clone(buyerSignature)})
 	if err != nil {
 		return nil, err
 	}
 	return verified.RawTx(), nil
+}
+
+// CompleteCloseArtifact 严格解析 Kind 12 并核对池关联 ID，验证买方交易签名后
+// 补签，返回包含双方签名完整交易的 exact Kind 13 Artifact；它不广播交易。
+func CompleteCloseArtifact(ctx context.Context, facts protocol.Facts, input CompleteCloseArtifactInput, signer protocol.Signer) (wire.Artifact, error) {
+	artifact, err := wire.ParseAs(wire.PoolCloseRequest, input.RequestRaw)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	request, err := wire.DecodePoolCloseRequest(artifact)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	checkpoint, err := internalPoolCheckpoint(input.Pool)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	details, err := pool.DeriveOpeningDetails(checkpoint.opening)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	if request.RefundTemplateTxID != details.RefundTemplateTxID {
+		return wire.Artifact{}, protocol.Errorf("seller.CompleteCloseArtifact", protocol.CodeStateConflict, 12, "refund_template_txid", "close request belongs to another pool")
+	}
+	workflow, err := newWorkflow(signer)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	completeRaw, err := completeCloseFromCheckpoint(ctx, facts, workflow, checkpoint, request.UnsignedCloseTransactionRaw, request.BuyerCloseTransactionSignature)
+	if err != nil {
+		return wire.Artifact{}, err
+	}
+	return wire.EncodePoolCloseResponse(&pool.PoolCloseResponse{
+		RefundTemplateTxID:          details.RefundTemplateTxID,
+		CompleteCloseTransactionRaw: completeRaw,
+	})
 }
 
 // PrepareArbitration 验证本地开池、买方授权与本方已发交付后，签署紧凑 Claim

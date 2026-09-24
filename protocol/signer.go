@@ -12,7 +12,7 @@ type SigningPurpose uint8
 
 const (
 	// PurposeWireMessage 是普通 wire 报文签名：Digest = SHA-256(exact
-	// WireSignatureInput)，WireKind 携带 1..11。
+	// WireSignatureInput)，WireKind 携带 1..13。
 	PurposeWireMessage SigningPurpose = 1
 	// PurposeTransaction 是 MultisigPool 交易签名：Digest 为固定 ForkID|All
 	// sighash digest，WireKind 固定为 0；sighash flag 由 pool 装配时添加，
@@ -39,7 +39,7 @@ func (p SigningPurpose) String() string {
 type SigningRequest struct {
 	// Purpose 声明业务目的（wire_message / transaction）；仅供密钥托管侧审计。
 	Purpose SigningPurpose
-	// WireKind 是普通 wire 签名的 Kind（1..11）；交易签名为 0。
+	// WireKind 是普通 wire 签名的 Kind（1..13）；交易签名为 0。
 	WireKind uint16
 	// Digest 是 SDK 构造好的 32 字节签名摘要；Signer 绝不能自行哈希。
 	Digest Digest32

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -13,8 +14,9 @@ import (
 
 // WireVersion 是 BitFS 对外暴露的唯一协议版本。所有完整 wire 报文都以
 // [WireVersion, wire_kind, ...] 开头；认证子文档不再重复携带版本与 Kind。
-// 任何改变 wire shape、签名对象、ID 算法、交易重建或验收语义的修改都必须
-// 提升该值；依赖库修复且协议可观察结果完全不变时不提升。
+// 改变已有 Kind 的 wire shape、签名对象、ID 算法、交易重建或验收语义都必须
+// 提升该值。新增独立 Kind 属于加法扩展，旧 decoder 会拒绝未知 Kind。
+// 依赖库修复且协议可观察结果完全不变时不提升该值。
 const WireVersion uint64 = 1
 
 // WireSignatureDomain 是统一普通消息签名上下文的固定域分隔字符串。
@@ -128,6 +130,25 @@ func verifyLowS(signature *ec.Signature) error {
 	return nil
 }
 
+// parseStrictLowSDER 限制 DER 必须与解析后重新编码的字节完全一致。
+func parseStrictLowSDER(raw []byte) (*ec.Signature, error) {
+	signature, err := ec.ParseDERSignature(raw)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := signature.ToDER()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, raw) {
+		return nil, errors.New("non-canonical DER signature")
+	}
+	if err := verifyLowS(signature); err != nil {
+		return nil, err
+	}
+	return signature, nil
+}
+
 // VerifyMessageSignature 是协议固定的普通消息签名验证入口：对 payload 做一次
 // SHA-256，解析 DER，强制 low-S，再做 ECDSA 验证。所有跨包验证路径都必须经
 // 过本函数或 VerifyWireDocument，禁止绕过 low-S 检查。
@@ -136,11 +157,8 @@ func VerifyMessageSignature(publicKey, payload, signature []byte) error {
 	if err != nil {
 		return err
 	}
-	sig, err := ec.ParseDERSignature(signature)
+	sig, err := parseStrictLowSDER(signature)
 	if err != nil {
-		return err
-	}
-	if err := verifyLowS(sig); err != nil {
 		return err
 	}
 	digest := sha256.Sum256(payload)
@@ -158,11 +176,8 @@ func VerifyDigestSignature(publicKey PublicKey, digest Digest32, signature []byt
 	if err != nil {
 		return err
 	}
-	sig, err := ec.ParseDERSignature(signature)
+	sig, err := parseStrictLowSDER(signature)
 	if err != nil {
-		return err
-	}
-	if err := verifyLowS(sig); err != nil {
 		return err
 	}
 	if !sig.Verify(digest[:], key) {

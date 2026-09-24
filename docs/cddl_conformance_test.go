@@ -3,6 +3,8 @@ package docs_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,18 +13,19 @@ import (
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/docs/cddltool"
+	"github.com/bsv8/go-bitfs/internal/conformance"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/wire"
 	"github.com/fxamacker/cbor/v2"
 )
 
 // TestSpecV1CddlParsesAndConforms drives the real CDDL parser over
-// spec/v1/wire-messages.cddl and then validates every wire Kind against the
-// published grammar:
+// spec/v1/wire-messages.cddl and validates the frozen message fixtures against
+// the published grammar:
 //
-//	positives: SDK-encoded messages for all eleven kinds plus the two Kind 11
-//	           branches must validate against the top-level bitfs-wire-message
-//	           union AND against their own kind rule;
+//	positives: frozen SDK-encoded messages for fixture-covered Kinds 1–13 plus
+//	           both Kind 11 branches must validate against the top-level
+//	           bitfs-wire-message union AND their own kind rule;
 //	negatives: wrong version, unknown kind, branch/attachment mismatches,
 //	           unknown discriminators, wrong ID/nonce/signature widths, empty
 //	           hash batches, zero arbiter amounts, and out-of-range sequences
@@ -44,7 +47,8 @@ func TestSpecV1CddlParsesAndConforms(t *testing.T) {
 		"kind-5-content-request", "kind-6-content-delivery",
 		"kind-7-payment-update", "kind-8-arbitration-request",
 		"kind-9-arbitration-response", "kind-10-content-retrieval-request",
-		"kind-11-content-retrieval-response", "bitfs-wire-message",
+		"kind-11-content-retrieval-response", "kind-12-pool-close-request",
+		"kind-13-pool-close-response", "bitfs-wire-message",
 	} {
 		found := false
 		for _, name := range spec.RuleNames() {
@@ -59,6 +63,7 @@ func TestSpecV1CddlParsesAndConforms(t *testing.T) {
 	}
 
 	f := newCddlFixtures(t)
+	useFrozenPoolCloseWireFixtures(t, f)
 	for _, positive := range f.positives {
 		if err := spec.Validate("bitfs-wire-message", positive.raw); err != nil {
 			t.Errorf("%s rejected by the top-level union: %v", positive.name, err)
@@ -179,7 +184,6 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		cddlEnc(t, []interface{}{uint64(1), uint64(3), cddlB(txid), signature}))
 	add("kind-4-funding-transaction-delivery", "kind-4-funding-transaction-delivery",
 		cddlEnc(t, []interface{}{uint64(1), uint64(4), cddlB(txid), cddlB(bytes.Repeat([]byte{5}, 128))}))
-
 	// ---- Kind 5 · ContentRequest（真实 SDK 编码器）。----
 	hashes, err := content.EncodeContentHashes([][]byte{bytes.Repeat([]byte{6}, 32)})
 	if err != nil {
@@ -301,7 +305,9 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 	wrongVersion := cddlEnc(t, []interface{}{uint64(2), uint64(5), cddlB(request.PaymentAuthorizationCBOR), signature})
 	out.negatives = append(out.negatives,
 		cdlMessage("wrong wire version", "", wrongVersion),
-		cdlMessage("unknown kind 12", "", cddlEnc(t, []interface{}{uint64(1), uint64(12), cddlB(hash)})),
+		cdlMessage("unknown kind 14", "", cddlEnc(t, []interface{}{uint64(1), uint64(14), cddlB(hash)})),
+		cdlMessage("empty Kind 12 close transaction", "", cddlEnc(t, []interface{}{uint64(1), uint64(12), cddlB(txid), cddlB(nil), signature})),
+		cdlMessage("empty Kind 13 close transaction", "", cddlEnc(t, []interface{}{uint64(1), uint64(13), cddlB(txid), cddlB(nil)})),
 		cdlMessage("unavailable branch carrying an attachment", "", append(kind11Unavailable, cddlB(payloadBundle)...)),
 		cdlMessage("available branch missing its attachment", "", cddlEnc(t, []interface{}{uint64(1), uint64(11), cddlB(available.ContentRetrievalResultCBOR), available.ArbiterContentRetrievalResultSignature})),
 		cdlMessage("unavailable result inside an attached five-element shell", "", func() []byte {
@@ -371,6 +377,52 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		}()),
 	)
 	return out
+}
+
+// useFrozenPoolCloseWireFixtures makes the CDDL acceptance check consume the
+// same exact Kind 12/13 bytes used by Go and TypeScript codec tests.
+func useFrozenPoolCloseWireFixtures(t *testing.T, fixtures *cddlFixtures) {
+	t.Helper()
+	type manifestEntry struct {
+		Kind     int    `json:"kind"`
+		ExactHex string `json:"exact_hex"`
+	}
+	var manifest struct {
+		Entries []manifestEntry `json:"entries"`
+	}
+	path, err := conformance.FixturePath(".", "wire_manifest")
+	if err != nil {
+		t.Fatalf("resolve wire_manifest from fixtures/manifest.json: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	rules := map[int]string{
+		12: "kind-12-pool-close-request",
+		13: "kind-13-pool-close-response",
+	}
+	for kind, rule := range rules {
+		found := false
+		for _, entry := range manifest.Entries {
+			if entry.Kind != kind {
+				continue
+			}
+			message, err := hex.DecodeString(entry.ExactHex)
+			if err != nil {
+				t.Fatalf("decode shared Kind %d fixture: %v", kind, err)
+			}
+			fixtures.positives[rule] = cdlMessage(rule, rule, message)
+			found = true
+			break
+		}
+		if !found {
+			t.Fatalf("shared wire manifest is missing Kind %d", kind)
+		}
+	}
 }
 
 func cdlMessage(name, rule string, raw []byte) cddlMessage {

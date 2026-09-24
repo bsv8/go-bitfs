@@ -62,9 +62,15 @@ func VerifyDelivery(ctx context.Context, facts protocol.Facts, input VerifyDeliv
 // candidate 原文与买方签名。
 func PrepareClose(ctx context.Context, facts protocol.Facts, input PrepareCloseInput, signer protocol.Signer) (unsignedRaw []byte, buyerSignature []byte, err error)
 
+// PrepareCloseArtifact 构造并编码 exact Kind 12；应用应先持久化 Artifact 再发送给卖方。
+func PrepareCloseArtifact(ctx context.Context, facts protocol.Facts, input PrepareCloseInput, signer protocol.Signer) (outbound wire.Artifact, err error)
+
 // VerifyCompletedClose 验证卖方完整关闭交易在给定开池证据下密码学、结构与
 // 交易关系全部正确，返回不可变 Complete 结果；不声称已广播或已确认。
 func VerifyCompletedClose(input VerifyCompletedCloseInput) (transaction *pool.VerifiedSignedTransaction, err error)
+
+// VerifyCompletedCloseArtifact 严格验收卖方 exact Kind 13、池关联 ID 与完整签名交易。
+func VerifyCompletedCloseArtifact(input VerifyCompletedCloseArtifactInput) (transaction *pool.VerifiedSignedTransaction, err error)
 
 // BuildMaturedRefund 在显式事实判定退款到期后合并双方退款签名，返回可广播的
 // verified refund transaction；是否广播由应用决定，不调用任何 Signer。
@@ -136,6 +142,9 @@ func CompletePayment(ctx context.Context, facts protocol.Facts, input CompletePa
 // CompleteClose 校验买方关闭 candidate 结构与角色签名后补签并合并完整交易；
 // 是否广播由应用决定。
 func CompleteClose(ctx context.Context, facts protocol.Facts, input CompleteCloseInput, signer protocol.Signer) (rawTransaction []byte, err error)
+
+// CompleteCloseArtifact 验收 exact Kind 12 并返回包含双方交易签名的 exact Kind 13；不广播。
+func CompleteCloseArtifact(ctx context.Context, facts protocol.Facts, input CompleteCloseArtifactInput, signer protocol.Signer) (outbound wire.Artifact, err error)
 
 // PrepareArbitration 验证本地开池、买方授权与本方已发交付后，签署紧凑 Claim
 // 证据并返回 exact Kind 8 与独立计算的 Claim ID。

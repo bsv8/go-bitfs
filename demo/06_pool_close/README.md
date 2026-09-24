@@ -1,49 +1,76 @@
 # 006：关闭费用池
 
-这一步演示在双方已经完成一次内容交付和累计付款后，买家发起协商关闭，卖家签名，买家验证出最终可广播的关闭交易。
+这一步演示双方在完成内容交付和累计付款后协商关闭费用池。买家发送 Kind 12，卖家签名后返回 Kind 13，买家验证完整交易。SDK 不广播交易。
 
-角色 workflow 只持有受约束 Signer。开池证据、基准付款状态和目标金额由 fixture（调用方应用）显式持有并传入；时间与高度来自显式 `Facts{Now, BlockHeight}`。demo 先完成一轮普通付款作为前提条件：卖方合并双方签名后返回完整付款交易和新的池 checkpoint，fixture 把它同步为双方的共享确认状态。006 的关闭交易构造与 005 的状态交易重建规则无关，关闭走独立的 final-sequence API。
+本离线示例将内存中构造并验证的付款交易放入双方证据的 `LatestPaymentRawTx`，只演示协议步骤，不表示节点已确认。实际接入时，调用方应填入最近一次已确认付款的交易原文，并保存每次发出的 exact Artifact，供网络重试和审计使用。
 
-运行：
+运行完整示例：
 
 ```sh
 go run ./demo/06_pool_close/01_close_pool
 ```
 
-核心调用顺序是：
+以下函数可以直接放入 Go 文件编译，展示 Kind 12/13 的角色 API 和到期退款 API：
 
 ```go
-latest := f.LatestPayment // 调用方保存的最新已确认付款状态
+package main
 
-// 买方：从调用方选定的基准状态构造未签名关闭 candidate 与买方分离签名。
-closePrep, err := buyerWorkflow.PrepareClose(ctx, facts, buyer.PrepareCloseCommand{
-    Pool:                       buyerPoolCheckpoint,
-    Base:                       latest, // SDK 不声称 base 是业务最新
-    TargetSellerAmountSatoshis: targetAmount,
-})
-// closePrep.Unsigned + closePrep.BuyerSignature 都要先持久化再发送给卖方。
+import (
+	"context"
 
-// 卖方：验证 candidate 结构、金额边界与买方签名后补签并合并；不广播。
-closed, err := sellerWorkflow.CompleteClose(ctx, facts, seller.CloseCommand{
-    Pool:           sellerPoolCheckpoint,
-    Unsigned:       closePrep.Unsigned,
-    BuyerSignature: closePrep.BuyerSignature,
-})
+	"github.com/bsv8/go-bitfs/buyer"
+	"github.com/bsv8/go-bitfs/protocol"
+	"github.com/bsv8/go-bitfs/seller"
+)
 
-// 买方：复核完整最终交易在给定 opening 下密码学、结构与交易关系全部正确。
-verified, err := buyerWorkflow.VerifyCompletedClose(ctx, buyer.VerifyCloseCommand{
-    Pool:  buyerPoolCheckpoint,
-    Close: closed,
-})
-finalTx := verified.RawTx() // 是否广播由调用方决定
+func negotiateClose(
+	ctx context.Context,
+	facts protocol.Facts,
+	buyerPool buyer.BuyerPoolEvidence,
+	sellerPool seller.SellerPoolEvidence,
+	targetAmount protocol.Satoshis,
+	buyerSigner protocol.Signer,
+	sellerSigner protocol.Signer,
+) ([]byte, error) {
+	// 买方构造 Kind 12，其中包含未签名关闭交易和买方交易签名。
+	kind12, err := buyer.PrepareCloseArtifact(ctx, facts, buyer.PrepareCloseInput{
+		Pool:                       buyerPool,
+		TargetSellerAmountSatoshis: targetAmount,
+	}, buyerSigner)
+	if err != nil {
+		return nil, err
+	}
+
+	// 卖方验证池 ID、候选交易和买方签名，补签后返回 Kind 13；不广播。
+	kind13, err := seller.CompleteCloseArtifact(ctx, facts, seller.CompleteCloseArtifactInput{
+		Pool:       sellerPool,
+		RequestRaw: kind12.Bytes(),
+	}, sellerSigner)
+	if err != nil {
+		return nil, err
+	}
+
+	// 买方复核池 ID 和完整交易。是否广播由应用决定。
+	verified, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+		Pool:        buyerPool,
+		ResponseRaw: kind13.Bytes(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return verified.RawTx(), nil
+}
+
+func buildMaturedRefund(facts protocol.Facts, evidence buyer.BuyerPoolEvidence) ([]byte, error) {
+	// 未到退款锁定时间时返回 CodeNotMatured；本函数不广播。
+	refund, err := buyer.BuildMaturedRefund(facts, evidence)
+	if err != nil {
+		return nil, err
+	}
+	return refund.RawTx(), nil
+}
 ```
 
-关闭交易把当前累计付款状态作为最终分配依据。与超时退款路径不同，这是双方已经同意当前余额后的 negotiated close。调试输出会显示费用池引用、关闭前累计金额、未签名交易、买家签名以及最终交易 hex 和交易 ID；demo 不会提交这笔交易，广播是调用方的职责。
+关闭交易以当前累计付款状态作为最终分配依据。超时退款则由 `buildMaturedRefund` 在显式事实表明退款锁定已到期后构造。交易是否提交由调用方负责。
 
-超时退款路径同样是显式事实驱动的纯计算：
-
-```go
-// 只有 facts 判定退款锁定已到期才会成功；未到期按 CodeNotMatured 拒绝。
-refund, err := buyerWorkflow.BuildMaturedRefund(ctx, facts, buyerPoolCheckpoint)
-broadcast(refund.RawTx()) // 调用方职责
-```
+完整示例中的证据更新、Artifact 持久化位置和调试输出见 [`01_close_pool/main.go`](01_close_pool/main.go)。

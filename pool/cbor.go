@@ -9,14 +9,28 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Kind 2/3/4/7 的统一 wire Kind 值。完整报文外壳固定为
+// Kind 2/3/4/7/12/13 的统一 wire Kind 值。完整报文外壳固定为
 // [protocol.WireVersion, wireKind, ...]；认证内容不再携带任何内层版本或 Kind。
 const (
 	wireKindRefundPresignRequest  uint64 = 2
 	wireKindRefundPresignResponse uint64 = 3
 	wireKindFundingDelivery       uint64 = 4
 	wireKindPaymentUpdate         uint64 = 7
+	wireKindPoolCloseRequest      uint64 = 12
+	wireKindPoolCloseResponse     uint64 = 13
+	maxPoolCloseTransactionBytes         = 64 * 1024
 )
+
+// decodePoolByteString 禁止 CBOR array 到 Go 字节数组的隐式转换。
+func decodePoolByteString(raw cbor.RawMessage, target any, kind uint16, field string) error {
+	if len(raw) == 0 || raw[0]>>5 != 2 {
+		return protocol.Errorf("pool.decodePoolByteString", protocol.CodeMalformedWire, kind, field, "field must be a CBOR byte string")
+	}
+	if err := poolDec.Unmarshal(raw, target); err != nil {
+		return protocol.Wrap(err, "pool.decodePoolByteString", protocol.CodeMalformedWire, kind, field)
+	}
+	return nil
+}
 
 var poolEnc cbor.EncMode
 var poolDec cbor.DecMode
@@ -254,10 +268,89 @@ func DecodeFundingTransactionDelivery(data []byte) (*FundingTransactionDelivery,
 	return cloneFundingTransactionDelivery(delivery), nil
 }
 
+// EncodePoolCloseRequest 校验并编码 Kind 12 买方请求。字段顺序固定为费用池
+// 关联 ID、未签名关闭交易和买方分离式交易签名；关联 ID 必须是首个业务字段。
+func EncodePoolCloseRequest(request *PoolCloseRequest) ([]byte, error) {
+	if err := ValidatePoolCloseRequest(request); err != nil {
+		return nil, err
+	}
+	return encodeWireEnvelope(wireKindPoolCloseRequest,
+		request.RefundTemplateTxID[:],
+		request.UnsignedCloseTransactionRaw,
+		request.BuyerCloseTransactionSignature,
+	)
+}
+
+// DecodePoolCloseRequest 严格解码固定五元 Kind 12 请求并复核确定性 CBOR。
+// 关闭交易与买方签名的密码学验证仍由卖方角色工作流负责。
+func DecodePoolCloseRequest(data []byte) (*PoolCloseRequest, error) {
+	fields, err := decodeWireEnvelope(data, wireKindPoolCloseRequest, 5)
+	if err != nil {
+		return nil, malformedWire("decode", err)
+	}
+	request := new(PoolCloseRequest)
+	if err := decodePoolByteString(fields[0], &request.RefundTemplateTxID, 12, "refund_template_txid"); err != nil {
+		return nil, protocol.Wrap(err, "pool.DecodePoolCloseRequest", protocol.CodeMalformedWire, 12, "refund_template_txid")
+	}
+	if err := decodePoolByteString(fields[1], &request.UnsignedCloseTransactionRaw, 12, "unsigned_close_transaction_raw"); err != nil {
+		return nil, protocol.Wrap(err, "pool.DecodePoolCloseRequest", protocol.CodeMalformedWire, 12, "unsigned_close_transaction_raw")
+	}
+	if err := decodePoolByteString(fields[2], &request.BuyerCloseTransactionSignature, 12, "buyer_close_transaction_signature"); err != nil {
+		return nil, protocol.Wrap(err, "pool.DecodePoolCloseRequest", protocol.CodeMalformedWire, 12, "buyer_close_transaction_signature")
+	}
+	if err := ValidatePoolCloseRequest(request); err != nil {
+		return nil, err
+	}
+	canonical, err := EncodePoolCloseRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, data) {
+		return nil, nonCanonical("pool close request_cbor", "pool close request is not deterministically encoded")
+	}
+	return clonePoolCloseRequest(request), nil
+}
+
+// EncodePoolCloseResponse 校验并编码 Kind 13 卖方响应。完整交易的解锁脚本
+// 携带双方签名；接收方仍须结合自己的开池证据验证交易。
+func EncodePoolCloseResponse(response *PoolCloseResponse) ([]byte, error) {
+	if err := ValidatePoolCloseResponse(response); err != nil {
+		return nil, err
+	}
+	return encodeWireEnvelope(wireKindPoolCloseResponse,
+		response.RefundTemplateTxID[:], response.CompleteCloseTransactionRaw)
+}
+
+// DecodePoolCloseResponse 严格解码固定四元 Kind 13 响应并复核确定性 CBOR。
+func DecodePoolCloseResponse(data []byte) (*PoolCloseResponse, error) {
+	fields, err := decodeWireEnvelope(data, wireKindPoolCloseResponse, 4)
+	if err != nil {
+		return nil, malformedWire("decode", err)
+	}
+	response := new(PoolCloseResponse)
+	if err := decodePoolByteString(fields[0], &response.RefundTemplateTxID, 13, "refund_template_txid"); err != nil {
+		return nil, protocol.Wrap(err, "pool.DecodePoolCloseResponse", protocol.CodeMalformedWire, 13, "refund_template_txid")
+	}
+	if err := decodePoolByteString(fields[1], &response.CompleteCloseTransactionRaw, 13, "complete_close_transaction_raw"); err != nil {
+		return nil, protocol.Wrap(err, "pool.DecodePoolCloseResponse", protocol.CodeMalformedWire, 13, "complete_close_transaction_raw")
+	}
+	if err := ValidatePoolCloseResponse(response); err != nil {
+		return nil, err
+	}
+	canonical, err := EncodePoolCloseResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, data) {
+		return nil, nonCanonical("pool close response_cbor", "pool close response is not deterministically encoded")
+	}
+	return clonePoolCloseResponse(response), nil
+}
+
 // EncodeOpeningProof validates and encodes the complete opening proof. IDs,
 // the fixed output index, amount, and locking script are deliberately omitted
 // because they are derived from the transaction evidence and participant keys.
-// The opening proof is application-local evidence, not one of the eleven wire
+// The opening proof is application-local evidence, not one of the thirteen wire
 // kinds; its encoding carries no version or kind of its own.
 func EncodeOpeningProof(proof *OpeningProof) ([]byte, error) {
 	if err := ValidateOpeningProof(proof); err != nil {
@@ -385,6 +478,42 @@ func ValidateFundingTransactionDelivery(delivery *FundingTransactionDelivery) er
 	return nil
 }
 
+// ValidatePoolCloseRequest 校验 Kind 12 的字段长度和必填字节串；不验证候选
+// 交易或买方签名的密码学正确性。
+func ValidatePoolCloseRequest(request *PoolCloseRequest) error {
+	if request == nil {
+		return protocol.Errorf("pool.ValidatePoolCloseRequest", protocol.CodeMalformedWire, 12, "pool_close_request", "close request is required")
+	}
+	if len(request.UnsignedCloseTransactionRaw) == 0 || len(request.UnsignedCloseTransactionRaw) > maxPoolCloseTransactionBytes {
+		return protocol.Errorf("pool.ValidatePoolCloseRequest", protocol.CodeMalformedWire, 12, "unsigned_close_transaction_raw", "unsigned close transaction is required")
+	}
+	if len(request.BuyerCloseTransactionSignature) == 0 {
+		return protocol.Errorf("pool.ValidatePoolCloseRequest", protocol.CodeMalformedWire, 12, "buyer_close_transaction_signature", "buyer close transaction signature is required")
+	}
+	if len(request.BuyerCloseTransactionSignature) > 256 {
+		return protocol.Errorf("pool.ValidatePoolCloseRequest", protocol.CodeMalformedWire, 12, "buyer_close_transaction_signature", "signature exceeds 256 bytes")
+	}
+	if request.RefundTemplateTxID == (RefundTemplateTxID{}) {
+		return protocol.Errorf("pool.ValidatePoolCloseRequest", protocol.CodeInvalidEvidence, 12, "refund_template_txid", "must not be all zero")
+	}
+	return nil
+}
+
+// ValidatePoolCloseResponse 校验 Kind 13 的字段长度和必填交易原文；不验证
+// 交易签名或费用池归属。
+func ValidatePoolCloseResponse(response *PoolCloseResponse) error {
+	if response == nil {
+		return protocol.Errorf("pool.ValidatePoolCloseResponse", protocol.CodeMalformedWire, 13, "pool_close_response", "close response is required")
+	}
+	if len(response.CompleteCloseTransactionRaw) == 0 || len(response.CompleteCloseTransactionRaw) > maxPoolCloseTransactionBytes {
+		return protocol.Errorf("pool.ValidatePoolCloseResponse", protocol.CodeMalformedWire, 13, "complete_close_transaction_raw", "complete close transaction is required")
+	}
+	if response.RefundTemplateTxID == (RefundTemplateTxID{}) {
+		return protocol.Errorf("pool.ValidatePoolCloseResponse", protocol.CodeInvalidEvidence, 13, "refund_template_txid", "must not be all zero")
+	}
+	return nil
+}
+
 // ValidateOpeningProof checks role keys and raw refund evidence. It is
 // structural; VerifyOpening performs transaction and signature relationship
 // checks.
@@ -449,6 +578,27 @@ func cloneFundingTransactionDelivery(delivery *FundingTransactionDelivery) *Fund
 		return nil
 	}
 	return &FundingTransactionDelivery{RefundTemplateTxID: delivery.RefundTemplateTxID, FundingTransactionRaw: append([]byte(nil), delivery.FundingTransactionRaw...)}
+}
+
+func clonePoolCloseRequest(request *PoolCloseRequest) *PoolCloseRequest {
+	if request == nil {
+		return nil
+	}
+	return &PoolCloseRequest{
+		RefundTemplateTxID:             request.RefundTemplateTxID,
+		UnsignedCloseTransactionRaw:    append([]byte(nil), request.UnsignedCloseTransactionRaw...),
+		BuyerCloseTransactionSignature: append([]byte(nil), request.BuyerCloseTransactionSignature...),
+	}
+}
+
+func clonePoolCloseResponse(response *PoolCloseResponse) *PoolCloseResponse {
+	if response == nil {
+		return nil
+	}
+	return &PoolCloseResponse{
+		RefundTemplateTxID:          response.RefundTemplateTxID,
+		CompleteCloseTransactionRaw: append([]byte(nil), response.CompleteCloseTransactionRaw...),
+	}
 }
 
 func cloneOpeningProof(proof *OpeningProof) *OpeningProof {

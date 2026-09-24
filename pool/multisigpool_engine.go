@@ -190,6 +190,9 @@ func (adapter *BuyerPoolAdapter) BuildRefundPresignRequest(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+	if err := engine.verifyTransactionSignature(state, "buyer", sig); err != nil {
+		return nil, err
+	}
 	if ok, err := mp.VerifyArbitratedPoolBuyerSignature(state, output.Satoshis, engine.roles(), sig); err != nil || !ok {
 		if err != nil {
 			return nil, err
@@ -256,6 +259,9 @@ func (engine *MultisigPoolEngine) VerifySellerRefundSignature(request *RefundPre
 	if err != nil {
 		return err
 	}
+	if err := engine.verifyTransactionSignature(terms.state, "seller", signature); err != nil {
+		return err
+	}
 	ok, err := mp.VerifyArbitratedPoolSellerSignature(terms.state, terms.poolOutputSatoshis, engine.roles(), signature)
 	if err != nil || !ok {
 		if err != nil {
@@ -279,6 +285,9 @@ func (engine *MultisigPoolEngine) validateRefundPresignRequestAndBuyer(request *
 	}
 	terms, err := engine.deriveRefundPresignTerms(request)
 	if err != nil {
+		return nil, err
+	}
+	if err := engine.verifyTransactionSignature(terms.state, "buyer", request.BuyerRefundTransactionSignature); err != nil {
 		return nil, err
 	}
 	ok, err := mp.VerifyArbitratedPoolBuyerSignature(terms.state, terms.poolOutputSatoshis, engine.roles(), request.BuyerRefundTransactionSignature)
@@ -424,12 +433,18 @@ func (engine *MultisigPoolEngine) VerifyOpening(proof *OpeningProof) error {
 	if err := engine.verifyOpeningState(refund, details.FundingTxID[:], PoolOutputIndex, details.PoolOutputSatoshis, proof.MinerFeeRateSatoshisPerKilobyte); err != nil {
 		return err
 	}
+	if err := engine.verifyTransactionSignature(refund, "buyer", proof.BuyerRefundTransactionSignature); err != nil {
+		return err
+	}
 	ok, err := mp.VerifyArbitratedPoolBuyerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.BuyerRefundTransactionSignature)
 	if err != nil || !ok {
 		if err != nil {
 			return err
 		}
 		return invalid("buyer refund signature is invalid")
+	}
+	if err := engine.verifyTransactionSignature(refund, "seller", proof.SellerRefundTransactionSignature); err != nil {
+		return err
 	}
 	ok, err = mp.VerifyArbitratedPoolSellerSignature(refund, details.PoolOutputSatoshis, engine.roles(), proof.SellerRefundTransactionSignature)
 	if err != nil || !ok {
@@ -655,6 +670,9 @@ func (engine *MultisigPoolEngine) verifyCanonicalState(state *tx.Transaction, pr
 	}
 	if sequence == 0 {
 		return invalid("payment sequence is invalid")
+	}
+	if sequence == finalPoolSequence && lockTime != finalPoolSequence {
+		return protocol.Errorf("pool.verifyCanonicalState", protocol.CodeInvalidEvidence, 0, "lock_time", "final close must use the final nLockTime")
 	}
 	previous, err := parseCanonicalTransaction(state.Bytes())
 	if err != nil {
@@ -969,6 +987,9 @@ func (engine *MultisigPoolEngine) verifyDetached(unsigned *UnsignedPayment, sig 
 	if err != nil {
 		return err
 	}
+	if err := engine.verifyTransactionSignature(state, role, sig); err != nil {
+		return err
+	}
 	var ok bool
 	switch role {
 	case "buyer":
@@ -981,10 +1002,49 @@ func (engine *MultisigPoolEngine) verifyDetached(unsigned *UnsignedPayment, sig 
 		return invalid("unsupported detached signature role")
 	}
 	if err != nil {
-		return err
+		return protocol.Wrap(err, "pool.verifyDetached", protocol.CodeInvalidSignature, 0, role+"_transaction_signature")
 	}
 	if !ok {
-		return invalid(role + " transaction signature is invalid")
+		return protocol.Errorf("pool.verifyDetached", protocol.CodeInvalidSignature, 0, role+"_transaction_signature", "%s transaction signature is invalid", role)
+	}
+	return nil
+}
+
+// verifyTransactionSignature enforces the protocol's one sighash flag and
+// strict low-S DER rule before MultisigPool's role verifier is called.
+func (engine *MultisigPoolEngine) verifyTransactionSignature(state *tx.Transaction, role string, signature []byte) error {
+	const op = "pool.verifyTransactionSignature"
+	field := role + "_transaction_signature"
+	flag := sighash.Flag(sighash.ForkID | sighash.All)
+	if engine == nil || state == nil || len(state.Inputs) != 1 || state.Inputs[0] == nil || len(signature) < 2 || signature[len(signature)-1] != byte(flag) {
+		return protocol.Errorf(op, protocol.CodeInvalidSignature, 0, field, "transaction signature must use DER with the fixed ForkID|All flag")
+	}
+	digestBytes, err := state.CalcInputSignatureHash(0, flag)
+	if err != nil {
+		return protocol.Wrap(err, op, protocol.CodeInvalidSignature, 0, field)
+	}
+	if len(digestBytes) != sha256Size {
+		return protocol.Errorf(op, protocol.CodeInvalidSignature, 0, field, "transaction sighash digest must be 32 bytes")
+	}
+	var digest protocol.Digest32
+	copy(digest[:], digestBytes)
+	var publicKey []byte
+	switch role {
+	case "buyer":
+		publicKey = engine.buyer.Compressed()
+	case "seller":
+		publicKey = engine.seller.Compressed()
+	case "arbiter":
+		publicKey = engine.arbiter.Compressed()
+	default:
+		return protocol.Errorf(op, protocol.CodeInvalidSignature, 0, field, "unsupported transaction signature role")
+	}
+	key, err := protocol.PublicKeyFromBytes(publicKey)
+	if err == nil {
+		err = protocol.VerifyDigestSignature(key, digest, signature[:len(signature)-1])
+	}
+	if err != nil {
+		return protocol.Wrap(err, op, protocol.CodeInvalidSignature, 0, field)
 	}
 	return nil
 }
@@ -1071,6 +1131,12 @@ func (engine *MultisigPoolEngine) mergeBuyerSeller(unsigned *UnsignedPayment, bu
 	if err != nil {
 		return nil, err
 	}
+	if err := engine.verifyTransactionSignature(state, "buyer", buyerSignature); err != nil {
+		return nil, err
+	}
+	if err := engine.verifyTransactionSignature(state, "seller", sellerSignature); err != nil {
+		return nil, err
+	}
 	details, err := engine.deriveOpeningDetails(proof)
 	if err != nil {
 		return nil, err
@@ -1100,6 +1166,12 @@ func (engine *MultisigPoolEngine) mergeSellerArbiter(unsigned *UnsignedPayment, 
 	}
 	state, err := engine.validateUnsignedPayment(unsigned, proof)
 	if err != nil {
+		return nil, err
+	}
+	if err := engine.verifyTransactionSignature(state, "seller", sellerSignature); err != nil {
+		return nil, err
+	}
+	if err := engine.verifyTransactionSignature(state, "arbiter", arbiterSignature); err != nil {
 		return nil, err
 	}
 	if unsigned.PaymentSequence == finalPoolSequence {
@@ -1263,6 +1335,25 @@ func (engine *MultisigPoolEngine) verifyComplete(state *PaymentState, proof *Ope
 	if err != nil || len(sigs) != 2 {
 		return invalid("complete payment must contain exactly two signatures")
 	}
+	roles := make(map[string]bool, 2)
+	unsignedState := clearUnlocking(parsed)
+	for _, signature := range sigs {
+		role, err := engine.signatureRole(unsignedState, signature)
+		if err != nil {
+			return err
+		}
+		if roles[role] {
+			return protocol.Errorf("pool.verifyComplete", protocol.CodeInvalidSignature, 0, "transaction_signature", "duplicate %s transaction signature", role)
+		}
+		roles[role] = true
+	}
+	if arbitration {
+		if !roles["seller"] || !roles["arbiter"] {
+			return protocol.Errorf("pool.verifyComplete", protocol.CodeInvalidSignature, 0, "transaction_signature", "payment signatures must be Seller+Arbiter")
+		}
+	} else if !roles["buyer"] || !roles["seller"] {
+		return protocol.Errorf("pool.verifyComplete", protocol.CodeInvalidSignature, 0, "transaction_signature", "payment signatures must be Buyer+Seller")
+	}
 	unsigned := *unsignedFromTx(parsed, details, parsed.Inputs[0].SequenceNumber)
 	unsigned.RefundTemplateTxID = state.RefundTemplateTxID
 	var rebuilt *tx.Transaction
@@ -1326,32 +1417,34 @@ func (engine *MultisigPoolEngine) signatureRole(unsigned *tx.Transaction, sig []
 	}
 	roles := engine.roles()
 	poolAmount := unsigned.Inputs[0].SourceTxOutput().Satoshis
-	checks := []struct {
-		name string
-		ok   func() (bool, error)
-	}{
-		{name: "buyer", ok: func() (bool, error) {
-			return mp.VerifyArbitratedPoolBuyerSignature(unsigned, poolAmount, roles, sig)
-		}},
-		{name: "seller", ok: func() (bool, error) {
-			return mp.VerifyArbitratedPoolSellerSignature(unsigned, poolAmount, roles, sig)
-		}},
-		{name: "arbiter", ok: func() (bool, error) {
-			return mp.VerifyArbitratedPoolArbiterSignature(unsigned, poolAmount, roles, sig)
-		}},
-	}
+	checks := []string{"buyer", "seller", "arbiter"}
 	var match string
-	for _, check := range checks {
-		ok, _ := check.ok()
+	for _, role := range checks {
+		if err := engine.verifyTransactionSignature(unsigned, role, sig); err != nil {
+			continue
+		}
+		var ok bool
+		var err error
+		switch role {
+		case "buyer":
+			ok, err = mp.VerifyArbitratedPoolBuyerSignature(unsigned, poolAmount, roles, sig)
+		case "seller":
+			ok, err = mp.VerifyArbitratedPoolSellerSignature(unsigned, poolAmount, roles, sig)
+		case "arbiter":
+			ok, err = mp.VerifyArbitratedPoolArbiterSignature(unsigned, poolAmount, roles, sig)
+		}
+		if err != nil {
+			continue
+		}
 		if ok {
 			if match != "" {
-				return "", invalid("payment signature matches multiple pool roles")
+				return "", protocol.Errorf("pool.signatureRole", protocol.CodeInvalidSignature, 0, "transaction_signature", "payment signature matches multiple pool roles")
 			}
-			match = check.name
+			match = role
 		}
 	}
 	if match == "" {
-		return "", invalid("payment signature does not match a pool role")
+		return "", protocol.Errorf("pool.signatureRole", protocol.CodeInvalidSignature, 0, "transaction_signature", "transaction signature does not match a low-S pool role signature")
 	}
 	return match, nil
 }

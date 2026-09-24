@@ -28,15 +28,18 @@ BitFS 应用需要协商的第二个协议版本。
 
 - 交易构造、序列号、locktime、输出顺序、金额或矿工费计算；
 - 交易 sighash、签名合并或脚本语义；
-- wire 字节、确定性重建结果或协议验收规则。
+- 已有 Kind 的 wire 字节、确定性重建结果或协议验收规则。
 
 如果只是依赖库修复或实现优化，且上述协议可观察结果完全不变，则不提升
 `WireVersion`。
 
+新增独立 Kind 是加法扩展，不改变任何已有 Kind 的外形；旧 decoder 会把新 Kind
+按 `unsupported_kind` 拒绝，只有双方都支持该 Kind 时才能交换对应报文。
+
 本设计统一规定：
 
 1. 所有完整 wire 报文都以 `[1, wire_kind, ...]` 开头。
-2. `wire_kind` 只使用 `1..11`，不再同时存在 wire Kind `3/4` 与内层 Kind `13/14`。
+2. `wire_kind` 使用 `1..13`，不再同时存在 wire Kind `3/4` 与内层 Kind `13/14`。
 3. 认证 CBOR 文档只包含业务字段，不重复外层已经携带的版本和 Kind。
 4. 普通消息签名通过唯一的 `SignWireDocument` 将外层版本、Kind 与 exact 认证文档纳入
    统一签名上下文，禁止跨协议、跨版本、跨 Kind 解释签名。
@@ -218,11 +221,13 @@ arbitration_claim_id = SHA-256(arbitration_claim_cbor)
 | 9 | `ArbitrationResponse` | Arbiter → Seller | 007 |
 | 10 | `ContentRetrievalRequest` | Buyer → Arbiter | 008 |
 | 11 | `ContentRetrievalResponse` | Arbiter → Buyer | 008 |
+| 12 | `PoolCloseRequest` | Buyer → Seller | 006 |
+| 13 | `PoolCloseResponse` | Seller → Buyer | 006 |
 
-002 的三个子步骤继续保持三个独立 wire Kind。006 继续复用交易构造与签名 API，
-不增加 wire Kind。
+002 开池与 006 关池都在 wire 层定义买卖双方交换的交易材料；OpeningProof 和
+池 checkpoint 仍是应用侧本地证据结构，不是 wire Kind。
 
-### 4.1 十一种完整 wire 外壳
+### 4.1 十三种完整 wire 外壳
 
 ```text
 Kind 1  = [1, 1,
@@ -275,6 +280,15 @@ Kind 11 available = [1, 11,
   content_retrieval_result_cbor,
   arbiter_content_retrieval_result_signature,
   content_payloads_cbor]
+
+Kind 12 = [1, 12,
+  refund_template_txid,
+  unsigned_close_transaction_raw,
+  buyer_close_transaction_signature]
+
+Kind 13 = [1, 13,
+  refund_template_txid,
+  complete_close_transaction_raw]
 ```
 
 完整外壳负责传输和严格分发；所有 `*_cbor` 认证文档的精确内容、ID 与签名对象在后文定义。
@@ -797,6 +811,25 @@ script 恢复 Buyer 公钥验证 Kind 10。这是数据依赖决定的事实，�
 不能伪装成结构合法的 `unavailable` 响应。`not_received / not_ready / gone` 则是 Kind 11
 内经过 Arbiter 签名的正常协议结果。
 
+## Kind 12 / 13 · 006 协商关池
+
+Kind 12 是 Buyer 发给 Seller 的固定五元数组；`refund_template_txid` 是首个业务字段，
+`unsigned_close_transaction_raw` 是最终序号的未签名关闭交易，
+`buyer_close_transaction_signature` 是买方对该交易的分离式交易签名。该签名覆盖
+MultisigPool 交易 sighash，不是 `SignWireDocument` 消息签名。
+
+Kind 13 是 Seller 返回 Buyer 的固定四元数组。`refund_template_txid` 仍是首个业务字段；
+`complete_close_transaction_raw` 是包含买卖双方签名的完整交易原文。两个 Kind 的
+交易原文各不得超过 65536 字节；交易解析器在分配交易对象前检查 CompactSize
+数量与脚本长度，避免短报文声明巨量元素。严格 decoder 只验证 CBOR 外形、字段
+类型与关联 ID 的长度/非零；Seller 和 Buyer 的角色
+API 分别按本地 OpeningProof 验证池归属、candidate 与交易签名。Artifact 本身不声称
+节点已接受或确认交易，广播仍由应用负责。
+
+Go 与 TypeScript 的交易解析器目前各对输入和输出设置 10,000 个元素的实现资源
+上限；该上限适用于包括 funding 在内的所有传入交易，因此超过上限的链上有效
+交易也不能作为本 SDK 的开池证据。它是当前实现能力边界，不是比特币共识规则。
+
 ---
 
 ## 16. 完整签名矩阵
@@ -806,6 +839,8 @@ script 恢复 Buyer 公钥验证 Kind 10。这是数据依赖决定的事实，�
 | `file_quote_terms_cbor` | Seller | `WireSignatureInput(1, 1, file_quote_terms_cbor)` | `SignWireDocument` |
 | refund transaction | Buyer | refund transaction sighash | 交易签名 |
 | refund transaction | Seller | refund transaction sighash | 交易签名 |
+| close transaction | Buyer | unsigned close transaction sighash | 交易签名 |
+| close transaction | Seller | unsigned close transaction sighash | 交易签名 |
 | `payment_authorization_cbor` | Buyer | `WireSignatureInput(1, 5, payment_authorization_cbor)` | `SignWireDocument` |
 | `content_delivery_cbor` | Seller | `WireSignatureInput(1, 6, content_delivery_cbor)` | `SignWireDocument` |
 | payment transaction | Buyer | rebuilt transaction sighash | 交易签名 |
@@ -890,7 +925,7 @@ CDDL 真值是 `spec/v1/wire-messages.cddl`。
 - 仲裁费用是 Arbiter 状态交易中的正数绝对分配；
 - 008 对“不可交付/可交付”都返回 Arbiter 签名的 Kind 11；可交付分支只取回托管内容，
   不替 Buyer 关池，不产生 005，不声明交易已经上链；
-- 006 继续通过交易 API 完成，不新增 wire Kind；
+- 006 关池通过 Kind 12/13 交换关池请求和完整关闭交易，报文定义与开池一起归属 002；
 - 广播、数据库、retention、TLS、队列和重试策略仍属于应用层。
 
 ---

@@ -7,7 +7,7 @@ strict deterministic CBOR，保留离线验签所需的 exact signed bytes，并
 目录与字段含义：
 
 - `protocol/`、`content/`、`pool/`、`buyer/`、`seller/`、`arbiter/`、`wire/`：Go SDK。
-- `typescript/src/`：TypeScript 的 Artifact、Kind 1–11 typed encoder、签名域和网络绑定。
+- `typescript/src/`：TypeScript 的 Artifact、Kind 1–13 typed encoder、签名域和网络绑定。
 - `fixtures/manifest.json`：两种语言测试的唯一真值索引；不能在语言目录复制期望值。
 - `transport/` 与 `typescript/src/transport.ts`：`bitcoin-libp2p` uvarint stream 适配。
 - `BITFS_PROTOCOL_ID` / `transport.ProtocolID`：libp2p stream 协议标识 `/bitfs/wire/1.0.0`。
@@ -24,7 +24,7 @@ The protocol is documented in the multilingual [Docusaurus site](website/README.
 | Step | Specification | Requirements and intent |
 |---:|---|---|
 | 001 | [Quote credential](website/docs/protocol/001-quote-credential-spec.md) | [Requirements](website/docs/protocol/001-quote-credential-requirements.md) |
-| 002 | [Pool opening](website/docs/protocol/002-pool-opening-spec.md) | [Requirements](website/docs/protocol/002-pool-opening-requirements.md) |
+| 002 | [Pool opening and closing](website/docs/protocol/002-pool-opening-spec.md) | [Requirements](website/docs/protocol/002-pool-opening-requirements.md) |
 | 003 | [Content request](website/docs/protocol/003-content-request-spec.md) | [Requirements](website/docs/protocol/003-content-request-requirements.md) |
 | 004 | [Content delivery](website/docs/protocol/004-content-delivery-spec.md) | [Requirements](website/docs/protocol/004-content-delivery-requirements.md) |
 | 005 | [Cumulative payment](website/docs/protocol/005-cumulative-payment-spec.md) | [Requirements](website/docs/protocol/005-cumulative-payment-requirements.md) |

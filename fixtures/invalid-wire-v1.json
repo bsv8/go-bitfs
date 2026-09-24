@@ -5,14 +5,14 @@
     "name": "测试用例稳定名称",
     "hex": "完整不可信输入的十六进制字节",
     "error_code": "两种语言都必须返回的稳定错误分类",
-    "coverage": "覆盖外壳、Kind 1–11 深层字段、证据绑定和规范编码，新增 Kind 时必须同步扩展"
+    "coverage": "覆盖外壳、Kind 1–11 深层字段、证据绑定和规范编码；Kind 12/13 结构以当前 wire schema 为准"
   },
   "cases": [
     { "name": "empty", "hex": "", "error_code": "malformed_wire" },
     { "name": "top-level-map", "hex": "a0", "error_code": "malformed_wire" },
     { "name": "non-canonical-version", "hex": "8418010358200303030303030303030303030303030303030303030303030303030303030303420708", "error_code": "non_canonical" },
     { "name": "unsupported-version", "hex": "83020140", "error_code": "unsupported_version" },
-    { "name": "unsupported-kind", "hex": "83010c40", "error_code": "unsupported_kind" },
+    { "name": "unsupported-kind", "hex": "83010e40", "error_code": "unsupported_kind" },
 
     { "name": "kind-1-outer-extra-field", "hex": "86010100000000", "error_code": "malformed_wire" },
     { "name": "kind-2-outer-extra-field", "hex": "89010200000000000000", "error_code": "malformed_wire" },

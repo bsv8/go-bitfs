@@ -106,7 +106,7 @@ func TestSpecV1CddlStructuralIntegrity(t *testing.T) {
 	// 关键真值锚点：防止结构性 lint 通过但语义漂移。
 	required := []string{
 		"wire-version = 1",
-		"wire-kind = 1..11",
+		"wire-kind = 1..13",
 		"content-hashes = [1*64 sha256]",
 		"content-payloads = [1*64 payload]",
 		"payload = bstr .size (1..262144)",

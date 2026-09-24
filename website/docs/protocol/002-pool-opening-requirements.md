@@ -27,4 +27,4 @@ Each party — buyer and seller — persists the transactions, source output des
 
 Pool opening produces a stable `RefundTemplateTxID` — the canonical transaction ID of the unsigned presigned RefundTx — that serves as the fee pool correlation ID. From spec 003 onward, the funding transaction and refund transaction are NOT re-transmitted; instead, the current cumulative payment sequence number combined with `RefundTemplateTxID` references the persisted pool state.
 
-For the detailed transaction sequence, messages, and SDK hooks, see [Fee Pool Opening Specification](002-pool-opening-spec.md).
+For the detailed pool lifecycle transaction sequence, messages, and SDK hooks, see [Fee Pool Opening and Closing Specification](002-pool-opening-spec.md).

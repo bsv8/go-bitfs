@@ -23,6 +23,16 @@ func CloneFundingTransactionDelivery(delivery *FundingTransactionDelivery) *Fund
 	return cloneFundingTransactionDelivery(delivery)
 }
 
+// ClonePoolCloseRequest 返回独立的 Kind 12 请求副本，并复制交易与签名字节。
+func ClonePoolCloseRequest(request *PoolCloseRequest) *PoolCloseRequest {
+	return clonePoolCloseRequest(request)
+}
+
+// ClonePoolCloseResponse 返回独立的 Kind 13 响应副本，并复制完整交易字节。
+func ClonePoolCloseResponse(response *PoolCloseResponse) *PoolCloseResponse {
+	return clonePoolCloseResponse(response)
+}
+
 // ClonePaymentUpdate returns an independent copy of PaymentUpdate, including copies of mutable byte slices.
 func ClonePaymentUpdate(update *PaymentUpdate) *PaymentUpdate {
 	return clonePaymentUpdate(update)

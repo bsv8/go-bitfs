@@ -111,3 +111,43 @@ func TestZeroSNeverAccepted(t *testing.T) {
 		t.Fatalf("zero-S verification result = %v", err)
 	}
 }
+
+func TestDERWithTrailingBytesIsRejected(t *testing.T) {
+	key := lowSKey(t, "24")
+	publicKey := key.PubKey().Compressed()
+	payload := []byte("strict DER payload")
+	messageSignature, err := SignWireDocument(context.Background(), lowSSigner(t, key), WireVersion, 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trailing := append(bytes.Clone(messageSignature), 0)
+	if err := VerifyWireDocument(publicKey, WireVersion, 1, payload, trailing); err == nil {
+		t.Fatal("ordinary wire signature accepted trailing DER byte")
+	}
+	messageDigest := sha256.Sum256(payload)
+	ordinarySignature, err := key.Sign(messageDigest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryDER, err := ordinarySignature.ToDER()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMessageSignature(publicKey, payload, ordinaryDER); err != nil {
+		t.Fatalf("canonical message signature rejected: %v", err)
+	}
+	if err := VerifyMessageSignature(publicKey, payload, append(ordinaryDER, 0)); err == nil {
+		t.Fatal("message signature accepted trailing DER byte")
+	}
+	digest, err := WireSignatureDigest(WireVersion, 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedKey, err := PublicKeyFromBytes(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDigestSignature(parsedKey, digest, trailing); err == nil {
+		t.Fatal("transaction digest signature accepted trailing DER byte")
+	}
+}

@@ -119,11 +119,15 @@ type roleFixture struct {
 	PaymentMerged      roleWireFixture         `json:"payment_merged_raw"`
 	CloseUnsigned      roleWireFixture         `json:"close_unsigned_raw"`
 	CloseSigned        roleWireFixture         `json:"close_signed_raw"`
-	RefundMatured      roleWireFixture         `json:"refund_matured_raw"`
-	Arbitration        roleArbitrationFixture  `json:"arbitration"`
-	Malicious          roleMaliciousFixture    `json:"malicious"`
-	PriceVectors       []rolePriceVector       `json:"price_vectors"`
-	EvidenceReject     []roleRejectVector      `json:"evidence_reject_vectors"`
+	// CloseRequest 是买方生成的 Kind 12 关池请求原文。
+	CloseRequest roleWireFixture `json:"close_request_kind12"`
+	// CloseResponse 是卖方返回的 Kind 13 完整关闭响应原文。
+	CloseResponse  roleWireFixture        `json:"close_response_kind13"`
+	RefundMatured  roleWireFixture        `json:"refund_matured_raw"`
+	Arbitration    roleArbitrationFixture `json:"arbitration"`
+	Malicious      roleMaliciousFixture   `json:"malicious"`
+	PriceVectors   []rolePriceVector      `json:"price_vectors"`
+	EvidenceReject []roleRejectVector     `json:"evidence_reject_vectors"`
 }
 
 func mustRoleKey(t *testing.T, repeat string) *ec.PrivateKey {
@@ -289,6 +293,30 @@ func buildRoleFixture(t *testing.T) *roleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	closeRequest, err := buyer.PrepareCloseArtifact(ctx, roleFacts(1999999000), buyer.PrepareCloseInput{
+		Pool:                       buyerPaid,
+		TargetSellerAmountSatoshis: protocol.Satoshis(150),
+	}, buyerSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResponse, err := seller.CompleteCloseArtifact(ctx, roleFacts(1999999000), seller.CompleteCloseArtifactInput{
+		Pool:       sellerNext,
+		RequestRaw: closeRequest.Bytes(),
+	}, sellerSigner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedClose, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+		Pool:        buyerPaid,
+		ResponseRaw: closeResponse.Bytes(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(verifiedClose.RawTx(), closeSigned) {
+		t.Fatal("Kind 12/13 role path changed the completed close transaction")
+	}
 	refundMatured, err := buyer.BuildMaturedRefund(roleFacts(2000000000), buyerPaid)
 	if err != nil {
 		t.Fatal(err)
@@ -390,6 +418,8 @@ func buildRoleFixture(t *testing.T) *roleFixture {
 		PaymentMerged:   roleWireFixture{Hex: hexEncode(paymentMerged)},
 		CloseUnsigned:   roleWireFixture{Hex: hexEncode(closeUnsigned)},
 		CloseSigned:     roleWireFixture{Hex: hexEncode(closeSigned)},
+		CloseRequest:    roleWireFixture{Hex: hexEncode(closeRequest.Bytes())},
+		CloseResponse:   roleWireFixture{Hex: hexEncode(closeResponse.Bytes())},
 		RefundMatured:   roleWireFixture{Hex: hexEncode(refundMatured.RawTx())},
 		Arbitration: roleArbitrationFixture{
 			Kind8Hex:              hexEncode(kind8.Bytes()),
@@ -622,7 +652,7 @@ func buildRejectVectors() []roleRejectVector {
 		{Name: "kind10_zero_nonce", Artifact: "kind10", Mutation: "zero_nonce", ErrorCode: string(protocol.CodeInvalidEvidence), Description: "取回 nonce 全零"},
 		{Name: "kind11_available_attachment_flip", Artifact: "kind11_available", Mutation: "attachment_last_byte_flip", ErrorCode: string(protocol.CodeInvalidEvidence), Description: "available attachment 哈希不符"},
 		{Name: "foreign_seller_signer", Artifact: "kind2", Mutation: "foreign_seller_signer", ErrorCode: string(protocol.CodeUnauthorized), Description: "角色不符：卖方 Signer 与请求角色不一致"},
-		{Name: "kind2_refund_template_flip", Artifact: "kind2", Mutation: "kind2_refund_template_flip", ErrorCode: string(protocol.CodeInvalidEvidence), Description: "模板/费率错误：退款模板被篡改，买方签名不再覆盖重建结果"},
+		{Name: "kind2_refund_template_flip", Artifact: "kind2", Mutation: "kind2_refund_template_flip", ErrorCode: string(protocol.CodeInvalidSignature), Description: "退款模板被篡改，买方签名不再覆盖重建结果"},
 		{Name: "stale_sequence_second_round", Artifact: "kind7", Mutation: "stale_sequence_second_round", ErrorCode: string(protocol.CodeStateConflict), Description: "序号陈旧：第二轮复用第一轮授权"},
 		{Name: "amount_decrease_second_round", Artifact: "kind7", Mutation: "amount_decrease_second_round", ErrorCode: string(protocol.CodeInvalidEvidence), Description: "金额倒退：买方签署更低累计金额"},
 		{Name: "capacity_insufficient_second_round", Artifact: "kind7", Mutation: "capacity_insufficient_second_round", ErrorCode: string(protocol.CodeInsufficientBalance), Description: "容量不足：授权金额超过费用池输出"},
@@ -777,6 +807,109 @@ func TestRoleFixtureInspectDeliveryRequest(t *testing.T) {
 	stalePool.LatestPaymentRawTx = decodeHex(t, frozen.PaymentMerged.Hex)
 	if _, err := seller.InspectDeliveryRequest(roleFacts(frozen.FactsNowUnix), seller.InspectDeliveryRequestInput{QuoteRaw: kind1, Pool: stalePool, RequestRaw: kind5}); !protocol.IsCode(err, protocol.CodeStateConflict) {
 		t.Fatalf("stale request inspection error = %v", err)
+	}
+}
+
+// TestRoleFixtureCloseArtifactLifecycle verifies the buyer → seller → buyer
+// Kind 12/13 path against the same frozen role fixture used by TypeScript.
+func TestRoleFixtureCloseArtifactLifecycle(t *testing.T) {
+	frozen := loadFrozenRoleFixture(t)
+	kind2 := decodeHex(t, frozen.SellerOpening.Hex)
+	kind3 := decodeHex(t, frozen.SellerPresign.Hex)
+	kind4 := decodeHex(t, frozen.FundingDelivery.Hex)
+	kind4Artifact, err := wire.ParseAs(wire.FundingTransactionDelivery, kind4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding, err := wire.DecodeFundingTransactionDelivery(kind4Artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openingEvidence := buyer.BuyerOpeningEvidence{
+		RawKind2:              kind2,
+		FundingTransactionRaw: funding.FundingTransactionRaw,
+	}
+	_, buyerPool, err := buyer.CompleteOpening(openingEvidence, kind3)
+	if err != nil {
+		t.Fatalf("rebuild buyer pool evidence from shared opening fixture: %v", err)
+	}
+	buyerPool.LatestPaymentRawTx = decodeHex(t, frozen.PaymentMerged.Hex)
+	_, sellerPool, err := seller.VerifyFunding(kind4, seller.SellerOpeningEvidence{RawKind2: kind2, RawKind3: kind3})
+	if err != nil {
+		t.Fatalf("rebuild seller pool evidence from shared opening fixture: %v", err)
+	}
+	sellerPool.LatestPaymentRawTx = decodeHex(t, frozen.PaymentMerged.Hex)
+
+	ctx := context.Background()
+	buyerSigner := mustRoleSigner(t, mustRoleKey(t, "44"))
+	sellerSigner := mustRoleSigner(t, mustRoleKey(t, "22"))
+	request, err := buyer.PrepareCloseArtifact(ctx, roleFacts(frozen.FactsNowUnix), buyer.PrepareCloseInput{
+		Pool:                       buyerPool,
+		TargetSellerAmountSatoshis: protocol.Satoshis(150),
+	}, buyerSigner)
+	if err != nil {
+		t.Fatalf("prepare shared Kind 12 role request: %v", err)
+	}
+	requestRaw := decodeHex(t, frozen.CloseRequest.Hex)
+	if !bytes.Equal(request.Bytes(), requestRaw) {
+		t.Fatal("buyer did not reproduce frozen Kind 12 request")
+	}
+	response, err := seller.CompleteCloseArtifact(ctx, roleFacts(frozen.FactsNowUnix), seller.CompleteCloseArtifactInput{
+		Pool:       sellerPool,
+		RequestRaw: requestRaw,
+	}, sellerSigner)
+	if err != nil {
+		t.Fatalf("complete shared Kind 12 role request: %v", err)
+	}
+	responseRaw := decodeHex(t, frozen.CloseResponse.Hex)
+	if !bytes.Equal(response.Bytes(), responseRaw) {
+		t.Fatal("seller did not reproduce frozen Kind 13 response")
+	}
+	verified, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+		Pool: buyerPool, ResponseRaw: responseRaw,
+	})
+	if err != nil {
+		t.Fatalf("accept shared Kind 13 role response: %v", err)
+	}
+	if !bytes.Equal(verified.RawTx(), decodeHex(t, frozen.CloseSigned.Hex)) {
+		t.Fatal("buyer accepted a different completed close transaction")
+	}
+
+	requestArtifact, err := wire.ParseAs(wire.PoolCloseRequest, requestRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongRequest, err := wire.DecodePoolCloseRequest(requestArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongRequest.RefundTemplateTxID[0] ^= 0x01
+	wrongRequestArtifact, err := wire.EncodePoolCloseRequest(wrongRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seller.CompleteCloseArtifact(ctx, roleFacts(frozen.FactsNowUnix), seller.CompleteCloseArtifactInput{
+		Pool: sellerPool, RequestRaw: wrongRequestArtifact.Bytes(),
+	}, sellerSigner); !protocol.IsCode(err, protocol.CodeStateConflict) {
+		t.Fatalf("wrong request pool ID error = %v, want state_conflict", err)
+	}
+	responseArtifact, err := wire.ParseAs(wire.PoolCloseResponse, responseRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongResponse, err := wire.DecodePoolCloseResponse(responseArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongResponse.RefundTemplateTxID[0] ^= 0x01
+	wrongResponseArtifact, err := wire.EncodePoolCloseResponse(wrongResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+		Pool: buyerPool, ResponseRaw: wrongResponseArtifact.Bytes(),
+	}); !protocol.IsCode(err, protocol.CodeStateConflict) {
+		t.Fatalf("wrong response pool ID error = %v, want state_conflict", err)
 	}
 }
 

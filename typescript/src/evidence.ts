@@ -177,6 +177,14 @@ export interface VerifyCompletedCloseInput {
   closeRaw: Uint8Array
 }
 
+/** 验收 exact Kind 13 关池响应所需的证据。 */
+export interface VerifyCompletedCloseArtifactInput {
+  /** 当前池普通证据包，用于核对费用池关联 ID 并验证完整交易。 */
+  pool: BuyerPoolEvidence
+  /** 卖方发来的 exact Kind 13 关池响应。 */
+  responseRaw: Uint8Array
+}
+
 /** 构造 exact Kind 10 所需的本地证据。 */
 export interface RetrievalRequestInput {
   /** 当前池普通证据包。 */
@@ -263,6 +271,14 @@ export interface CompleteCloseInput {
   unsignedRaw: Uint8Array
   /** 买方对该 candidate 的 detached 交易签名。 */
   buyerSignature: Uint8Array
+}
+
+/** 从 exact Kind 12 关池请求完成签名所需的证据。 */
+export interface CompleteCloseArtifactInput {
+  /** 当前池普通证据包，用于核对费用池关联 ID 和卖方签名权限。 */
+  pool: SellerPoolEvidence
+  /** 买方发来的 exact Kind 12 关池请求。 */
+  requestRaw: Uint8Array
 }
 
 /** 构造 exact Kind 8 所需的本地普通证据。 */

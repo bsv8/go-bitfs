@@ -15,7 +15,7 @@ import {
 } from 'keymaster-multisig-pool'
 import { WireError } from './errors.js'
 import { type Signer, verifyDigestSignature } from './protocol.js'
-import { buildArbitrationCandidate, forkIDAllDigest, SIGHASH_FORKID_ALL, transactionID, validateArbitrationClaimStructure } from './transaction.js'
+import { buildArbitrationCandidate, forkIDAllDigest, preflightTransactionRaw, SIGHASH_FORKID_ALL, transactionID, validateArbitrationClaimStructure } from './transaction.js'
 import type { OpeningProof } from './evidence.js'
 
 /** 费用池三方角色公钥，顺序固定为买方、卖方、仲裁方。 */
@@ -166,13 +166,10 @@ export class MultisigPoolEngine {
    * locktime/fee 重建字节，以及 Buyer/Seller 两个 detached 退款签名。
    */
   async verifyOpeningEvidence (evidence: Readonly<OpeningEvidenceInput>): Promise<void> {
-    let funding: Transaction
-    try { funding = Transaction.fromHex(toHex(evidence.fundingTransactionRaw)) } catch { throw new WireError('invalid_evidence', 4, 'funding_transaction_raw', '资金交易无法解析') }
-    if (funding.toHex() !== toHex(evidence.fundingTransactionRaw)) throw new WireError('non_canonical', 4, 'funding_transaction_raw', '资金交易不是规范序列化')
+    const funding = parseCanonical(evidence.fundingTransactionRaw)
     const poolOutput = funding.outputs[0]
     if (poolOutput == null || poolOutput.satoshis !== evidence.poolOutputSatoshis || !equal(Uint8Array.from(poolOutput.lockingScript.toBinary()), this.#lockingScript)) throw new WireError('invalid_evidence', 4, 'funding_transaction_raw', '资金交易 output[0] 与开池金额或三方锁定脚本不一致')
-    let refund: Transaction
-    try { refund = Transaction.fromHex(toHex(evidence.refundTemplateRaw)) } catch { throw new WireError('invalid_evidence', 4, 'refund_template_raw', '退款模板无法解析') }
+    const refund = parseCanonical(evidence.refundTemplateRaw)
     const rebuilt = await this.buildOpeningState(evidence.fundingTransactionRaw, evidence.poolOutputSatoshis, refund.lockTime, evidence.minerFeeRateSatoshisPerKilobyte)
     if (!equal(rebuilt, evidence.refundTemplateRaw)) throw new WireError('invalid_evidence', 4, 'refund_template_raw', '退款模板未消费当前 funding output 或交易规则不一致')
     this.mergeBuyerSeller(evidence.refundTemplateRaw, evidence.poolOutputSatoshis, evidence.buyerRefundSignature, evidence.sellerRefundSignature)
@@ -216,16 +213,30 @@ export class MultisigPoolEngine {
 
   /** 验证指定角色的 detached 交易签名覆盖精确未签名交易。 */
   verifyRole (role: PoolRole, unsignedRaw: Uint8Array, poolOutputSatoshis: bigint, signature: Uint8Array): void {
-    if (signature.byteLength === 0) throw poolInvalid(`${role} 交易签名不能为空`)
+    if (signature.byteLength < 2 || signature[signature.byteLength - 1] !== SIGHASH_FORKID_ALL) throw new WireError('invalid_signature', 0, `${role}_transaction_signature`, '交易签名必须使用固定 ForkID|All 标记')
     const state = parseCanonical(unsignedRaw)
     const amount = amountNumber(poolOutputSatoshis, 'pool_output_satoshis')
     setPoolSource(state, poolOutputSatoshis, this.#lockingScript)
-    if (!this.#signatureMatches(role, state, amount, signature)) throw poolInvalid(`${role} 交易签名无效`)
+    const digest = forkIDAllDigest(unsignedRaw, 0, poolOutputSatoshis, this.#lockingScript)
+    try { verifyDigestSignature(this.#roleKey(role), digest, signature.subarray(0, signature.byteLength - 1)) } catch {
+      throw new WireError('invalid_signature', 0, `${role}_transaction_signature`, '交易签名不是有效的 low-S DER 或与角色公钥不匹配')
+    }
+    let valid = false
+    try {
+      if (role === 'buyer') valid = verifyArbitratedPoolBuyerSignature(state, amount, this.#roles, Array.from(signature))
+      else if (role === 'seller') valid = verifyArbitratedPoolSellerSignature(state, amount, this.#roles, Array.from(signature))
+      else valid = verifyArbitratedPoolArbiterSignature(state, amount, this.#roles, Array.from(signature))
+    } catch {
+      throw new WireError('invalid_signature', 0, `${role}_transaction_signature`, '交易签名无效')
+    }
+    if (!valid) throw new WireError('invalid_signature', 0, `${role}_transaction_signature`, '交易签名无效')
   }
 
   /** 验证并按 Buyer/Seller 顺序合并两个 detached 交易签名。 */
   mergeBuyerSeller (unsignedRaw: Uint8Array, poolOutputSatoshis: number, buyerSignature: Uint8Array, sellerSignature: Uint8Array): Uint8Array {
     const state = this.#withPoolSource(unsignedRaw, poolOutputSatoshis)
+    this.verifyRole('buyer', unsignedRaw, BigInt(poolOutputSatoshis), buyerSignature)
+    this.verifyRole('seller', unsignedRaw, BigInt(poolOutputSatoshis), sellerSignature)
     if (!verifyArbitratedPoolBuyerSignature(state, poolOutputSatoshis, this.#roles, Array.from(buyerSignature)) || !verifyArbitratedPoolSellerSignature(state, poolOutputSatoshis, this.#roles, Array.from(sellerSignature))) throw new WireError('invalid_signature', 0, 'transaction_signature', '买方或卖方交易签名无效')
     return fromHex(mergeArbitratedPoolBuyerSellerSignatures(state, poolOutputSatoshis, this.#roles, Array.from(buyerSignature), Array.from(sellerSignature)).toHex())
   }
@@ -233,6 +244,8 @@ export class MultisigPoolEngine {
   /** 验证并按 Seller/Arbiter 顺序合并仲裁付款签名。 */
   mergeSellerArbiter (unsignedRaw: Uint8Array, poolOutputSatoshis: number, sellerSignature: Uint8Array, arbiterSignature: Uint8Array): Uint8Array {
     const state = this.#withPoolSource(unsignedRaw, poolOutputSatoshis)
+    this.verifyRole('seller', unsignedRaw, BigInt(poolOutputSatoshis), sellerSignature)
+    this.verifyRole('arbiter', unsignedRaw, BigInt(poolOutputSatoshis), arbiterSignature)
     if (!verifyArbitratedPoolSellerSignature(state, poolOutputSatoshis, this.#roles, Array.from(sellerSignature)) || !verifyArbitratedPoolArbiterSignature(state, poolOutputSatoshis, this.#roles, Array.from(arbiterSignature))) throw new WireError('invalid_signature', 0, 'transaction_signature', '卖方或仲裁方交易签名无效')
     return fromHex(mergeArbitratedPoolSellerArbiterSignatures(state, poolOutputSatoshis, this.#roles, Array.from(sellerSignature), Array.from(arbiterSignature)).toHex())
   }
@@ -305,7 +318,6 @@ export class MultisigPoolEngine {
     const cleared = parseCanonical(fromHex(state.toHex()))
     cleared.inputs[0]!.unlockingScript = new UnlockingScript()
     setPoolSource(cleared, poolAmount, details.poolLockingScript)
-    const amount = amountNumber(poolAmount, 'pool_output_satoshis')
     const result: PaymentState = {
       refundTemplateTxId: details.refundTemplateTxId,
       rawTx: copy(fromHex(state.toHex())),
@@ -321,9 +333,12 @@ export class MultisigPoolEngine {
     }
     for (const signature of signatures) {
       const matches: PoolRole[] = []
-      for (const role of ['buyer', 'seller', 'arbiter'] as const) if (this.#signatureMatches(role, cleared, amount, signature)) matches.push(role)
-      if (matches.length === 0) throw poolInvalid('付款签名不匹配任何费用池角色')
-      if (matches.length > 1) throw poolInvalid('付款签名同时匹配多个费用池角色')
+      const unsignedRaw = fromHex(cleared.toHex())
+      for (const role of ['buyer', 'seller', 'arbiter'] as const) {
+        try { this.verifyRole(role, unsignedRaw, poolAmount, signature); matches.push(role) } catch {}
+      }
+      if (matches.length === 0) throw new WireError('invalid_signature', 0, 'transaction_signature', '付款签名不是有效的 low-S 角色签名')
+      if (matches.length > 1) throw new WireError('invalid_signature', 0, 'transaction_signature', '付款签名同时匹配多个费用池角色')
       const role = matches[0]!
       if (role === 'buyer') {
         if (result.buyerTransactionSignature.byteLength !== 0) throw poolInvalid('买方签名重复')
@@ -342,6 +357,23 @@ export class MultisigPoolEngine {
     return result
   }
 
+  /** 完整验证未签名普通池候选，并返回由交易原文派生的只读元数据。 */
+  async parseUnsignedPaymentState (rawTx: Uint8Array, opening: OpeningProof): Promise<UnsignedPaymentState> {
+    const { state, details } = await this.#parseAndCheckState(rawTx, opening)
+    if ((state.inputs[0]!.unlockingScript?.toBinary().length ?? 0) !== 0) throw poolInvalid('未签名付款必须具有空 unlocking script')
+    const arbiterAmountSatoshis = outputAmount(state.outputs[2]!)
+    if (arbiterAmountSatoshis !== 0n) throw poolInvalid('普通池候选不能向仲裁方付款')
+    return {
+      rawTx: copy(rawTx),
+      paymentSequence: state.inputs[0]!.sequence ?? 0,
+      buyerAmountSatoshis: outputAmount(state.outputs[0]!),
+      sellerAmountSatoshis: outputAmount(state.outputs[1]!),
+      arbiterAmountSatoshis,
+      poolOutputSatoshis: details.poolOutputSatoshis,
+      poolLockingScript: copy(details.poolLockingScript)
+    }
+  }
+
   /** 验证普通（Buyer+Seller）已接受付款状态。 */
   async verifyAcceptedPayment (state: PaymentState, opening: OpeningProof): Promise<void> {
     await this.#verifyComplete(state, opening, false)
@@ -356,6 +388,17 @@ export class MultisigPoolEngine {
   async verifyCompletedFinalPayment (state: PaymentState, opening: OpeningProof): Promise<void> {
     if (state.paymentSequence !== FINAL_POOL_SEQUENCE) throw poolInvalid('付款状态不是最终结算')
     await this.#verifyComplete(state, opening, false)
+  }
+
+  /** 验证已保存付款是否对应指定未签名候选。 */
+  async paymentStateMatchesUnsigned (state: PaymentState, unsignedRaw: Uint8Array, opening: OpeningProof): Promise<boolean> {
+    try { await this.verifyAcceptedPayment(state, opening) } catch {
+      await this.verifyArbitratedPayment(state, opening)
+    }
+    const { state: parsed, details } = await this.#parseAndCheckState(state.rawTx, opening)
+    parsed.inputs[0]!.unlockingScript = new UnlockingScript()
+    setPoolSource(parsed, details.poolOutputSatoshis, details.poolLockingScript)
+    return equal(fromHex(parsed.toHex()), unsignedRaw)
   }
 
   /** 从上一已接受状态构造下一笔未签名累计付款交易。 */
@@ -446,6 +489,14 @@ export class MultisigPoolEngine {
     cleared.inputs[0]!.unlockingScript = new UnlockingScript()
     setPoolSource(cleared, details.poolOutputSatoshis, details.poolLockingScript)
     const amount = amountNumber(details.poolOutputSatoshis, 'pool_output_satoshis')
+    const unsignedRaw = fromHex(cleared.toHex())
+    if (arbitration) {
+      this.verifyRole('seller', unsignedRaw, details.poolOutputSatoshis, signatures[0]!)
+      this.verifyRole('arbiter', unsignedRaw, details.poolOutputSatoshis, signatures[1]!)
+    } else {
+      this.verifyRole('buyer', unsignedRaw, details.poolOutputSatoshis, signatures[0]!)
+      this.verifyRole('seller', unsignedRaw, details.poolOutputSatoshis, signatures[1]!)
+    }
     const merged = arbitration
       ? mergeArbitratedPoolSellerArbiterSignatures(cleared, amount, this.#roles, Array.from(signatures[0]!), Array.from(signatures[1]!))
       : mergeArbitratedPoolBuyerSellerSignatures(cleared, amount, this.#roles, Array.from(signatures[0]!), Array.from(signatures[1]!))
@@ -484,6 +535,7 @@ export class MultisigPoolEngine {
   async #verifyCanonicalState (state: Transaction, details: OpeningDetails, sellerAmount: bigint, arbiterAmount: bigint, sequence: number, lockTime: number, feeRateSatoshisPerKilobyte: bigint): Promise<void> {
     if (state.outputs[2] == null || outputAmount(state.outputs[2]) !== arbiterAmount) throw poolInvalid('付款状态仲裁输出与其记录金额不一致')
     if (sequence === 0) throw poolInvalid('付款序号无效')
+    if (sequence === FINAL_POOL_SEQUENCE && lockTime !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'lock_time', '最终关闭必须使用最终 nLockTime')
     const previous = parseCanonical(fromHex(state.toHex()))
     previous.inputs[0]!.unlockingScript = new UnlockingScript()
     previous.inputs[0]!.sequence = sequence - 1
@@ -502,14 +554,6 @@ export class MultisigPoolEngine {
     const state = parseCanonical(raw)
     setPoolSource(state, BigInt(poolOutputSatoshis), this.#lockingScript)
     return state
-  }
-
-  #signatureMatches (role: PoolRole, state: Transaction, amount: number, signature: Uint8Array): boolean {
-    try {
-      if (role === 'buyer') return verifyArbitratedPoolBuyerSignature(state, amount, this.#roles, Array.from(signature))
-      if (role === 'seller') return verifyArbitratedPoolSellerSignature(state, amount, this.#roles, Array.from(signature))
-      return verifyArbitratedPoolArbiterSignature(state, amount, this.#roles, Array.from(signature))
-    } catch { return false }
   }
 
   #roleKey (role: PoolRole): Uint8Array {
@@ -562,23 +606,7 @@ export async function parsePaymentState (rawTx: Uint8Array, opening: OpeningProo
 
 /** 解析未签名费用池状态：形状、outpoint、空 unlocking script 与公开金额。 */
 export async function parseUnsignedPayment (rawTx: Uint8Array, opening: OpeningProof): Promise<UnsignedPaymentState> {
-  const engine = engineFromOpening(opening)
-  await engine.verifyOpening(opening)
-  const details = await engine.deriveOpeningDetails(opening)
-  const state = parseCanonical(rawTx)
-  if (state.inputs.length !== 1 || state.outputs.length !== 3) throw poolInvalid('费用池状态必须恰好一个输入三个输出')
-  const input = state.inputs[0]!
-  if (!equal(serializedTxId(input), details.fundingTxId) || input.sourceOutputIndex !== 0) throw poolInvalid('未签名付款未花费开池 outpoint')
-  if ((input.unlockingScript?.toBinary().length ?? 0) !== 0) throw poolInvalid('未签名付款必须具有空 unlocking script')
-  return {
-    rawTx: copy(rawTx),
-    paymentSequence: input.sequence ?? 0,
-    buyerAmountSatoshis: outputAmount(state.outputs[0]!),
-    sellerAmountSatoshis: outputAmount(state.outputs[1]!),
-    arbiterAmountSatoshis: outputAmount(state.outputs[2]!),
-    poolOutputSatoshis: details.poolOutputSatoshis,
-    poolLockingScript: copy(details.poolLockingScript)
-  }
+  return await engineFromOpening(opening).parseUnsignedPaymentState(rawTx, opening)
 }
 
 /** 检查付款更新只做确定性容量与序号边界判断（不读取节点或存储）。 */
@@ -609,6 +637,11 @@ export async function verifyAcceptedPayment (state: PaymentState, opening: Openi
 /** 验证仲裁（Seller+Arbiter）付款状态。 */
 export async function verifyArbitratedPayment (state: PaymentState, opening: OpeningProof): Promise<void> {
   await engineFromOpening(opening).verifyArbitratedPayment(state, opening)
+}
+
+/** 验证已保存付款是否对应指定未签名候选。 */
+export async function paymentStateMatchesUnsigned (state: PaymentState, unsignedRaw: Uint8Array, opening: OpeningProof): Promise<boolean> {
+  return await engineFromOpening(opening).paymentStateMatchesUnsigned(state, unsignedRaw, opening)
 }
 
 /** 验证最终关闭状态并返回完整交易原文。 */
@@ -701,6 +734,7 @@ function clonePaymentState (state: PaymentState): PaymentState {
 }
 
 function parseCanonical (raw: Uint8Array): Transaction {
+  preflightTransactionRaw(raw)
   const hex = toHex(raw)
   let transaction: Transaction
   try { transaction = Transaction.fromHex(hex) } catch { throw new WireError('invalid_evidence', 0, 'raw_transaction', '交易原文无法解析') }
@@ -709,6 +743,7 @@ function parseCanonical (raw: Uint8Array): Transaction {
   // 的 toHex() 反映真实字节，而不是旧缓存。
   return freshTransaction(transaction)
 }
+
 
 function freshTransaction (transaction: Transaction): Transaction {
   return new Transaction(

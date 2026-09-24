@@ -5,7 +5,7 @@
 
 字段说明：
 
-- `Artifact.kind`：报文类型（1–11）。
+- `Artifact.kind`：报文类型（1–13）。
 - `Artifact.bytes()`：通过严格解析后的完整规范 CBOR 副本。
 - `expectedKind`：传输路由预期的 Kind；必须与报文自身第二项一致。
 - `maxInboundFrameBytes`：本地接收的单帧上限，不发送给对端。
@@ -30,10 +30,12 @@ SDK 不再提供 `BuyerWorkflow`/`SellerWorkflow`/`ArbiterWorkflow` 等跨步骤
   `verifyContentPayloads` 等算价与证据函数；
 - `steps`：卖方（`createSellerQuote`、`prepareSellerPresign`、`verifySellerFunding`、
   `inspectSellerDeliveryRequest`、`prepareSellerDelivery`、`completeSellerPayment`、`completeSellerClose`、
-  `prepareSellerArbitration`、`completeSellerArbitratedPayment`）、买方
+  `completeSellerCloseArtifact`、`prepareSellerArbitration`、`completeSellerArbitratedPayment`）、买方
   （`acceptBuyerQuote`、`prepareBuyerOpening`、`completeBuyerOpening`、
   `prepareBuyerFundingDelivery`、`prepareBuyerContentRequest`、`verifyBuyerDelivery`、
-  `prepareBuyerClose`、`verifyBuyerCompletedClose`、`buildBuyerMaturedRefund`、
+  `prepareBuyerClose` / `prepareBuyerCloseArtifact`、
+  `verifyBuyerCompletedCloseArtifact`、
+  `verifyBuyerCompletedClose`、`buildBuyerMaturedRefund`、
   `requestBuyerArbitratedContent`、`verifyBuyerArbitratedContent`、`generateRetrievalNonce`、
   `newRetrievalNonce`）与仲裁方（`prepareArbiterArbitration`、
   `signArbiterPreparedArbitration`、`authenticateArbiterRetrieval`、

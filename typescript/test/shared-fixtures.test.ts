@@ -17,20 +17,21 @@ import { decodeCanonical, encodeCanonical, type CBORValue } from '../src/cbor.js
 import {
   acceptBuyerQuote, buildArbiterAvailableRetrieval, buildArbiterUnavailableRetrieval, buildArbitrationCandidate,
   buildBuyerMaturedRefund, checkContentRequestTiming, classifyContentHashes, completeArbiterArbitratedPayment,
-  completeBuyerOpening, completeSellerArbitratedPayment, completeSellerClose, completeSellerPayment,
+  completeBuyerOpening, completeSellerArbitratedPayment, completeSellerClose, completeSellerCloseArtifact, completeSellerPayment,
   contentHashesPriceSatoshis, createArbitrationRequest, createArbitrationResponse, createContentDelivery,
   createContentRequest, createContentRetrievalAvailable, createContentRetrievalRequest,
   createContentRetrievalUnavailable, createFileQuote, createSellerQuote, decodeContentPayloads,
   decodeFileQuoteTerms, decodePaymentAuthorization, encodeFundingTransactionDelivery, encodePaymentUpdate,
+  encodePoolCloseRequest, encodePoolCloseResponse,
   encodeRefundPresignRequest, encodeRefundPresignResponse, forkIDAllDigest, forkIDAllPreimage,
-  generateRetrievalNonce, inspectSellerDeliveryRequest, MultisigPoolEngine, newRetrievalNonce, parse, parseArbitratedPoolLockingScript,
-  parseAs, paymentAuthorizationID, prepareArbiterArbitration, prepareBuyerClose,
+  generateRetrievalNonce, inspectSellerDeliveryRequest, MultisigPoolEngine, newRetrievalNonce, parse, parseUnsignedPayment, parseArbitratedPoolLockingScript,
+  parseAs, paymentAuthorizationID, prepareArbiterArbitration, prepareBuyerClose, prepareBuyerCloseArtifact,
   prepareBuyerContentRequest, prepareBuyerFundingDelivery, prepareBuyerOpening, prepareSellerArbitration,
   prepareSellerDelivery, prepareSellerPresign, readArtifacts, requestBuyerArbitratedContent,
   authenticateArbiterRetrieval, signArbiterPreparedArbitration, signWireDocument, transactionID,
   verifyArbiterCustody, verifyArbitrationCandidate, verifyBuyerArbitratedContent, verifyBuyerCompletedClose,
   verifyBuyerDelivery, verifyContentPayloads, verifyContentRequestEvidence, verifySellerFunding,
-  verifyWireDocument, wireSignatureDigest, writeArtifact,
+  verifyBuyerCompletedCloseArtifact, verifyWireDocument, wireSignatureDigest, writeArtifact,
   type FileQuoteTerms, type OpeningProof, type PureFunctionFacts, type Signer, type SigningRequest, type WireKind
 } from '../src/index.js'
 
@@ -80,6 +81,10 @@ type RoleFixture = {
   payment_merged_raw: { hex: string }
   close_unsigned_raw: { hex: string }
   close_signed_raw: { hex: string }
+  /** 买方生成的 Kind 12 关池请求原文。 */
+  close_request_kind12: { hex: string }
+  /** 卖方返回的 Kind 13 完整关闭响应原文。 */
+  close_response_kind13: { hex: string }
   refund_matured_raw: { hex: string }
   arbitration: {
     kind8_hex: string
@@ -256,6 +261,36 @@ const sellerPoolEvidence = (): { opening: OpeningProof, fundingTransactionRaw: U
 const sellerDeliveryEvidence = (): { rawKind1: Uint8Array, rawKind5: Uint8Array, rawKind6: Uint8Array } => ({ rawKind1: copy(kind1), rawKind5: copy(kind5), rawKind6: copy(kind6) })
 const sellerPaidEvidence = (): { opening: OpeningProof, fundingTransactionRaw: Uint8Array, latestPaymentRawTx: Uint8Array } => ({ opening: fixtureOpening(), fundingTransactionRaw: copy(outer(kind4)[3] as Uint8Array), latestPaymentRawTx: copy(paymentMerged) })
 const buyerPaidEvidence = (): { opening: OpeningProof, latestPaymentRawTx: Uint8Array } => ({ opening: fixtureOpening(), latestPaymentRawTx: copy(paymentMerged) })
+
+it('交易解析在进入 SDK 前拒绝恶意 CompactSize 计数', async () => {
+  const raw = hex('01000000feffffffff')
+  await expect(parseUnsignedPayment(raw, fixtureOpening())).rejects.toMatchObject({ code: 'invalid_evidence' })
+})
+
+it('direct 关池 API 拒绝超过 64 KiB 的交易', async () => {
+  const oversized = new Uint8Array(65537)
+  await expect(verifyBuyerCompletedClose({ pool: buyerPaidEvidence(), closeRaw: oversized })).rejects.toMatchObject({ code: 'malformed_wire' })
+  await expect(completeSellerClose(roleFacts, { pool: sellerPaidEvidence(), unsignedRaw: oversized, buyerSignature: new Uint8Array([1]) }, seller)).rejects.toMatchObject({ code: 'malformed_wire' })
+})
+
+it('Kind 8 在解析退款交易前拒绝超长 Claim 子字段', () => {
+  const claim = encodeCanonical([20000n, new Uint8Array(105), new Uint8Array(16385), new Uint8Array([1]), new Uint8Array([1])])
+  const message = encodeCanonical([1n, 8n, claim, new Uint8Array([1]), new Uint8Array([1])])
+  expect(() => parse(message)).toThrowError(/退款模板超过 16384 bytes/)
+})
+
+it('买方关池验收拒绝 Seller+Arbiter 的 final 交易', async () => {
+  const opening = fixtureOpening()
+  const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
+  const unsigned = await engine.buildState({ previousRaw: paymentMerged, poolOutputSatoshis: 20000, paymentSequence: 0xffffffff, sellerAmountSatoshis: 150, arbiterAmountSatoshis: 500, minerFeeRateSatoshisPerKilobyte: 1, lockTime: 0xffffffff })
+  const sellerSignature = await engine.signRole(seller, 'seller', unsigned, 20000n)
+  const arbiterSignature = await engine.signRole(arbiter, 'arbiter', unsigned, 20000n)
+  const finalArbitration = engine.mergeSellerArbiter(unsigned, 20000, sellerSignature, arbiterSignature)
+  await expect(verifyBuyerCompletedClose({ pool: buyerPaidEvidence(), closeRaw: finalArbitration })).rejects.toBeDefined()
+  const id = await engine.deriveOpeningDetails(opening)
+  const response = encodePoolCloseResponse({ refundTemplateTxID: id.refundTemplateTxId, completeCloseTransactionRaw: finalArbitration })
+  await expect(verifyBuyerCompletedCloseArtifact({ pool: buyerPaidEvidence(), responseRaw: response.bytes() })).rejects.toBeDefined()
+})
 const signedQuote = (): { fileQuoteTermsCBOR: Uint8Array, sellerPublicKey: Uint8Array, sellerFileQuoteTermsSignature: Uint8Array } => ({ fileQuoteTermsCBOR: copy(outer(kind1)[2] as Uint8Array), sellerPublicKey: copy(outer(kind1)[3] as Uint8Array), sellerFileQuoteTermsSignature: copy(outer(kind1)[4] as Uint8Array) })
 const signedRequest = (): { paymentAuthorizationCBOR: Uint8Array, buyerPaymentAuthorizationSignature: Uint8Array } => ({ paymentAuthorizationCBOR: copy(outer(kind5)[2] as Uint8Array), buyerPaymentAuthorizationSignature: copy(outer(kind5)[3] as Uint8Array) })
 const quoteTerms = (): FileQuoteTerms => decodeFileQuoteTerms(outer(kind1)[2] as Uint8Array)
@@ -469,7 +504,7 @@ describe('Go 与 TypeScript 共享 wire 真值', () => {
     }
   })
 
-  it('TypeScript typed encoder 重建 Kind 2/3/4/7 frozen bytes', () => {
+  it('TypeScript typed encoder 重建 Kind 2/3/4/7/12/13 frozen bytes', () => {
     const byKind = (kind: WireKind): { exact_hex: string } => manifest.entries.find(entry => entry.kind === kind)!
     const outer2 = decodeCanonical(hex(byKind(2).exact_hex)); if (!Array.isArray(outer2)) throw new Error('fixture')
     expect(encodeRefundPresignRequest({
@@ -486,6 +521,17 @@ describe('Go 与 TypeScript 共享 wire 真值', () => {
     expect(encodeFundingTransactionDelivery(outer4[2] as Uint8Array, outer4[3] as Uint8Array).bytes()).toEqual(hex(byKind(4).exact_hex))
     const outer7 = decodeCanonical(hex(byKind(7).exact_hex)); if (!Array.isArray(outer7)) throw new Error('fixture')
     expect(encodePaymentUpdate(outer7[2] as Uint8Array, outer7[3] as Uint8Array).bytes()).toEqual(hex(byKind(7).exact_hex))
+    const outer12 = decodeCanonical(hex(byKind(12).exact_hex)); if (!Array.isArray(outer12)) throw new Error('fixture')
+    expect(encodePoolCloseRequest({
+      refundTemplateTxID: outer12[2] as Uint8Array,
+      unsignedCloseTransactionRaw: outer12[3] as Uint8Array,
+      buyerCloseTransactionSignature: outer12[4] as Uint8Array
+    }).bytes()).toEqual(hex(byKind(12).exact_hex))
+    const outer13 = decodeCanonical(hex(byKind(13).exact_hex)); if (!Array.isArray(outer13)) throw new Error('fixture')
+    expect(encodePoolCloseResponse({
+      refundTemplateTxID: outer13[2] as Uint8Array,
+      completeCloseTransactionRaw: outer13[3] as Uint8Array
+    }).bytes()).toEqual(hex(byKind(13).exact_hex))
   })
 
   it('TypeScript 用同一固定 signer 重建 Go Kind 1 exact bytes', async () => {
@@ -582,7 +628,7 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
       .rejects.toMatchObject({ code: 'state_conflict' })
   })
 
-  it('固定 Signer 下 Kind 1–11 与全部交易逐字节复现', async () => {
+  it('固定 Signer 下 Kind 1–13 与全部交易逐字节复现', async () => {
     const funding = new Transaction()
     funding.addInput({ sourceTXID: '01'.repeat(32), sourceOutputIndex: 0, sequence: 0xffffffff, unlockingScript: new UnlockingScript() })
     funding.addOutput({ satoshis: roleFixture.pool_output_satoshis, lockingScript: buildArbitratedPoolLock(bsvRoles) })
@@ -678,6 +724,85 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
     }, seller)
     expect(toHex(closeSigned)).toBe(roleFixture.close_signed_raw.hex)
     expect(toHex(await verifyBuyerCompletedClose({ pool: buyerPaid, closeRaw: closeSigned }))).toBe(roleFixture.close_signed_raw.hex)
+
+    const closeEngine = new MultisigPoolEngine({
+      buyerPublicKey: fixtureOpening().buyerPublicKey,
+      sellerPublicKey: fixtureOpening().sellerPublicKey,
+      arbiterPublicKey: fixtureOpening().arbiterPublicKey
+    })
+    const highSignatureValues = secp256k1.Signature.fromBytes(close.buyerSignature.subarray(0, -1), 'der')
+    const highSDER = derEncode(highSignatureValues.r, CURVE_ORDER - highSignatureValues.s)
+    const highSSignature = Uint8Array.from([...highSDER, 0x41])
+    expect(() => closeEngine.verifyRole('buyer', close.unsignedRaw, BigInt(roleFixture.pool_output_satoshis), highSSignature))
+      .toThrowError(expect.objectContaining({ code: 'invalid_signature' }))
+
+    const nonFinalLockTime = copy(close.unsignedRaw)
+    nonFinalLockTime.set([0xff, 0xff, 0xff, 0x7f], nonFinalLockTime.length - 4)
+    const nonFinalLockBuyerSignature = await closeEngine.signRole(buyer, 'buyer', nonFinalLockTime, BigInt(roleFixture.pool_output_satoshis))
+    const noSignForLockTime = new FixtureSigner('22')
+    await expect(completeSellerClose(roleFacts, {
+      pool: payment.pool, unsignedRaw: nonFinalLockTime, buyerSignature: nonFinalLockBuyerSignature
+    }, noSignForLockTime)).rejects.toMatchObject({ code: 'invalid_evidence' })
+    expect(noSignForLockTime.calls).toBe(0)
+
+    const arbiterCloseCandidate = await closeEngine.buildState({
+      previousRaw: payment.rawTransaction,
+      poolOutputSatoshis: roleFixture.pool_output_satoshis,
+      paymentSequence: 0xffffffff,
+      sellerAmountSatoshis: 150,
+      arbiterAmountSatoshis: 1,
+      minerFeeRateSatoshisPerKilobyte: 1,
+      lockTime: 0xffffffff
+    })
+    const arbiterCloseBuyerSignature = await closeEngine.signRole(buyer, 'buyer', arbiterCloseCandidate, BigInt(roleFixture.pool_output_satoshis))
+    const noSignForArbiter = new FixtureSigner('22')
+    await expect(completeSellerClose(roleFacts, {
+      pool: payment.pool, unsignedRaw: arbiterCloseCandidate, buyerSignature: arbiterCloseBuyerSignature
+    }, noSignForArbiter)).rejects.toMatchObject({ code: 'invalid_evidence' })
+    expect(noSignForArbiter.calls).toBe(0)
+
+    const closeRequest = await prepareBuyerCloseArtifact(roleFacts, { pool: buyerPaid, targetSellerAmountSatoshis: 150n }, buyer)
+    expect(toHex(closeRequest.bytes())).toBe(roleFixture.close_request_kind12.hex)
+    expect(parseAs(12, closeRequest.bytes()).bytes()).toEqual(closeRequest.bytes())
+    const closeResponse = await completeSellerCloseArtifact(roleFacts, {
+      pool: payment.pool,
+      requestRaw: closeRequest.bytes()
+    }, seller)
+    expect(toHex(closeResponse.bytes())).toBe(roleFixture.close_response_kind13.hex)
+    expect(parseAs(13, closeResponse.bytes()).bytes()).toEqual(closeResponse.bytes())
+    expect(toHex(await verifyBuyerCompletedCloseArtifact({ pool: buyerPaid, responseRaw: closeResponse.bytes() })))
+      .toBe(roleFixture.close_signed_raw.hex)
+
+    const finalSellerPool = { ...sellerPoolEvidence(), latestPaymentRawTx: copy(closeSigned) }
+    const replaySigner = new FixtureSigner('22')
+    const replayResponse = await completeSellerCloseArtifact(roleFacts, {
+      pool: finalSellerPool,
+      requestRaw: closeRequest.bytes()
+    }, replaySigner)
+    expect(toHex(replayResponse.bytes())).toBe(toHex(closeResponse.bytes()))
+    expect(replaySigner.calls).toBe(0)
+
+    const differentClose = await prepareBuyerClose(roleFacts, { pool: buyerPaid, targetSellerAmountSatoshis: 151n }, buyer)
+    const conflictSigner = new FixtureSigner('22')
+    await expect(completeSellerClose(roleFacts, {
+      pool: finalSellerPool,
+      unsignedRaw: differentClose.unsignedRaw,
+      buyerSignature: differentClose.buyerSignature
+    }, conflictSigner)).rejects.toMatchObject({ code: 'state_conflict' })
+    expect(conflictSigner.calls).toBe(0)
+
+    const wrongCloseRequest = outer(closeRequest.bytes())
+    wrongCloseRequest[2] = flipFirstByte(wrongCloseRequest[2] as Uint8Array)
+    await expect(completeSellerCloseArtifact(roleFacts, {
+      pool: payment.pool,
+      requestRaw: encodeCanonical(wrongCloseRequest)
+    }, seller)).rejects.toMatchObject({ code: 'state_conflict', kind: 12, field: 'refund_template_txid' })
+    const wrongCloseResponse = outer(closeResponse.bytes())
+    wrongCloseResponse[2] = flipFirstByte(wrongCloseResponse[2] as Uint8Array)
+    await expect(verifyBuyerCompletedCloseArtifact({
+      pool: buyerPaid,
+      responseRaw: encodeCanonical(wrongCloseResponse)
+    })).rejects.toMatchObject({ code: 'state_conflict', kind: 13, field: 'refund_template_txid' })
 
     const refund = await buildBuyerMaturedRefund({ nowUnixSeconds: 2000000000n, blockHeight: roleFixture.facts_block_height }, buyerPaid)
     expect(toHex(refund)).toBe(roleFixture.refund_matured_raw.hex)
@@ -882,7 +1007,9 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
     await expect(prepareSellerPresign(kind2, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(prepareSellerDelivery(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(completeSellerPayment(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
-    await expect(completeSellerClose(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
+    await expect(completeSellerClose(roleFacts, {
+      pool: sellerPoolEvidence(), unsignedRaw: new Uint8Array(), buyerSignature: new Uint8Array()
+    }, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(prepareSellerArbitration(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(completeSellerArbitratedPayment(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(prepareBuyerOpening({} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
@@ -897,7 +1024,7 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
 
     const countingSeller = new FixtureSigner('22')
     const tamperedKind2 = encodeCanonical(outer(kind2).map((value, index) => index === 7 ? flipLastByte(value as Uint8Array) : value))
-    await expect(prepareSellerPresign(tamperedKind2, countingSeller)).rejects.toMatchObject({ code: 'invalid_evidence' })
+    await expect(prepareSellerPresign(tamperedKind2, countingSeller)).rejects.toMatchObject({ code: 'invalid_signature' })
     expect(countingSeller.calls).toBe(0)
 
     const countingBuyer = new FixtureSigner('44')

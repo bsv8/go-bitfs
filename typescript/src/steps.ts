@@ -29,6 +29,7 @@ import type {
   BuyerPoolEvidence,
   CompleteArbitratedPaymentInput,
   CompleteCloseInput,
+  CompleteCloseArtifactInput,
   CompletePaymentInput,
   DeliveryInput,
   InspectDeliveryRequestInput,
@@ -44,6 +45,7 @@ import type {
   SignedArbitrationEvidence,
   VerifiedCustodyEvidence,
   VerifyCompletedCloseInput,
+  VerifyCompletedCloseArtifactInput,
   VerifyDeliveryInput
 } from './evidence.js'
 import {
@@ -56,6 +58,8 @@ import {
   encodeContentHashes,
   encodeFundingTransactionDelivery,
   encodePaymentUpdate,
+  encodePoolCloseRequest,
+  encodePoolCloseResponse,
   encodeRefundPresignRequest,
   encodeRefundPresignResponse,
   type FileQuoteTerms,
@@ -75,6 +79,7 @@ import {
   parseFundingOutput,
   parsePaymentState,
   parseUnsignedPayment,
+  paymentStateMatchesUnsigned,
   refundTemplateLockTime,
   verifyAcceptedPayment,
   verifyArbitratedPayment,
@@ -85,7 +90,7 @@ import {
   type PoolPublicKeys
 } from './pool.js'
 import { signWireDocument, verifyWireDocument, type Signer } from './protocol.js'
-import { transactionID, validateArbitrationClaimStructure } from './transaction.js'
+import { transactionID, validateArbitrationClaimStructure, validatePoolCloseTransactionRaw } from './transaction.js'
 import { Artifact, parse, parseAs } from './wire.js'
 
 /** 调用方显式传入的确定性事实；SDK 不读取系统时钟，也不查询节点。 */
@@ -301,22 +306,45 @@ export async function completeSellerPayment (facts: Readonly<PureFunctionFacts>,
  * 返回完整交易原文，是否广播由应用决定。
  */
 export async function completeSellerClose (facts: Readonly<PureFunctionFacts>, input: CompleteCloseInput, signer: Signer): Promise<Uint8Array> {
-  const bound = bindSigner(signer, 'seller_signer')
   const checkpoint = await sellerPoolCheckpoint(input.pool)
+  return await completeSellerCloseForOpening(facts, checkpoint, input.unsignedRaw, input.buyerSignature, signer)
+}
+
+async function completeSellerCloseForOpening (facts: Readonly<PureFunctionFacts>, checkpoint: PoolCheckpoint, unsignedRaw: Uint8Array, buyerSignature: Uint8Array, signer: Signer): Promise<Uint8Array> {
+  validatePoolCloseTransactionRaw(unsignedRaw)
   const opening = checkpoint.opening
+  const bound = bindSigner(signer, 'seller_signer')
   const details = await deriveOpeningDetails(opening)
   if (!equal(bound.publicKey(), opening.sellerPublicKey)) throw new WireError('unauthorized', 0, 'seller_public_key', 'Signer 与开池卖方不一致')
-  checkRefundNotExpired(facts, details.refundLockTime)
-  const unsigned = await parseUnsignedPayment(input.unsignedRaw, opening)
+  const unsigned = await parseUnsignedPayment(unsignedRaw, opening)
   if (unsigned.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'unsigned_close', '立即关闭必须使用最终 sequence')
   if (unsigned.sellerAmountSatoshis + unsigned.buyerAmountSatoshis + unsigned.arbiterAmountSatoshis > details.poolOutputSatoshis) throw new WireError('insufficient_balance', 0, 'outputs_satoshis', '立即关闭输出超过费用池容量')
   const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
-  engine.verifyRole('buyer', input.unsignedRaw, details.poolOutputSatoshis, input.buyerSignature)
-  const sellerSignature = await engine.signRole(bound, 'seller', input.unsignedRaw, details.poolOutputSatoshis)
-  const rawTransaction = engine.mergeBuyerSeller(input.unsignedRaw, Number(details.poolOutputSatoshis), input.buyerSignature, sellerSignature)
+  engine.verifyRole('buyer', unsignedRaw, details.poolOutputSatoshis, buyerSignature)
+  if (checkpoint.payment.paymentSequence === FINAL_POOL_SEQUENCE) {
+    const sameCandidate = await paymentStateMatchesUnsigned(checkpoint.payment, unsignedRaw, opening)
+    if (!sameCandidate || !equal(checkpoint.payment.buyerTransactionSignature, buyerSignature)) throw new WireError('state_conflict', 0, 'payment_sequence', '费用池已经 final，不能接受另一笔关闭交易')
+    return copyBytes(checkpoint.payment.rawTx)
+  }
+  checkRefundNotExpired(facts, details.refundLockTime)
+  const sellerSignature = await engine.signRole(bound, 'seller', unsignedRaw, details.poolOutputSatoshis)
+  const rawTransaction = engine.mergeBuyerSeller(unsignedRaw, Number(details.poolOutputSatoshis), buyerSignature, sellerSignature)
   const state = await parsePaymentState(rawTransaction, opening)
   if (state.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'payment_sequence', '卖方签名未保持最终 sequence')
   return await verifySignedTransaction(rawTransaction, opening)
+}
+
+/** 卖方验收 exact Kind 12、核对池关联 ID 并完成签名，返回 exact Kind 13；不广播。 */
+export async function completeSellerCloseArtifact (facts: Readonly<PureFunctionFacts>, input: CompleteCloseArtifactInput, signer: Signer): Promise<Artifact> {
+  const request = decodePoolCloseRequest(input.requestRaw)
+  const checkpoint = await sellerPoolCheckpoint(input.pool)
+  const details = await deriveOpeningDetails(checkpoint.opening)
+  if (!equal(details.refundTemplateTxId, request.refundTemplateTxID)) throw new WireError('state_conflict', 12, 'refund_template_txid', '关池请求属于另一个费用池')
+  const completeRaw = await completeSellerCloseForOpening(facts, checkpoint, request.unsignedCloseTransactionRaw, request.buyerCloseTransactionSignature, signer)
+  return encodePoolCloseResponse({
+    refundTemplateTxID: details.refundTemplateTxId,
+    completeCloseTransactionRaw: completeRaw
+  })
 }
 
 /**
@@ -549,6 +577,11 @@ export async function verifyBuyerDelivery (facts: Readonly<PureFunctionFacts>, i
  * 买方 detached 签名；不声称基准是最新，也不判断目标金额是否符合订单。
  */
 export async function prepareBuyerClose (facts: Readonly<PureFunctionFacts>, input: PrepareCloseInput, signer: Signer): Promise<{ unsignedRaw: Uint8Array, buyerSignature: Uint8Array }> {
+  const prepared = await prepareBuyerCloseArtifactData(facts, input, signer)
+  return { unsignedRaw: prepared.unsignedRaw, buyerSignature: prepared.buyerSignature }
+}
+
+async function prepareBuyerCloseArtifactData (facts: Readonly<PureFunctionFacts>, input: PrepareCloseInput, signer: Signer): Promise<{ unsignedRaw: Uint8Array, buyerSignature: Uint8Array, refundTemplateTxID: Uint8Array }> {
   const bound = bindSigner(signer, 'buyer_signer')
   const checkpoint = await buyerPoolCheckpoint(input.pool)
   const opening = checkpoint.opening
@@ -556,21 +589,45 @@ export async function prepareBuyerClose (facts: Readonly<PureFunctionFacts>, inp
   const details = await deriveOpeningDetails(opening)
   checkRefundNotExpired(facts, details.refundLockTime)
   const unsignedRaw = await buildImmediateClose(opening, checkpoint.payment, input.targetSellerAmountSatoshis)
-  const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
-  const buyerSignature = await engine.signRole(bound, 'buyer', unsignedRaw, details.poolOutputSatoshis)
+  validatePoolCloseTransactionRaw(unsignedRaw)
   const unsigned = await parseUnsignedPayment(unsignedRaw, opening)
   if (unsigned.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'payment_sequence', '立即关闭不是最终状态')
-  return { unsignedRaw, buyerSignature }
+  const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
+  const buyerSignature = await engine.signRole(bound, 'buyer', unsignedRaw, details.poolOutputSatoshis)
+  return { unsignedRaw, buyerSignature, refundTemplateTxID: details.refundTemplateTxId }
+}
+
+/** 买方准备关池并编码 exact Kind 12；应用应先持久化 Artifact 再发送。 */
+export async function prepareBuyerCloseArtifact (facts: Readonly<PureFunctionFacts>, input: PrepareCloseInput, signer: Signer): Promise<Artifact> {
+  const prepared = await prepareBuyerCloseArtifactData(facts, input, signer)
+  return encodePoolCloseRequest({
+    refundTemplateTxID: prepared.refundTemplateTxID,
+    unsignedCloseTransactionRaw: prepared.unsignedRaw,
+    buyerCloseTransactionSignature: prepared.buyerSignature
+  })
 }
 
 /** 买方验收卖方完整关闭交易，返回完整交易原文；不声称已广播或已确认。 */
 export async function verifyBuyerCompletedClose (input: VerifyCompletedCloseInput): Promise<Uint8Array> {
   const checkpoint = await buyerPoolCheckpoint(input.pool)
-  const opening = checkpoint.opening
-  const state = await parsePaymentState(input.closeRaw, opening)
+  return await verifyBuyerCompletedCloseForOpening(input.closeRaw, checkpoint.opening)
+}
+
+/** 严格解析 Kind 13、核对费用池关联 ID 并验证完整关闭交易。 */
+export async function verifyBuyerCompletedCloseArtifact (input: VerifyCompletedCloseArtifactInput): Promise<Uint8Array> {
+  const response = decodePoolCloseResponse(input.responseRaw)
+  const checkpoint = await buyerPoolCheckpoint(input.pool)
+  const details = await deriveOpeningDetails(checkpoint.opening)
+  if (!equal(details.refundTemplateTxId, response.refundTemplateTxID)) throw new WireError('state_conflict', 13, 'refund_template_txid', '关池响应属于另一个费用池')
+  return await verifyBuyerCompletedCloseForOpening(response.completeCloseTransactionRaw, checkpoint.opening)
+}
+
+async function verifyBuyerCompletedCloseForOpening (closeRaw: Uint8Array, opening: OpeningProof): Promise<Uint8Array> {
+  validatePoolCloseTransactionRaw(closeRaw)
+  const state = await parsePaymentState(closeRaw, opening)
   if (state.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'close_payment', '缺少最终签名关闭状态')
-  await verifyPaymentState(state, opening)
-  return await verifySignedTransaction(input.closeRaw, opening)
+  await new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey }).verifyCompletedFinalPayment(state, opening)
+  return await verifySignedTransaction(closeRaw, opening)
 }
 
 /** 买方到期退款：显式事实判定退款到期后合并双方退款签名，不调用 Signer。 */
@@ -1138,6 +1195,30 @@ function decodeKind11Response (raw: Uint8Array): ContentRetrievalResponseView {
     contentRetrievalResultCBOR: fieldBytes(value[2], 11, 'content_retrieval_result_cbor'),
     arbiterContentRetrievalResultSignature: fieldBytes(value[3], 11, 'arbiter_result_signature'),
     ...(value.length === 5 ? { contentPayloadsCBOR: fieldBytes(value[4], 11, 'content_payloads_cbor') } : {})
+  }
+}
+
+function decodePoolCloseRequest (raw: Uint8Array): {
+  refundTemplateTxID: Uint8Array
+  unsignedCloseTransactionRaw: Uint8Array
+  buyerCloseTransactionSignature: Uint8Array
+} {
+  const outer = outerFields(parseAs(12, raw), 5)
+  return {
+    refundTemplateTxID: fieldBytes(outer[2], 12, 'refund_template_txid'),
+    unsignedCloseTransactionRaw: fieldBytes(outer[3], 12, 'unsigned_close_transaction_raw'),
+    buyerCloseTransactionSignature: fieldBytes(outer[4], 12, 'buyer_close_transaction_signature')
+  }
+}
+
+function decodePoolCloseResponse (raw: Uint8Array): {
+  refundTemplateTxID: Uint8Array
+  completeCloseTransactionRaw: Uint8Array
+} {
+  const outer = outerFields(parseAs(13, raw), 4)
+  return {
+    refundTemplateTxID: fieldBytes(outer[2], 13, 'refund_template_txid'),
+    completeCloseTransactionRaw: fieldBytes(outer[3], 13, 'complete_close_transaction_raw')
   }
 }
 

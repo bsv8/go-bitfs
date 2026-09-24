@@ -50,6 +50,24 @@ export interface RefundPresignRequest {
   buyerRefundTransactionSignature: Uint8Array
 }
 
+/** Kind 12 买方关池请求；池关联 ID 是首个业务字段。 */
+export interface PoolCloseRequest {
+  /** 由 opening 推导的费用池关联 ID，固定为第一个业务字段。 */
+  refundTemplateTxID: Uint8Array
+  /** 最终 sequence/locktime 的未签名关闭交易原文。 */
+  unsignedCloseTransactionRaw: Uint8Array
+  /** 买方对未签名关闭交易的分离式交易签名。 */
+  buyerCloseTransactionSignature: Uint8Array
+}
+
+/** Kind 13 卖方关池响应；完整交易包含买卖双方的交易签名。 */
+export interface PoolCloseResponse {
+  /** 由 opening 推导的费用池关联 ID，固定为第一个业务字段。 */
+  refundTemplateTxID: Uint8Array
+  /** unlocking script 含买卖双方签名的完整关闭交易原文。 */
+  completeCloseTransactionRaw: Uint8Array
+}
+
 export function encodeSupportedArbiterPublicKeys (keys: readonly Uint8Array[]): Uint8Array {
   return encodeCanonical(keys.map(key => copy(key)))
 }
@@ -116,6 +134,21 @@ export function encodeRefundPresignResponse (refundTemplateTxID: Uint8Array, sel
 
 export function encodeFundingTransactionDelivery (refundTemplateTxID: Uint8Array, fundingTransactionRaw: Uint8Array): Artifact {
   return artifact([1n, 4n, copy(refundTemplateTxID), copy(fundingTransactionRaw)])
+}
+
+/** 编码 Kind 12 买方关池请求；交易签名由卖方工作流按 opening 验证。 */
+export function encodePoolCloseRequest (request: Readonly<PoolCloseRequest>): Artifact {
+  return artifact([
+    1n, 12n, copy(request.refundTemplateTxID),
+    copy(request.unsignedCloseTransactionRaw), copy(request.buyerCloseTransactionSignature)
+  ])
+}
+
+/** 编码 Kind 13 卖方关池响应；接收方仍须验证完整交易与费用池证据。 */
+export function encodePoolCloseResponse (response: Readonly<PoolCloseResponse>): Artifact {
+  return artifact([
+    1n, 13n, copy(response.refundTemplateTxID), copy(response.completeCloseTransactionRaw)
+  ])
 }
 
 export function encodePaymentUpdate (authorizationID: Uint8Array, buyerPaymentTransactionSignature: Uint8Array): Artifact {

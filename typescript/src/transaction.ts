@@ -3,6 +3,71 @@ import { ripemd160 } from '@noble/hashes/legacy.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { WireError } from './errors.js'
 
+/** 在 SDK 解析前扫描 CompactSize；10,000 个输入/输出是 SDK 资源上限，不是共识规则。 */
+export function preflightTransactionRaw (raw: Uint8Array): { inputs: number, outputs: number } {
+  const invalid = (): never => { throw new WireError('invalid_evidence', 0, 'raw_transaction', '交易长度或元素数量无效') }
+  const maxElements = 10000
+  let offset = 4
+  if (raw.byteLength < offset) invalid()
+  const remaining = (): number => raw.byteLength - offset
+  const skip = (length: number): void => {
+    if (!Number.isSafeInteger(length) || length < 0 || length > remaining()) invalid()
+    offset += length
+  }
+  const compact = (): number => {
+    if (remaining() < 1) invalid()
+    const prefix = raw[offset++]!
+    if (prefix < 0xfd) return prefix
+    const length = prefix === 0xfd ? 2 : prefix === 0xfe ? 4 : 8
+    if (remaining() < length) invalid()
+    let value = 0n
+    for (let index = 0; index < length; index++) value |= BigInt(raw[offset + index]!) << BigInt(index * 8)
+    offset += length
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) invalid()
+    return Number(value)
+  }
+  let inputs = compact()
+  if (inputs > maxElements) invalid()
+  let outputs = 0
+  let extended = false
+  if (inputs === 0) {
+    outputs = compact()
+    if (outputs === 0) {
+      if (remaining() < 4) invalid()
+      const marker = raw[offset]! * 0x1000000 + (raw[offset + 1]! << 16) + (raw[offset + 2]! << 8) + raw[offset + 3]!
+      offset += 4
+      if (marker !== 0xef) {
+        if (remaining() !== 0) invalid()
+        return { inputs: 0, outputs: 0 }
+      }
+      extended = true
+      inputs = compact()
+      if (inputs > maxElements) invalid()
+    }
+  }
+  if (inputs > Math.floor(remaining() / (extended ? 50 : 41))) invalid()
+  for (let index = 0; index < inputs; index++) {
+    skip(36)
+    skip(compact())
+    skip(4)
+    if (extended) { skip(8); skip(compact()) }
+  }
+  if (inputs > 0 || extended) outputs = compact()
+  if (remaining() < 4 || outputs > maxElements || outputs > Math.floor((remaining() - 4) / 9)) invalid()
+  for (let index = 0; index < outputs; index++) { skip(8); skip(compact()) }
+  skip(4)
+  if (remaining() !== 0) invalid()
+  return { inputs, outputs }
+}
+
+/** 关池候选专用边界：小报文且恰好花费一个费用池输入、产生三个角色输出。 */
+export function validatePoolCloseTransactionRaw (raw: Uint8Array): void {
+  if (raw.byteLength === 0) throw new WireError('invalid_evidence', 0, 'close_transaction_raw', '关池交易不能为空')
+  if (raw.byteLength > 65536) throw new WireError('malformed_wire', 0, 'close_transaction_raw', '关池交易超过 65536 bytes')
+  const shape = preflightTransactionRaw(raw)
+  if (shape.inputs !== 1 || shape.outputs !== 3) throw new WireError('invalid_evidence', 0, 'close_transaction_raw', '关池交易必须恰好一个输入和三个输出')
+}
+
 /** Bitcoin SV ForkID|All sighash 类型（低字节 0x41）。 */
 export const SIGHASH_FORKID_ALL = 0x41
 
@@ -136,6 +201,7 @@ export function validateArbitrationClaimStructure (claim: Readonly<ArbitrationCl
 }
 
 function parseTransaction (raw: Uint8Array): ParsedTransaction {
+  preflightTransactionRaw(raw)
   const reader = new Reader(raw)
   const version = reader.u32()
   const inputCount = reader.varIntNumber('input count')

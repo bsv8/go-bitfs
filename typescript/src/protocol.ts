@@ -11,7 +11,7 @@ export type SigningPurpose = 'wire_message' | 'transaction'
 /** SDK 已构造好的签名请求；Signer 只能签 32 字节 digest，不能自行选择哈希。 */
 export interface SigningRequest {
   purpose: SigningPurpose
-  /** 普通消息为 1..11，交易签名固定为 0。 */
+  /** 普通消息为 1..13，交易签名固定为 0。 */
   wireKind: number
   /** 已构造好的 32 字节摘要。 */
   digest: Uint8Array

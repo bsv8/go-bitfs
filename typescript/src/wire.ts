@@ -6,7 +6,7 @@ import { WireError } from './errors.js'
 import { verifyWireDocument } from './protocol.js'
 import { validateArbitrationClaimStructure } from './transaction.js'
 
-export type WireKind = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11
+export type WireKind = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
 const artifactToken: unique symbol = Symbol('validated BitFS artifact')
 
 /** 严格解析后的不可变完整报文；只证明结构规范，不代表业务证据已验收。 */
@@ -30,7 +30,7 @@ export function parse (rawInput: Uint8Array): Artifact {
   const version = uint(outer[0], 0, 'wire_version')
   const kindNumber = Number(uint(outer[1], 0, 'wire_kind'))
   if (version !== BigInt(WIRE_VERSION)) throw new WireError('unsupported_version', kindNumber, 'wire_version', `不支持 wire version ${version}`)
-  if (!Number.isInteger(kindNumber) || kindNumber < 1 || kindNumber > 11) throw new WireError('unsupported_kind', kindNumber, 'wire_kind', `不支持 wire kind ${kindNumber}`)
+  if (!Number.isInteger(kindNumber) || kindNumber < 1 || kindNumber > 13) throw new WireError('unsupported_kind', kindNumber, 'wire_kind', `不支持 wire kind ${kindNumber}`)
   const kind = kindNumber as WireKind
   validateOuter(kind, outer)
   return new Artifact(kind, raw, artifactToken)
@@ -56,6 +56,8 @@ function validateOuter (kind: WireKind, value: CBORValue[]): void {
     case 9: exact(value, 4, kind); validateReceipt(bytes(value[2], kind, 'arbitration_receipt_cbor')); signature(value[3], kind, 'arbiter_receipt_signature'); break
     case 10: exact(value, 4, kind); validateRetrievalRequest(bytes(value[2], kind, 'content_retrieval_request_cbor')); signature(value[3], kind, 'buyer_retrieval_signature'); break
     case 11: validateRetrievalResponse(value); break
+    case 12: exact(value, 5, kind); nonzeroHash(value[2], kind, 'refund_template_txid'); if (nonempty(value[3], kind, 'unsigned_close_transaction_raw').byteLength > 65536) malformed(kind, 'unsigned_close_transaction_raw', '关闭交易超过 65536 bytes'); signature(value[4], kind, 'buyer_close_transaction_signature'); break
+    case 13: exact(value, 4, kind); nonzeroHash(value[2], kind, 'refund_template_txid'); if (nonempty(value[3], kind, 'complete_close_transaction_raw').byteLength > 65536) malformed(kind, 'complete_close_transaction_raw', '关闭交易超过 65536 bytes'); break
   }
 }
 
@@ -83,11 +85,14 @@ function validateAuthorization (raw: Uint8Array): { paymentSequence: bigint, sel
 
 function validateDelivery (raw: Uint8Array): void { const value = child(raw, 6, 'content_delivery_cbor', 1); nonzeroHash(value[0], 6, 'payment_authorization_id') }
 function validateClaim (raw: Uint8Array): void {
+  if (raw.byteLength > 65536) malformed(8, 'arbitration_claim_cbor', 'Claim 超过 65536 bytes')
   const value = child(raw, 8, 'arbitration_claim_cbor', 5)
   const poolOutputSatoshis = uint(value[0], 8, 'pool_output_satoshis'); if (poolOutputSatoshis === 0n) invalid(8, 'pool_output_satoshis', '池输出金额必须为正数')
   const lockingScript = sized(value[1], 105, 8, 'pool_output_locking_script')
   const refundTemplateRaw = nonempty(value[2], 8, 'refund_template_raw')
+  if (refundTemplateRaw.byteLength > 16384) malformed(8, 'refund_template_raw', '退款模板超过 16384 bytes')
   const authorizationRaw = bytes(value[3], 8, 'payment_authorization_cbor')
+  if (authorizationRaw.byteLength > 16384) malformed(8, 'payment_authorization_cbor', '付款授权超过 16384 bytes')
   const authorization = validateAuthorization(authorizationRaw)
   const buyerSignature = signature(value[4], 8, 'buyer_authorization_signature')
   const keys = validateArbitrationClaimStructure({ poolOutputSatoshis, poolOutputLockingScript: lockingScript, refundTemplateRaw, paymentSequence: authorization.paymentSequence, sellerAmountAfterSatoshis: authorization.sellerAmountAfterSatoshis })

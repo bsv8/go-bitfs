@@ -1,8 +1,8 @@
 // 0202 是开池流程的卖方接收动作。
 //
-// 它从标准输入读取 0201 产生的 exact Kind 2 bytes，交给 seller workflow 做结
-// 构、参与方、公钥、退款交易以及买方签名的完整校验；校验成功后，卖方从收到
-// 的 request 重新派生 RefundTemplateTxID 并签署同一笔退款交易，返回携带该关
+// 它从标准输入读取 0201 产生的 exact Kind 2 bytes，交给 seller.PreparePresign
+// 做结构、参与方、公钥、退款交易以及买方签名的完整校验；校验成功后，卖方从收
+// 到的 request 重新派生 RefundTemplateTxID 并签署同一笔退款交易，返回携带该关
 // 联 ID 的 Kind 3 预签响应。响应不携带 FundingTransactionRaw 原文。
 // 卖方的预签证据（exact Kind 2 request 字节）由本 demo 的 checkpoint 显式保
 // 存——SDK 不做任何持久化。
@@ -16,11 +16,13 @@ import (
 
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
-	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/seller"
+	"github.com/bsv8/go-bitfs/wire"
 )
 
 func main() {
-	// 读取 demo/.env，获得卖方私钥等配置。workflow 只持有受约束 Signer。
+	// 读取 demo/.env，获得卖方私钥等配置。SellerSigner 只在下一次 API 调用时
+	// 临时传入。
 	if err := demoenv.Load(); err != nil {
 		fail(err)
 	}
@@ -40,24 +42,29 @@ func main() {
 	debug("=== 0202 卖方：接受、检验并回应退款预签请求（Kind 2）===")
 	debug("[transport] seller <- buyer: RefundPresignRequest (%d bytes)", len(requestRaw))
 	debug("[seller] 检验请求结构、参与方、公钥、退款交易和买方签名")
-	// seller.PreparePoolOpening 会确认请求中的卖方公钥确实属于当前卖方，
-	// 计算卖方退款签名并返回待发送 Kind 3 Artifact 与必须先持久化的
-	// OpeningCheckpoint。SDK 不保存任何证据；应用必须先保存 checkpoint，
-	// 再发送 Outbound。
-	prepared, err := session.Seller.PreparePoolOpening(ctx, requestRaw)
+	// seller.PreparePresign 会确认请求中的卖方公钥确实属于当前卖方，
+	// 计算卖方退款签名并返回待发送 Kind 3 Artifact 与必须先持久化的普通证据
+	// 包。SDK 不保存任何证据；应用必须先保存 checkpoint，再发送 Outbound。
+	responseArtifact, evidence, err := seller.PreparePresign(ctx, requestRaw, session.SellerSigner)
 	if err != nil {
-		fail(fmt.Errorf("seller.PreparePoolOpening: %w", err))
+		fail(fmt.Errorf("seller.PreparePresign: %w", err))
 	}
 	checkpointPath := poolopening.SellerPresignCheckpointPath()
-	// 卖方预签 checkpoint 的关联 ID 从本地 opening proof 重新派生（不信任传输层）。
-	refundTemplateTxID, err := pool.DeriveRefundTemplateTxID(prepared.Checkpoint.Opening())
+	// 卖方预签 checkpoint 的关联 ID 从本地重算的 exact Kind 3 重新派生
+	// （不信任传输层）。
+	presignResponseArtifact, err := wire.ParseAs(wire.RefundPresignResponse, evidence.RawKind3)
 	if err != nil {
-		fail(fmt.Errorf("derive presign correlation id: %w", err))
+		fail(fmt.Errorf("parse seller refund presign response: %w", err))
 	}
+	presignResponse, err := wire.DecodeRefundPresignResponse(presignResponseArtifact)
+	if err != nil {
+		fail(fmt.Errorf("decode seller refund presign response: %w", err))
+	}
+	refundTemplateTxID := presignResponse.RefundTemplateTxID
 	if err := poolopening.SaveSellerPresignCheckpoint(checkpointPath, refundTemplateTxID, requestRaw); err != nil {
 		fail(fmt.Errorf("save seller presign checkpoint (caller responsibility): %w", err))
 	}
-	responseRaw := prepared.Outbound.Bytes() // exact Kind 3 bytes：先持久化证据再发送
+	responseRaw := responseArtifact.Bytes() // exact Kind 3 bytes：先持久化证据再发送
 	debug("[seller] 预签 evidence 已保存到应用 checkpoint %s", checkpointPath)
 	// 响应是独立的 wire 报文。其核心内容是卖方重新派生的 RefundTemplateTxID 和
 	// 退款签名；0203 只凭该 hash 关联买方自己的本地状态。

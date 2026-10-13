@@ -346,12 +346,12 @@ func TestPayloadVerificationChecksSeedMembership(t *testing.T) {
 		t.Fatalf("valid request rejected: %v", err)
 	}
 	// 已提交块在提供 seed 时通过 payload 校验。
-	if _, err := VerifyContentPayloadsContext(context.Background(), terms, [][]byte{blockHash}, [][]byte{append([]byte(nil), source...)}, seed); err != nil {
+	if _, err := VerifyContentPayloads(context.Background(), terms, [][]byte{blockHash}, [][]byte{append([]byte(nil), source...)}, seed); err != nil {
 		t.Fatalf("committed block rejected: %v", err)
 	}
 	otherHash := masterseed.Sum256([]byte("uncommitted")).Bytes()
 	// 未提交内容不在 seed 中：映射为 invalid_evidence 并保留 BlockNotInSeed 原因。
-	_, err := VerifyContentPayloadsContext(context.Background(), terms, [][]byte{otherHash}, [][]byte{[]byte("uncommitted")}, seed)
+	_, err := VerifyContentPayloads(context.Background(), terms, [][]byte{otherHash}, [][]byte{[]byte("uncommitted")}, seed)
 	assertMasterSeedCode(t, err, masterseed.BlockNotInSeed)
 	if !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("uncommitted block error class = %v", err)
@@ -375,7 +375,7 @@ func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
 	seedHash := quoteSeedHash(t, quote)
 	batch := [][]byte{seedHash, masterseed.Sum256(blockZero).Bytes(), masterseed.Sum256(tail).Bytes()}
 	payloads := [][]byte{seed, blockZero, tail}
-	effective, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads, seed)
+	effective, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, payloads, seed)
 	if err != nil {
 		t.Fatalf("valid mixed batch rejected: %v", err)
 	}
@@ -383,37 +383,37 @@ func TestVerifyContentPayloadsBatchAtomicity(t *testing.T) {
 		t.Fatal("effective seed does not match the caller-provided verified seed")
 	}
 	// 批次内自带 seed 时，纯块批次可以不传调用方 seed，但成员校验仍必须完成。
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads, nil); err != nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, payloads, nil); err != nil {
 		t.Fatalf("batch-carried seed rejected: %v", err)
 	}
 	// 错序整批拒绝。
 	swapped := [][]byte{payloads[1], payloads[0], payloads[2]}
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, swapped, seed); err == nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, swapped, seed); err == nil {
 		t.Fatal("reordered payload batch accepted")
 	}
 	// 数量不符整批拒绝。
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, payloads[:2], seed); err == nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, payloads[:2], seed); err == nil {
 		t.Fatal("missing payload accepted")
 	}
 	extra := append(append([][]byte(nil), payloads...), []byte("extra"))
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, extra, seed); err == nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, extra, seed); err == nil {
 		t.Fatal("extra payload accepted")
 	}
 	// 篡改单项整批拒绝。
 	tampered := append([][]byte(nil), payloads...)
 	tampered[2] = append([]byte(nil), tampered[2]...)
 	tampered[2][0] ^= 0xff
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch, tampered, seed); err == nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch, tampered, seed); err == nil {
 		t.Fatal("tampered payload accepted")
 	}
 	// 无 seed 且批次不含 seed 时拒绝块校验（fail-closed：缺 verified seed）。
 	blockOnly := batch[1:2]
-	_, err = VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), blockOnly, payloads[1:2], nil)
+	_, err = VerifyContentPayloads(context.Background(), batchTerms(t, quote), blockOnly, payloads[1:2], nil)
 	if !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("block-only batch without seed error = %v", err)
 	}
 	// 纯 seed 批次不需要调用方 seed。
-	if _, err := VerifyContentPayloadsContext(context.Background(), batchTerms(t, quote), batch[:1], payloads[:1], nil); err != nil {
+	if _, err := VerifyContentPayloads(context.Background(), batchTerms(t, quote), batch[:1], payloads[:1], nil); err != nil {
 		t.Fatalf("pure-seed batch rejected: %v", err)
 	}
 }
@@ -534,12 +534,12 @@ func TestExportedBatchEntriesFailClosedOnNonProtocolInput(t *testing.T) {
 	}
 	payloads := [][]byte{source[:10], source[10:20]}
 	hashes := [][]byte{masterseed.Sum256(payloads[0]).Bytes(), masterseed.Sum256(payloads[0]).Bytes()}
-	if _, err := VerifyContentPayloadsContext(context.Background(), terms, hashes, payloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+	if _, err := VerifyContentPayloads(context.Background(), terms, hashes, payloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("payload verification accepted duplicate hashes: %v", err)
 	}
 	emptyPayloads := [][]byte{nil}
 	singleHash := [][]byte{duplicate}
-	if _, err := VerifyContentPayloadsContext(context.Background(), terms, singleHash, emptyPayloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+	if _, err := VerifyContentPayloads(context.Background(), terms, singleHash, emptyPayloads, seed); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("payload verification accepted an empty payload: %v", err)
 	}
 }
@@ -595,7 +595,7 @@ func TestMasterSeedErrorsMapToBitFSCategories(t *testing.T) {
 	blockTerms.FileSizeBytes = uint64(len(source))
 	blockTerms.SeedHash = seedHash.Bytes()
 	other := []byte("uncommitted")
-	_, err = VerifyContentPayloadsContext(context.Background(), blockTerms, [][]byte{masterseed.Sum256(other).Bytes()}, [][]byte{append([]byte(nil), other...)}, seed)
+	_, err = VerifyContentPayloads(context.Background(), blockTerms, [][]byte{masterseed.Sum256(other).Bytes()}, [][]byte{append([]byte(nil), other...)}, seed)
 	assertMasterSeedCode(t, err, masterseed.BlockNotInSeed)
 }
 

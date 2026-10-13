@@ -157,6 +157,73 @@ func TestPaymentUpdateRejectsInvalidReference(t *testing.T) {
 	}
 }
 
+func TestPoolCloseDecodeClassifiesCBORFieldTypeErrors(t *testing.T) {
+	hash := bytes.Repeat([]byte{1}, sha256.Size)
+	encode := func(values ...any) []byte {
+		t.Helper()
+		raw, err := poolEnc.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	request := encode(uint64(1), uint64(12), hash, "transaction must be a byte string", []byte{1})
+	if _, err := DecodePoolCloseRequest(request); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+		t.Fatalf("Kind 12 field type error = %v, want malformed_wire", err)
+	}
+	response := encode(uint64(1), uint64(13), hash, uint64(42))
+	if _, err := DecodePoolCloseResponse(response); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+		t.Fatalf("Kind 13 field type error = %v, want malformed_wire", err)
+	}
+}
+
+func TestPoolCloseRejectsIntegerArraysInsteadOfByteStrings(t *testing.T) {
+	hash := bytes.Repeat([]byte{1}, 32)
+	array := make([]any, 32)
+	for index := range array {
+		array[index] = uint64(1)
+	}
+	for _, test := range []struct {
+		name   string
+		kind   uint64
+		fields []any
+	}{
+		{"request pool ID", 12, []any{array, []byte{1}, []byte{1}}},
+		{"request transaction", 12, []any{hash, []any{uint64(1)}, []byte{1}}},
+		{"request signature", 12, []any{hash, []byte{1}, []any{uint64(1)}}},
+		{"response pool ID", 13, []any{array, []byte{1}}},
+		{"response transaction", 13, []any{hash, []any{uint64(1)}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := append([]any{uint64(1), test.kind}, test.fields...)
+			raw, err := poolEnc.Marshal(values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.kind == 12 {
+				_, err = DecodePoolCloseRequest(raw)
+			} else {
+				_, err = DecodePoolCloseResponse(raw)
+			}
+			if !protocol.IsCode(err, protocol.CodeMalformedWire) {
+				t.Fatalf("integer array field = %v, want malformed_wire", err)
+			}
+		})
+	}
+}
+
+func TestPoolCloseRejectsOversizedTransactions(t *testing.T) {
+	hash := RefundTemplateTxID(bytes.Repeat([]byte{1}, 32))
+	oversized := bytes.Repeat([]byte{1}, maxPoolCloseTransactionBytes+1)
+	if _, err := EncodePoolCloseRequest(&PoolCloseRequest{RefundTemplateTxID: hash, UnsignedCloseTransactionRaw: oversized, BuyerCloseTransactionSignature: []byte{1}}); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+		t.Fatalf("oversized close request = %v, want malformed_wire", err)
+	}
+	if _, err := EncodePoolCloseResponse(&PoolCloseResponse{RefundTemplateTxID: hash, CompleteCloseTransactionRaw: oversized}); !protocol.IsCode(err, protocol.CodeMalformedWire) {
+		t.Fatalf("oversized close response = %v, want malformed_wire", err)
+	}
+}
+
 func TestOpeningProofRoundTrip(t *testing.T) {
 	_, proof := mustRefundExpiryFixture(t, 500000100)
 	raw, err := EncodeOpeningProof(proof)

@@ -12,6 +12,14 @@ func protocolErrorf(op string, kind uint16, field, format string, args ...any) e
 	return protocol.Errorf(op, protocol.CodeUnsupportedKind, kind, field, format, args...)
 }
 
+// encodeArtifact 在构造 transport-ready Artifact 前复用解析器的全局尺寸上限。
+func encodeArtifact(kind Kind, raw []byte) (Artifact, error) {
+	if len(raw) > MaxWireParseBytes {
+		return Artifact{}, protocol.Errorf("wire.Encode", protocol.CodeMalformedWire, uint16(kind), "wire", "encoded message exceeds the protocol size limit %d bytes", MaxWireParseBytes)
+	}
+	return newArtifact(kind, raw), nil
+}
+
 // typed encoder：每个 Kind 一个唯一入口，返回 transport-ready Artifact，
 // 不再让普通调用方自己组合 Kind 与 any。
 
@@ -21,7 +29,7 @@ func EncodeFileQuote(quote *content.SignedFileQuote) (Artifact, error) {
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(FileQuote, raw), nil
+	return encodeArtifact(FileQuote, raw)
 }
 
 // EncodeRefundPresignRequest encodes a pool-opening presign request into a Kind 2 Artifact.
@@ -30,7 +38,7 @@ func EncodeRefundPresignRequest(request *pool.RefundPresignRequest) (Artifact, e
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(RefundPresignRequest, raw), nil
+	return encodeArtifact(RefundPresignRequest, raw)
 }
 
 // EncodeRefundPresignResponse encodes a presign response into a Kind 3 Artifact.
@@ -39,7 +47,7 @@ func EncodeRefundPresignResponse(response *pool.RefundPresignResponse) (Artifact
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(RefundPresignResponse, raw), nil
+	return encodeArtifact(RefundPresignResponse, raw)
 }
 
 // EncodeFundingTransactionDelivery encodes the funding delivery into a Kind 4 Artifact.
@@ -48,7 +56,7 @@ func EncodeFundingTransactionDelivery(delivery *pool.FundingTransactionDelivery)
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(FundingTransactionDelivery, raw), nil
+	return encodeArtifact(FundingTransactionDelivery, raw)
 }
 
 // EncodeContentRequest encodes a signed payment authorization into a Kind 5 Artifact.
@@ -57,7 +65,7 @@ func EncodeContentRequest(request *content.SignedContentRequest) (Artifact, erro
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ContentRequest, raw), nil
+	return encodeArtifact(ContentRequest, raw)
 }
 
 // EncodeContentDelivery encodes a signed delivery into a Kind 6 Artifact.
@@ -66,7 +74,7 @@ func EncodeContentDelivery(delivery *content.SignedContentDelivery) (Artifact, e
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ContentDelivery, raw), nil
+	return encodeArtifact(ContentDelivery, raw)
 }
 
 // EncodePaymentUpdate encodes a buyer payment credential into a Kind 7 Artifact.
@@ -75,7 +83,7 @@ func EncodePaymentUpdate(update *pool.PaymentUpdate) (Artifact, error) {
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(PaymentUpdate, raw), nil
+	return encodeArtifact(PaymentUpdate, raw)
 }
 
 // EncodeArbitrationRequest encodes the complete 007 evidence package into a Kind 8 Artifact.
@@ -84,7 +92,7 @@ func EncodeArbitrationRequest(request *arbitration.ArbitrationRequest) (Artifact
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ArbitrationRequest, raw), nil
+	return encodeArtifact(ArbitrationRequest, raw)
 }
 
 // EncodeArbitrationResponse encodes the four-element receipt response into a Kind 9 Artifact.
@@ -93,7 +101,7 @@ func EncodeArbitrationResponse(response *arbitration.ArbitrationResponse) (Artif
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ArbitrationResponse, raw), nil
+	return encodeArtifact(ArbitrationResponse, raw)
 }
 
 // EncodeContentRetrievalRequest encodes a buyer retrieval request into a Kind 10 Artifact.
@@ -102,7 +110,7 @@ func EncodeContentRetrievalRequest(request *arbitration.ContentRetrievalRequest)
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ContentRetrievalRequest, raw), nil
+	return encodeArtifact(ContentRetrievalRequest, raw)
 }
 
 // EncodeContentRetrievalResponse encodes an arbiter-signed retrieval result into a Kind 11 Artifact.
@@ -111,7 +119,25 @@ func EncodeContentRetrievalResponse(response *arbitration.ContentRetrievalRespon
 	if err != nil {
 		return Artifact{}, err
 	}
-	return newArtifact(ContentRetrievalResponse, raw), nil
+	return encodeArtifact(ContentRetrievalResponse, raw)
+}
+
+// EncodePoolCloseRequest 将买方关池请求编码为 Kind 12 Artifact。
+func EncodePoolCloseRequest(request *pool.PoolCloseRequest) (Artifact, error) {
+	raw, err := pool.EncodePoolCloseRequest(request)
+	if err != nil {
+		return Artifact{}, err
+	}
+	return encodeArtifact(PoolCloseRequest, raw)
+}
+
+// EncodePoolCloseResponse 将卖方关池响应编码为 Kind 13 Artifact。
+func EncodePoolCloseResponse(response *pool.PoolCloseResponse) (Artifact, error) {
+	raw, err := pool.EncodePoolCloseResponse(response)
+	if err != nil {
+		return Artifact{}, err
+	}
+	return encodeArtifact(PoolCloseResponse, raw)
 }
 
 // typed decoder：接收 Artifact（已通过严格解析），复核 Kind 一致后返回深拷贝
@@ -221,4 +247,22 @@ func DecodeContentRetrievalResponse(artifact Artifact) (*arbitration.ContentRetr
 		return nil, err
 	}
 	return arbitration.UnmarshalContentRetrievalResponse(raw)
+}
+
+// DecodePoolCloseRequest 严格解码 Kind 12 Artifact。
+func DecodePoolCloseRequest(artifact Artifact) (*pool.PoolCloseRequest, error) {
+	raw, err := decodeTyped(artifact, PoolCloseRequest, "wire.DecodePoolCloseRequest")
+	if err != nil {
+		return nil, err
+	}
+	return pool.DecodePoolCloseRequest(raw)
+}
+
+// DecodePoolCloseResponse 严格解码 Kind 13 Artifact。
+func DecodePoolCloseResponse(artifact Artifact) (*pool.PoolCloseResponse, error) {
+	raw, err := decodeTyped(artifact, PoolCloseResponse, "wire.DecodePoolCloseResponse")
+	if err != nil {
+		return nil, err
+	}
+	return pool.DecodePoolCloseResponse(raw)
 }

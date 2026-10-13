@@ -23,6 +23,9 @@ github.com/bsv8/MultisigPool/v4/pkg
 github.com/bsv8/MultisigPool/v4/pkg/arbitrated_pool
 github.com/bsv8/MultisigPool/v4/pkg/libs
 github.com/bsv8/MultisigPool/v4/pkg/two_party_pool
+# github.com/bsv8/bitcoin-libp2p v0.3.0
+## explicit; go 1.25.7
+github.com/bsv8/bitcoin-libp2p/streamio
 # github.com/fxamacker/cbor/v2 v2.9.2
 ## explicit; go 1.20
 github.com/fxamacker/cbor/v2
@@ -32,6 +35,6 @@ github.com/pkg/errors
 # github.com/x448/float16 v0.8.4
 ## explicit; go 1.11
 github.com/x448/float16
-# golang.org/x/crypto v0.48.0
-## explicit; go 1.24.0
+# golang.org/x/crypto v0.54.0
+## explicit; go 1.25.0
 golang.org/x/crypto/ripemd160

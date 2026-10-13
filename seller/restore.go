@@ -10,12 +10,12 @@ import (
 	"github.com/bsv8/go-bitfs/wire"
 )
 
-// RestoreOpeningCheckpoint 从 exact evidence（exact Kind 2 请求 bytes + exact
+// restoreOpeningCheckpoint 从 exact evidence（exact Kind 2 请求 bytes + exact
 // Kind 3 响应 bytes）恢复卖方预签 checkpoint：请求侧做完整证据验证（结构、
 // 角色、canonical 模板重建、买方交易签名），响应侧验证其关联 ID 与请求重派生
 // 值一致、并确认其中的卖方签名确实覆盖该模板——预签证明只能由真实证据重建。
-func RestoreOpeningCheckpoint(rawKind2 []byte, rawKind3 []byte) (*OpeningCheckpoint, error) {
-	const op = "seller.RestoreOpeningCheckpoint"
+func restoreOpeningCheckpoint(rawKind2 []byte, rawKind3 []byte) (*openingCheckpoint, error) {
+	const op = "seller.restoreOpeningCheckpoint"
 	requestArtifact, err := wire.ParseAs(wire.RefundPresignRequest, rawKind2)
 	if err != nil {
 		return nil, err
@@ -52,14 +52,14 @@ func RestoreOpeningCheckpoint(rawKind2 []byte, rawKind3 []byte) (*OpeningCheckpo
 	if err != nil {
 		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 3, "seller_signature")
 	}
-	return &OpeningCheckpoint{opening: proof}, nil
+	return &openingCheckpoint{opening: proof}, nil
 }
 
-// RestorePoolCheckpoint 从 exact evidence（canonical opening proof 编码 + 当前
+// restorePoolCheckpoint 从 exact evidence（canonical opening proof 编码 + 当前
 // 完整付款状态 raw tx）恢复池 checkpoint：opening 与付款状态都走完整签名验证
-// 路径；角色归属绑定由后续操作用 Workflow 公钥再次强制执行。
-func RestorePoolCheckpoint(openingProofCBOR []byte, paymentRawTx []byte) (*PoolCheckpoint, error) {
-	const op = "seller.RestorePoolCheckpoint"
+// 路径；角色归属绑定由后续操作用 workflow 公钥再次强制执行。
+func restorePoolCheckpoint(openingProofCBOR []byte, paymentRawTx []byte) (*poolCheckpoint, error) {
+	const op = "seller.restorePoolCheckpoint"
 	opening, err := pool.DecodeOpeningProof(openingProofCBOR)
 	if err != nil {
 		return nil, err
@@ -78,18 +78,18 @@ func RestorePoolCheckpoint(openingProofCBOR []byte, paymentRawTx []byte) (*PoolC
 	if state.RefundTemplateTxID() != details.RefundTemplateTxID {
 		return nil, protocol.Errorf(op, protocol.CodeStateConflict, 0, "payment_state", "restored payment belongs to another pool")
 	}
-	return &PoolCheckpoint{opening: opening, payment: state.State()}, nil
+	return &poolCheckpoint{opening: opening, payment: state.State()}, nil
 }
 
-// RestoreDeliveryCheckpoint 从本方生成并签署该交付时的完整 exact evidence
+// restoreDeliveryCheckpoint 从本方生成并签署该交付时的完整 exact evidence
 // （exact Kind 1 + canonical opening proof 编码 + exact 已签 Kind 5 + 本方发出
 // 的 exact Kind 6）恢复交付 checkpoint，并做全量重验：
 //   - 003 全链证据：报价证据与卖方签名、池绑定、买方统一签名、条款 ID 与角色绑定；
 //   - 004 归属：content_delivery_cbor 绑定的授权 ID 与 Kind 5 重算值一致，
 //     卖方对精确 content_delivery_cbor 的统一签名有效（证明本方确实签署过该交付）；
 //   - 四个 checkpoint 字段全部从授权原文重派生，绝不信任持久化派生值。
-func RestoreDeliveryCheckpoint(rawKind1, openingProofCBOR, rawKind5, rawKind6 []byte) (*DeliveryCheckpoint, error) {
-	const op = "seller.RestoreDeliveryCheckpoint"
+func restoreDeliveryCheckpoint(rawKind1, openingProofCBOR, rawKind5, rawKind6 []byte) (*deliveryCheckpoint, error) {
+	const op = "seller.restoreDeliveryCheckpoint"
 	quoteArtifact, err := wire.ParseAs(wire.FileQuote, rawKind1)
 	if err != nil {
 		return nil, err
@@ -152,7 +152,7 @@ func RestoreDeliveryCheckpoint(rawKind1, openingProofCBOR, rawKind5, rawKind6 []
 	}
 	var refundTemplateTxID pool.RefundTemplateTxID
 	copy(refundTemplateTxID[:], requestTerms.RefundTemplateTxID)
-	return &DeliveryCheckpoint{
+	return &deliveryCheckpoint{
 		refundTemplateTxID:        refundTemplateTxID,
 		authorizationID:           authID,
 		paymentSequence:           protocol.PaymentSequence(requestTerms.PaymentSequence),

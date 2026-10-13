@@ -390,6 +390,9 @@ func (engine *MultisigPoolEngine) verifyArbitrationPayment(unsigned *UnsignedPay
 	if len(signature) == 0 {
 		return invalid(role + " transaction signature is required")
 	}
+	if err := engine.verifyTransactionSignature(state, role, signature); err != nil {
+		return err
+	}
 	details := unsigned.PoolOutputSatoshis
 	roles := engine.roles()
 	var valid bool
@@ -402,10 +405,10 @@ func (engine *MultisigPoolEngine) verifyArbitrationPayment(unsigned *UnsignedPay
 		return invalid("unsupported arbitration payment role")
 	}
 	if err != nil {
-		return err
+		return protocol.Wrap(err, "pool.verifyArbitrationPayment", protocol.CodeInvalidSignature, 0, role+"_transaction_signature")
 	}
 	if !valid {
-		return invalid(role + " transaction signature is invalid")
+		return protocol.Errorf("pool.verifyArbitrationPayment", protocol.CodeInvalidSignature, 0, role+"_transaction_signature", "%s transaction signature is invalid", role)
 	}
 	return nil
 }

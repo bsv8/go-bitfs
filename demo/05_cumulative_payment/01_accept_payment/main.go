@@ -27,7 +27,7 @@ func main() {
 	}
 	now := time.Now().UTC()
 	debug("=== Step 005: Cumulative Payment ===")
-	debug("[buyer] VerifyDeliveryAndPreparePayment verifies 004 against caller-held state, prices content, rebuilds the unsigned state locally, and signs the buyer payment")
+	debug("[buyer] buyer.VerifyDelivery verifies 004 against caller-held state, prices content, rebuilds the unsigned state locally, and signs the buyer payment")
 	round, err := f.RunSeedPurchase(ctx, now)
 	if err != nil {
 		fail(err)

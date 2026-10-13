@@ -7,7 +7,7 @@ title: 01 · Protocol foundations and CBOR
 
 Return to the [SDK API framework](sdk-api-framework-design.md).
 
-The current implementation provides the boundaries described here: `protocol`, `content`, `pool`, `arbitration`, `buyer.Workflow`, `seller.Workflow`, `arbiter.Workflow`, and `wire` are ready to use. Pseudocode on this page explains responsibilities; it does not replace the actual Go signatures.
+The current implementation provides the boundaries described here: `protocol`, `content`, `pool`, `arbitration`, the pure role steps in `buyer`, `seller`, `arbiter`, and `wire` are ready to use. Pseudocode on this page explains responsibilities; it does not replace the actual Go signatures.
 
 ## Design goal
 
@@ -25,7 +25,7 @@ Seller signs a quote
 
 ## Package boundaries
 
-The API has four layers: shared protocol foundations, pure domain packages, an exact-bytes wire layer, and the role workflows that are the only recommended application path.
+The API has four layers: shared protocol foundations, pure domain packages, an exact-bytes wire layer, and the pure role step functions that are the only recommended application path.
 
 ```text
 protocol/     Shared foundations: constrained Signer port (+ NewPrivateKeySigner),
@@ -40,7 +40,7 @@ arbitration/  Pure 007/008 custody-evidence domain functions; no role state
 wire/         Typed encoders and strict decoders over exact bytes returning
               immutable wire.Artifact values
 buyer/, seller/, arbiter/
-              Role workflow facades; produce the next Artifact, transaction, or
+              Pure role steps; produce the next Artifact, transaction, or
               opaque checkpoint to persist. Delivery-context serialization is the
               calling application's responsibility
 ```
@@ -76,7 +76,7 @@ const (
     CodeMalformedWire        // 报文结构、数组形状或字段宽度畸形
     CodeNonCanonical         // 结构合法但编码不是 deterministic CBOR
     CodeUnsupportedVersion   // wire version 不是 1
-    CodeUnsupportedKind      // Kind 不在 1..11 或与路由声明不一致
+    CodeUnsupportedKind      // Kind 不在 1..13 或与路由声明不一致
     CodeInvalidSignature     // 消息签名或交易签名验证失败
     CodeInvalidEvidence      // 哈希不匹配、池绑定失败、金额守恒破坏等
     CodeUnauthorized         // 角色公钥与操作者身份不符
@@ -127,6 +127,8 @@ const (
     ArbitrationResponse Kind = 9         // 仲裁方 -> 卖方
     ContentRetrievalRequest Kind = 10    // 买方 -> 仲裁方
     ContentRetrievalResponse Kind = 11   // 仲裁方 -> 买方
+    PoolCloseRequest Kind = 12           // 买方 -> 卖方
+    PoolCloseResponse Kind = 13          // 卖方 -> 买方
 )
 
 // 每个 Kind 恰好一个类型化 encoder（返回 transport-ready Artifact）与一个
@@ -136,11 +138,11 @@ artifact, err := wire.EncodeFileQuote(signedQuote)      // Kind 1
 decoded, err := wire.DecodeFileQuote(artifact)          // *content.SignedFileQuote
 ```
 
-Wire v1 is unchanged: every complete message starts with `[protocol.WireVersion, wire_kind, ...]`, the outer pair is injected by each owning encoder, checked by every strict decoder, and folded into ordinary message signatures through `protocol.SignWireDocument`. Authentication documents carry no version or kind element of their own. Messages that define `RefundTemplateTxID` carry it in the CBOR document; the 0201 presign request derives it from RefundTx and has no separate correlation-ID field.
+Wire v1 uses one outer format: every complete message starts with `[protocol.WireVersion, wire_kind, ...]`, the outer pair is injected by each owning encoder, checked by every strict decoder, and folded into ordinary message signatures through `protocol.SignWireDocument`. Authentication documents carry no version or kind element of their own. Messages that define `RefundTemplateTxID` carry it in the CBOR document; the 0201 presign request derives it from RefundTx and has no separate correlation-ID field.
 
-006 introduces no application-level close message. Closing uses raw transactions already retained from 002 and 005; applications should not invent a CBOR `CloseRequest`.
+Pool opening and negotiated closing share the pool lifecycle wire specification in 002. Kind 12 carries the buyer's unsigned final-close transaction and detached transaction signature; Kind 13 returns the complete transaction. Applications should use these Artifacts and keep transport, persistence, retries, broadcast, and confirmation tracking in the application layer.
 
-A parsed Artifact answers only whether bytes conform to a message schema. The role workflows subsequently validate signatures, quote expiry, payment-pool inputs, and amounts with the SDK's fixed verifiers — there are no caller-supplied verifier callbacks to configure. A decoder MUST NOT expose "decoded" as "verified" or "paid."
+A parsed Artifact answers only whether bytes conform to a message schema. The pure role steps subsequently validate signatures, quote expiry, payment-pool inputs, and amounts with the SDK's fixed verifiers — there are no caller-supplied verifier callbacks to configure. A decoder MUST NOT expose "decoded" as "verified" or "paid."
 
 Every protocol identity public key is encoded as a valid 33-byte compressed secp256k1 key. The fixed validation layer rejects 65-byte uncompressed keys before they can enter signed 001/003/004 terms or 002 pool evidence.
 
@@ -181,4 +183,4 @@ func CheckContentRequestTiming(requestTerms *PaymentAuthorization, quoteTerms *F
 func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error)
 ```
 
-The role workflows in [03 · Role workflow API](role-workflow-api.md) compose these pieces; applications should prefer them over calling domain functions directly.
+The pure role steps in [03 · Role pure-function API](role-workflow-api.md) compose these pieces; applications should prefer them over calling domain functions directly.

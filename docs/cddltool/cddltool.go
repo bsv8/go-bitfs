@@ -436,7 +436,7 @@ func (p *parser) parseTerm() (*node, error) {
 		}
 		n.name = tok
 		if p.peek() == ".." {
-			// Range over a numeric alias (e.g. wire-kind = 1..11 handled at
+			// Range over a numeric alias (e.g. wire-kind = 1..13 handled at
 			// literal level; aliases with ranges are not supported).
 			return nil, fmt.Errorf("ranges over rule references are not supported")
 		}

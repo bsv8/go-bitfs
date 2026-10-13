@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/bsv8/go-bitfs/arbiter"
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
@@ -64,11 +65,11 @@ func main() {
 	if err := f.DeliverRound(ctx, now, round, [][]byte{append([]byte(nil), f.Seed...)}); err != nil {
 		fail(err)
 	}
-	rawKind8Artifact, err := f.Seller.PrepareArbitration(ctx, f.Facts(now), seller.ArbitrationCommand{
+	rawKind8Artifact, _, err := seller.PrepareArbitration(ctx, f.Facts(now), seller.PrepareArbitrationInput{
 		Pool:        f.SellerPool,
-		Request:     round.Request.Checkpoint.Request(),
+		RequestRaw:  round.Authorization.RawKind5,
 		DeliveryRaw: round.Kind6Raw,
-	})
+	}, f.SellerSigner)
 	if err != nil {
 		fail(fmt.Errorf("seller.PrepareArbitration: %w", err))
 	}
@@ -88,33 +89,32 @@ func main() {
 	store := &custodyRecord{requestBytes: append([]byte(nil), rawKind8...)}
 	debug("[arbiter] exact Kind 8 persisted; record is CustodyPrepared (no Kind 9 yet)")
 
-	prepared, err := f.Arbiter.PrepareArbitration(f.Facts(now), rawKind8, protocol.Satoshis(demoFeePolicy(len(deliveryDTO.ContentPayloadsCBOR))))
+	prepared, err := arbiter.PrepareArbitration(f.Facts(now), rawKind8, protocol.Satoshis(demoFeePolicy(len(deliveryDTO.ContentPayloadsCBOR))))
 	if err != nil {
 		fail(fmt.Errorf("arbiter.PrepareArbitration: %w", err))
 	}
-	custodyClaimID := prepared.ArbitrationClaimID()
+	custodyClaimID := prepared.ArbitrationClaimID
 
 	debug("=== Step 008a: buyer asks before Kind 9 exists -> signed not_ready ===")
-	// Buyer 只需要池 checkpoint + exact 已签 003 就能构造 Kind 10；
+	// Buyer 只需要池证据包 + exact 已签 003 就能构造 Kind 10；
 	// SDK 默认入口生成安全随机 nonce，重试必须原样重放已持久化的 Artifact。
-	k10FirstArtifact, err := f.Buyer.RequestArbitratedContent(ctx, buyer.ArbitrationRetrievalCommand{
+	k10FirstArtifact, err := buyer.RequestArbitratedContent(ctx, buyer.RetrievalRequestInput{
 		Pool:          f.BuyerPool,
-		Authorization: round.Request.Checkpoint,
-	})
+		Authorization: round.Authorization,
+	}, f.BuyerSigner)
 	if err != nil {
 		fail(fmt.Errorf("buyer.RequestArbitratedContent: %w", err))
 	}
 	k10First := k10FirstArtifact.Bytes() // 应用先持久化 exact Kind 10 再发送
 	requestID := retrievalRequestIDOf(k10First)
 
-	notReadyArtifact, err := f.Arbiter.BuildUnavailableRetrieval(ctx, requestID, arbitration.RetrievalSellerArbitrationNotReady)
+	notReadyArtifact, err := arbiter.BuildUnavailableRetrieval(ctx, requestID, arbitration.RetrievalSellerArbitrationNotReady, f.ArbiterSigner)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.BuildUnavailableRetrieval(not_ready): %w", err))
 	}
-	outcomeNotReady, err := f.Buyer.VerifyArbitratedContent(ctx, buyer.ArbitratedContentCommand{
-		Quote:                f.VerifiedQuote,
+	outcomeNotReady, err := buyer.VerifyArbitratedContent(ctx, buyer.ArbitratedContentInput{
+		Authorization:        round.Authorization,
 		Pool:                 f.BuyerPool,
-		Request:              round.Request.Checkpoint,
 		RetrievalRequestRaw:  k10First,
 		RetrievalResponseRaw: notReadyArtifact.Bytes(),
 	})
@@ -127,36 +127,48 @@ func main() {
 	debug("[arbiter] answered signed not_ready; buyer must retry with a NEW nonce")
 
 	// Kind 9 落库：记录进入 Retrievable。
-	response9Artifact, err := f.Arbiter.SignPreparedArbitration(ctx, f.Facts(now), prepared)
+	signed, err := arbiter.SignPreparedArbitration(ctx, f.Facts(now), *prepared, f.ArbiterSigner)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.SignPreparedArbitration: %w", err))
 	}
-	store.responseBytes = append([]byte(nil), response9Artifact.Bytes()...)
+	store.responseBytes = append([]byte(nil), signed.Outbound.Bytes()...)
 	debug("[arbiter] exact canonical Kind 9 appended; record is now Retrievable")
 
 	debug("=== Step 008b: fresh-nonce retry -> available with bound payloads ===")
-	k10RetryArtifact, err := f.Buyer.RequestArbitratedContent(ctx, buyer.ArbitrationRetrievalCommand{
+	k10RetryArtifact, err := buyer.RequestArbitratedContent(ctx, buyer.RetrievalRequestInput{
 		Pool:          f.BuyerPool,
-		Authorization: round.Request.Checkpoint,
-	})
+		Authorization: round.Authorization,
+	}, f.BuyerSigner)
 	if err != nil {
 		fail(fmt.Errorf("buyer.RequestArbitratedContent(retry): %w", err))
 	}
 	k10Retry := k10RetryArtifact.Bytes() // 新 nonce = 新请求；旧 nonce 永远不会升级
 	retryRequestID := retrievalRequestIDOf(k10Retry)
 
-	custodyVerified, err := f.Arbiter.VerifyRetrievableCustody(k10Retry, store.requestBytes, store.responseBytes)
-	if err != nil {
-		fail(fmt.Errorf("arbiter.VerifyRetrievableCustody: %w", err))
+	// 托管取回的鉴权与内容验证是两个独立入口：先证明 Kind 10 归属存储的
+	// Kind 8 Claim，再全量验证 Kind 8/9 托管证据并取出绑定 payload。
+	if err := arbiter.AuthenticateRetrieval(k10Retry, store.requestBytes); err != nil {
+		fail(fmt.Errorf("arbiter.AuthenticateRetrieval: %w", err))
 	}
-	availableArtifact, err := f.Arbiter.BuildAvailableRetrieval(ctx, retryRequestID, custodyVerified)
+	storedRequest, err := arbitration.UnmarshalRequest(store.requestBytes)
+	if err != nil {
+		fail(fmt.Errorf("decode stored Kind 8: %w", err))
+	}
+	storedResponse, err := arbitration.UnmarshalResponse(store.responseBytes)
+	if err != nil {
+		fail(fmt.Errorf("decode stored Kind 9: %w", err))
+	}
+	custodyVerified, err := arbitration.VerifyCustodiedContent(storedRequest, storedResponse)
+	if err != nil {
+		fail(fmt.Errorf("arbitration.VerifyCustodiedContent: %w", err))
+	}
+	availableArtifact, err := arbiter.BuildAvailableRetrieval(ctx, retryRequestID, custodyVerified, f.ArbiterSigner)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.BuildAvailableRetrieval: %w", err))
 	}
-	result, err := f.Buyer.VerifyArbitratedContent(ctx, buyer.ArbitratedContentCommand{
-		Quote:                f.VerifiedQuote,
+	result, err := buyer.VerifyArbitratedContent(ctx, buyer.ArbitratedContentInput{
+		Authorization:        round.Authorization,
 		Pool:                 f.BuyerPool,
-		Request:              round.Request.Checkpoint,
 		RetrievalRequestRaw:  k10Retry,
 		RetrievalResponseRaw: availableArtifact.Bytes(),
 	})

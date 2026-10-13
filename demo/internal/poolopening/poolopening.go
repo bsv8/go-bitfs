@@ -1,16 +1,16 @@
 // Package poolopening 提供细粒度 002 开池 demo 共用的应用组装、交易辅助逻辑
 // 和演示私有本地 checkpoint。
 //
-// go-bitfs SDK 是无状态协议库：它不加载、不保存、不广播任何状态。本包扮演
-// “调用方应用”，自己持有买方/卖方角色 workflow（只含受约束 Signer），并用
-// 自己的 JSON checkpoint 按 RefundTemplateTxID 保存跨进程需要的 exact 证据：
+// go-bitfs SDK 是无状态纯函数库：它不加载、不保存、不广播任何状态。本包扮演
+// “调用方应用”，自己持有买卖双方受约束 Signer 与普通证据包，并用自己的 JSON
+// checkpoint 按 RefundTemplateTxID 保存跨进程需要的 exact 证据：
 //
 //	买方开池 checkpoint   = exact Kind 2 bytes + 私有资金交易原文
-//	                        （buyer.RestoreOpeningCheckpoint 全量重验恢复）
+//	                        （恢复时全量重验请求证据）
 //	买方池 checkpoint     = canonical opening proof 编码 + 完整付款状态 raw tx
-//	                        （buyer.RestorePoolCheckpoint 全量重验恢复）
+//	                        （恢复时全量重验 opening 与付款状态）
 //	卖方预签 checkpoint   = exact Kind 2 request 字节；SDK 不提供第二构造器，
-//	                        恢复时用相同请求重跑 seller.PreparePoolOpening 得到
+//	                        恢复时用相同请求重跑 seller.PreparePresign 得到
 //	                        等价的新鲜计算结果（重复请求只得到等价结果）
 //
 // 注意：这里的 checkpoint 只是让多个独立示例命令能够衔接运行的示例实现。
@@ -46,6 +46,7 @@ import (
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/seller"
+	"github.com/bsv8/go-bitfs/wire"
 )
 
 const defaultStateDir = "demo/.state"
@@ -55,23 +56,24 @@ const blockHeight protocol.BlockHeight = 900000
 
 // BuyerSession 是单个 002 命令需要的买方应用组装结果。
 // buyerKey 只留在本包内部用于派生地址和签名；公开的三个 PubKey 字段供
-// 开池交易构造使用。跨进程状态由本包的 checkpoint 函数保存，不经过 SDK。
+// 开池交易构造使用。跨进程状态由本包的 checkpoint 函数保存，不经过 SDK；
+// BuyerSigner 只在下一次角色 API 调用时临时传入。
 type BuyerSession struct {
-	Buyer            *buyer.Workflow // 买方角色 API（只持有受约束 Signer）
+	BuyerSigner      protocol.Signer // 买方受约束 Signer（单次调用专用）
 	buyerKey         *ec.PrivateKey
 	sellerKey        *ec.PrivateKey
 	BuyerPublicKey   []byte
 	SellerPublicKey  []byte
 	ArbiterPublicKey []byte
-	// offlineQuote 是离线冒烟模式下在进程内自签自验的报价；真实路径的
-	// 报价来自 demo 01 的 exact bytes。
-	offlineQuote *content.VerifiedQuote
+	// quoteRaw 是本买方会话使用的 exact Kind 1 报价字节：离线冒烟模式在进程
+	// 内自签自验，真实路径从 DEMO_02_QUOTE_HEX_FILE 指向的 demo 01 输出读取。
+	quoteRaw []byte
 }
 
 // SellerSession 是单个 002 命令需要的卖方应用组装结果。卖方的预签证据等
 // 本地状态同样通过 checkpoint 显式保存和恢复。
 type SellerSession struct {
-	Seller *seller.Workflow // 卖方角色 API（只持有受约束 Signer）
+	SellerSigner protocol.Signer // 卖方受约束 Signer（单次调用专用）
 }
 
 func mustPublicKey(compressed []byte) protocol.PublicKey {
@@ -82,7 +84,7 @@ func mustPublicKey(compressed []byte) protocol.PublicKey {
 	return publicKey
 }
 
-// NewBuyer 创建只含签名能力的买方 workflow，并派生开池交易所需的公钥。
+// NewBuyer 创建只含签名能力的买方会话，并派生开池交易所需的公钥。
 func NewBuyer(ctx context.Context) (*BuyerSession, error) {
 	if ctx == nil {
 		return nil, errors.New("context is required")
@@ -105,21 +107,27 @@ func NewBuyer(ctx context.Context) (*BuyerSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create buyer signer: %w", err)
 	}
-	buyerWorkflow, err := buyer.NewWorkflow(signer)
-	if err != nil {
-		return nil, fmt.Errorf("create buyer workflow: %w", err)
-	}
-	return &BuyerSession{
-		Buyer:            buyerWorkflow,
+	session := &BuyerSession{
+		BuyerSigner:      signer,
 		buyerKey:         buyerKey,
 		sellerKey:        sellerKey,
 		BuyerPublicKey:   append([]byte(nil), buyerKey.PubKey().Compressed()...),
 		SellerPublicKey:  append([]byte(nil), sellerKey.PubKey().Compressed()...),
 		ArbiterPublicKey: append([]byte(nil), arbiterKey.PubKey().Compressed()...),
-	}, nil
+	}
+	// 真实路径必须显式提供 demo 01 的 exact Kind 1 输出；离线冒烟会在
+	// EnsureOfflineQuote 中填充同一字段。
+	if path := strings.TrimSpace(os.Getenv("DEMO_02_QUOTE_HEX_FILE")); path != "" {
+		raw, readErr := ReadHexFile(path, "")
+		if readErr != nil {
+			return nil, fmt.Errorf("read DEMO_02_QUOTE_HEX_FILE: %w", readErr)
+		}
+		session.quoteRaw = raw
+	}
+	return session, nil
 }
 
-// NewSeller 创建只含签名能力的卖方 workflow。卖方只需要自己的私钥；买方和
+// NewSeller 创建只含签名能力的卖方会话。卖方只需要自己的私钥；买方和
 // 仲裁方公钥已经随 0201 请求进入协议输入。
 func NewSeller(ctx context.Context) (*SellerSession, error) {
 	if ctx == nil {
@@ -133,11 +141,7 @@ func NewSeller(ctx context.Context) (*SellerSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create seller signer: %w", err)
 	}
-	sellerWorkflow, err := seller.NewWorkflow(signer)
-	if err != nil {
-		return nil, fmt.Errorf("create seller workflow: %w", err)
-	}
-	return &SellerSession{Seller: sellerWorkflow}, nil
+	return &SellerSession{SellerSigner: signer}, nil
 }
 
 // Facts 以给定时刻为唯一时间事实组装一份显式事实集。
@@ -145,25 +149,25 @@ func Facts(at time.Time) protocol.Facts {
 	return protocol.Facts{Now: at.UTC(), BlockHeight: blockHeight}
 }
 
-// OpeningCommand 根据买方已经选定的资金交易构造 002 开池命令输入。
+// OpeningCommand 根据买方已经选定的资金交易构造 002 开池纯函数输入。
 // 退款有效期设置为当前 UTC 时间后一小时；FundingTransactionRaw 原文只会进入
 // 买方自己的本地 checkpoint，在 0204 之前不会进入发给卖方的报文。
-func (session *BuyerSession) OpeningCommand(fundingTx []byte, minerFeeRateSatPerKB uint64) (buyer.PrepareOpeningCommand, error) {
-	command := buyer.PrepareOpeningCommand{
+func (session *BuyerSession) OpeningCommand(fundingTx []byte, minerFeeRateSatPerKB uint64) (buyer.PrepareOpeningInput, error) {
+	if session == nil || len(session.quoteRaw) == 0 {
+		return buyer.PrepareOpeningInput{}, errors.New("exact Kind 1 quote is required: set DEMO_02_QUOTE_HEX_FILE to the demo 01 output (or run with DEMO_02_OFFLINE=1)")
+	}
+	return buyer.PrepareOpeningInput{
+		QuoteRaw:                        append([]byte(nil), session.quoteRaw...),
 		FundingTransactionRaw:           append([]byte(nil), fundingTx...),
 		ExpiryLockTime:                  protocol.RefundLockTime(time.Now().UTC().Add(time.Hour).Unix()),
 		MinerFeeRateSatoshisPerKilobyte: protocol.SatoshisPerKilobyte(minerFeeRateSatPerKB),
 		SellerPublicKey:                 mustPublicKey(session.SellerPublicKey),
 		ArbiterPublicKey:                mustPublicKey(session.ArbiterPublicKey),
-	}
-	if session.offlineQuote != nil {
-		command.Quote = session.offlineQuote
-	}
-	return command, nil
+	}, nil
 }
 
 // EnsureOfflineQuote 在离线冒烟模式下于进程内完成一次真实的 001 往返：
-// 卖方 Signer 签出 exact Kind 1，买方立即验收为 VerifiedQuote。它不落盘、
+// 卖方 Signer 签出 exact Kind 1，买方立即验收并比较买方公钥绑定。它不落盘、
 // 不联网；真实路径必须使用 demo 01 持久化的 exact 报价字节。
 func (session *BuyerSession) EnsureOfflineQuote(ctx context.Context, now time.Time) error {
 	if session == nil || session.sellerKey == nil {
@@ -173,50 +177,31 @@ func (session *BuyerSession) EnsureOfflineQuote(ctx context.Context, now time.Ti
 	if err != nil {
 		return fmt.Errorf("create offline seller signer: %w", err)
 	}
-	sellerWf, err := seller.NewWorkflow(sellerSigner)
-	if err != nil {
-		return fmt.Errorf("create offline seller workflow: %w", err)
-	}
 	facts := protocol.Facts{Now: now, BlockHeight: protocol.BlockHeight(900000)}
 	seedHash := masterseed.Sum256(nil).Bytes()
-	arbiters := [][]byte{session.ArbiterPublicKey}
-	supportedCBOR, err := content.EncodeSupportedArbiterPublicKeys(arbiters)
-	if err != nil {
-		return err
-	}
-	qr, err := sellerWf.CreateQuote(ctx, facts, seller.QuoteDraft{
+	quoteArtifact, _, err := seller.CreateQuote(ctx, facts, sellerSigner, seller.QuoteDraft{
 		SeedHash:                   seedHash,
 		BuyerPublicKey:             mustPublicKey(session.BuyerPublicKey),
 		SeedPriceSatoshis:          protocol.Satoshis(100),
 		FullBlockPriceSatoshis:     protocol.Satoshis(1000),
 		FileSizeBytes:              0,
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(now.Add(time.Hour).Unix()),
-		SupportedArbiterPublicKeys: typedKeys(supportedCBOR),
+		SupportedArbiterPublicKeys: []protocol.PublicKey{mustPublicKey(session.ArbiterPublicKey)},
 		RecommendedFilename:        "offline-smoke.bin",
 	})
 	if err != nil {
 		return fmt.Errorf("offline CreateQuote: %w", err)
 	}
-	verified, err := session.Buyer.AcceptQuote(facts, qr.Outbound.Bytes())
+	verified, err := buyer.AcceptQuote(facts, quoteArtifact.Bytes())
 	if err != nil {
 		return fmt.Errorf("offline AcceptQuote: %w", err)
 	}
-	session.offlineQuote = verified
-	return nil
-}
-
-// typedKeys 解码受支持仲裁公钥子文档为强类型公钥列表（离线路径辅助）。
-func typedKeys(encoded []byte) []protocol.PublicKey {
-	keys, _ := content.DecodeSupportedArbiterPublicKeys(encoded)
-	out := make([]protocol.PublicKey, 0, len(keys))
-	for _, raw := range keys {
-		typed, err := protocol.PublicKeyFromBytes(raw)
-		if err != nil {
-			continue
-		}
-		out = append(out, typed)
+	// AcceptQuote 不接收身份参数：调用方必须自行比较买方公钥。
+	if !bytes.Equal(verified.BuyerPublicKey(), session.BuyerPublicKey) {
+		return errors.New("offline quote is addressed to another buyer")
 	}
-	return out
+	session.quoteRaw = quoteArtifact.Bytes()
+	return nil
 }
 
 // FundingAddresses 保存买方 P2PKH 地址的主网和测试网变体。
@@ -277,7 +262,7 @@ type FundingPreparation struct {
 }
 
 // PrepareFunding 访问 JungleBus，选择真实可用 UTXO，并构造一笔规范、已签名
-// 的资金交易。数据提供方调用被限制在 demo 层，go-bitfs workflow 本身不依赖
+// 的资金交易。数据提供方调用被限制在 demo 层，go-bitfs SDK 本身不依赖
 // JungleBus 客户端。
 func (session *BuyerSession) PrepareFunding(ctx context.Context) (*FundingPreparation, error) {
 	if session == nil || session.buyerKey == nil {
@@ -611,47 +596,60 @@ type buyerOpeningCheckpoint struct {
 	FundingTransactionRaw string `json:"funding_tx_hex"`       // 买方私有资金交易原文（hex）
 }
 
-// SaveBuyerOpeningCheckpoint 把 0201 的买方本地证据写入演示 checkpoint：
+// SaveBuyerOpeningCheckpoint 把 0201 的买方本地证据包写入演示 checkpoint：
 // exact Kind 2 Artifact 字节与私有资金交易原文。应用先保存该记录，然后才允许
-// 把 Outbound 发送给卖方。
-func SaveBuyerOpeningCheckpoint(path string, prepared *buyer.PreparePoolOpeningResult) error {
-	if prepared == nil || prepared.Checkpoint == nil {
-		return errors.New("buyer prepare result with its checkpoint is required")
+// 把 Outbound 发送给卖方。关联 ID 从 exact Kind 2 重新派生，绝不信任外部声明。
+func SaveBuyerOpeningCheckpoint(path string, evidence buyer.BuyerOpeningEvidence) error {
+	if len(evidence.RawKind2) == 0 || len(evidence.FundingTransactionRaw) == 0 {
+		return errors.New("buyer opening evidence with its funding transaction is required")
 	}
-	requestRaw := prepared.Outbound.Bytes()
-	refundTemplateTxID := prepared.Checkpoint.RefundTemplateTxID()
+	request, err := decodeRefundPresignRequest(evidence.RawKind2)
+	if err != nil {
+		return err
+	}
+	refundTemplateTxID, err := pool.DeriveRefundTemplateTxIDFromRequest(request)
+	if err != nil {
+		return fmt.Errorf("derive presign correlation id: %w", err)
+	}
 	record := buyerOpeningCheckpoint{
 		RefundTemplateTxID:    hex.EncodeToString(refundTemplateTxID[:]),
-		RequestArtifact:       hex.EncodeToString(requestRaw),
-		FundingTransactionRaw: hex.EncodeToString(prepared.Checkpoint.FundingTransactionRaw()),
+		RequestArtifact:       hex.EncodeToString(evidence.RawKind2),
+		FundingTransactionRaw: hex.EncodeToString(evidence.FundingTransactionRaw),
 	}
 	return writeCheckpoint(path, record)
 }
 
 // LoadBuyerOpeningCheckpoint 按 RefundTemplateTxID 读取买方 0201 私有状态，
-// 并经 buyer.RestoreOpeningCheckpoint 全量重验恢复（重新派生关联 ID，绝不
-// 信任持久化的派生值）。
-func LoadBuyerOpeningCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (*buyer.OpeningCheckpoint, error) {
+// 并全量重验请求证据后恢复普通证据包（重新派生关联 ID，绝不信任持久化的
+// 派生值）。
+func LoadBuyerOpeningCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (buyer.BuyerOpeningEvidence, error) {
 	var record buyerOpeningCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
-		return nil, err
+		return buyer.BuyerOpeningEvidence{}, err
 	}
 	stored, err := hex.DecodeString(record.RefundTemplateTxID)
 	if err != nil || len(stored) != len(pool.RefundTemplateTxID{}) {
-		return nil, errors.New("checkpoint correlation ID is malformed")
+		return buyer.BuyerOpeningEvidence{}, errors.New("checkpoint correlation ID is malformed")
 	}
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
-		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
+		return buyer.BuyerOpeningEvidence{}, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
 	requestRaw, err := hex.DecodeString(record.RequestArtifact)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint request artifact: %w", err)
+		return buyer.BuyerOpeningEvidence{}, fmt.Errorf("decode checkpoint request artifact: %w", err)
 	}
 	fundingTx, err := hex.DecodeString(record.FundingTransactionRaw)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint funding tx: %w", err)
+		return buyer.BuyerOpeningEvidence{}, fmt.Errorf("decode checkpoint funding tx: %w", err)
 	}
-	return buyer.RestoreOpeningCheckpoint(requestRaw, fundingTx)
+	request, err := decodeRefundPresignRequest(requestRaw)
+	if err != nil {
+		return buyer.BuyerOpeningEvidence{}, err
+	}
+	if err := pool.VerifyRefundPresignRequestEvidence(request); err != nil {
+		return buyer.BuyerOpeningEvidence{}, fmt.Errorf("restore buyer opening checkpoint: %w", err)
+	}
+	return buyer.BuyerOpeningEvidence{RawKind2: requestRaw, FundingTransactionRaw: fundingTx}, nil
 }
 
 // ---- 买方池 checkpoint：canonical opening proof 编码 + 完整付款状态 raw tx ----
@@ -663,46 +661,104 @@ type buyerPoolCheckpoint struct {
 }
 
 // SaveBuyerPoolCheckpoint 保存买方 0203 得到的初始池证据到演示 checkpoint。
-func SaveBuyerPoolCheckpoint(path string, poolCheckpoint *buyer.PoolCheckpoint) error {
-	if poolCheckpoint == nil || poolCheckpoint.Opening() == nil || poolCheckpoint.Payment() == nil {
-		return errors.New("buyer pool checkpoint with its evidence is required")
+// LatestPaymentRawTx 为空表示初始退款状态，此时重建初始退款交易并写入记录，
+// 保持 checkpoint 文件字段语义不变。
+func SaveBuyerPoolCheckpoint(path string, evidence buyer.BuyerPoolEvidence) error {
+	if evidence.Opening == nil {
+		return errors.New("buyer pool evidence with its opening proof is required")
 	}
-	encoded, err := pool.EncodeOpeningProof(poolCheckpoint.Opening())
+	encoded, err := pool.EncodeOpeningProof(evidence.Opening)
 	if err != nil {
 		return fmt.Errorf("encode canonical opening proof: %w", err)
 	}
-	refundTemplateTxID := poolCheckpoint.RefundTemplateTxID()
+	details, err := pool.DeriveOpeningDetails(evidence.Opening)
+	if err != nil {
+		return fmt.Errorf("derive opening details: %w", err)
+	}
+	payment, err := DerivePaymentState(evidence.Opening, evidence.LatestPaymentRawTx)
+	if err != nil {
+		return fmt.Errorf("derive pool payment state: %w", err)
+	}
 	record := buyerPoolCheckpoint{
-		RefundTemplateTxID: hex.EncodeToString(refundTemplateTxID[:]),
+		RefundTemplateTxID: hex.EncodeToString(details.RefundTemplateTxID[:]),
 		OpeningProof:       hex.EncodeToString(encoded),
-		PaymentRawTx:       hex.EncodeToString(poolCheckpoint.Payment().RawTx),
+		PaymentRawTx:       hex.EncodeToString(payment.RawTx),
 	}
 	return writeCheckpoint(path, record)
 }
 
-// LoadBuyerPoolCheckpoint 按 RefundTemplateTxID 读取买方池证据，并经
-// buyer.RestorePoolCheckpoint 全量重验恢复 opening 签名与付款状态。
-func LoadBuyerPoolCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (*buyer.PoolCheckpoint, error) {
+// LoadBuyerPoolCheckpoint 按 RefundTemplateTxID 读取买方池证据，并全量重验
+// opening 签名与付款状态后恢复普通证据包。
+func LoadBuyerPoolCheckpoint(path string, refundTemplateTxID pool.RefundTemplateTxID) (buyer.BuyerPoolEvidence, error) {
 	var record buyerPoolCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
-		return nil, err
+		return buyer.BuyerPoolEvidence{}, err
 	}
 	stored, err := hex.DecodeString(record.RefundTemplateTxID)
 	if err != nil || len(stored) != len(pool.RefundTemplateTxID{}) {
-		return nil, errors.New("checkpoint correlation ID is malformed")
+		return buyer.BuyerPoolEvidence{}, errors.New("checkpoint correlation ID is malformed")
 	}
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
-		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
 	openingProof, err := hex.DecodeString(record.OpeningProof)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint opening proof: %w", err)
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("decode checkpoint opening proof: %w", err)
 	}
 	paymentRawTx, err := hex.DecodeString(record.PaymentRawTx)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint payment raw tx: %w", err)
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("decode checkpoint payment raw tx: %w", err)
 	}
-	return buyer.RestorePoolCheckpoint(openingProof, paymentRawTx)
+	opening, err := pool.DecodeOpeningProof(openingProof)
+	if err != nil {
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("decode checkpoint opening proof: %w", err)
+	}
+	if _, err := pool.VerifyOpeningProof(opening); err != nil {
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("restore buyer pool checkpoint: %w", err)
+	}
+	payment, err := DerivePaymentState(opening, paymentRawTx)
+	if err != nil {
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("restore buyer pool payment state: %w", err)
+	}
+	if _, err := pool.VerifyPaymentState(payment, opening); err != nil {
+		return buyer.BuyerPoolEvidence{}, fmt.Errorf("restore buyer pool checkpoint: %w", err)
+	}
+	return buyer.BuyerPoolEvidence{Opening: opening, LatestPaymentRawTx: paymentRawTx}, nil
+}
+
+// DerivePaymentState 从 opening 证据与最新付款状态原文重建 PaymentState：
+// latestPaymentRawTx 为空表示初始退款状态，按 opening 重建规范退款交易；
+// 非空时逐字节解析。它只服务 demo 展示、checkpoint 记录与恢复复核，不替代
+// 角色 API 内部的全量验证。
+func DerivePaymentState(opening *pool.OpeningProof, latestPaymentRawTx []byte) (*pool.PaymentState, error) {
+	if opening == nil {
+		return nil, errors.New("opening proof is required")
+	}
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{
+		BuyerPublicKey:   opening.BuyerPublicKey,
+		SellerPublicKey:  opening.SellerPublicKey,
+		ArbiterPublicKey: opening.ArbiterPublicKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw := latestPaymentRawTx
+	if len(raw) == 0 {
+		raw, err = engine.BuildRefundSubmission(opening)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return engine.ParsePaymentState(raw, opening)
+}
+
+// decodeRefundPresignRequest 严格解析 exact Kind 2 预签请求。
+func decodeRefundPresignRequest(rawKind2 []byte) (*pool.RefundPresignRequest, error) {
+	artifact, err := wire.ParseAs(wire.RefundPresignRequest, rawKind2)
+	if err != nil {
+		return nil, err
+	}
+	return wire.DecodeRefundPresignRequest(artifact)
 }
 
 // ---- 卖方预签 checkpoint：exact Kind 2 request 字节（恢复 = 等价重算）----
@@ -723,30 +779,33 @@ func SaveSellerPresignCheckpoint(path string, refundTemplateTxID pool.RefundTemp
 }
 
 // LoadSellerPresignCheckpoint 按 RefundTemplateTxID 读取卖方预签证据。
-// SDK 的卖方 OpeningCheckpoint 是不透明对象且没有第二构造器；demo 用保存的
-// exact Kind 2 bytes 重跑 seller.PreparePoolOpening——相同的重复请求只会得到
-// 等价的新鲜计算结果，随后 0205 的交叉验证保证它与原始响应一致。
-func LoadSellerPresignCheckpoint(ctx context.Context, session *SellerSession, path string, refundTemplateTxID pool.RefundTemplateTxID) (*seller.OpeningCheckpoint, error) {
+// SDK 没有第二构造器；demo 用保存的 exact Kind 2 bytes 重跑
+// seller.PreparePresign——相同的重复请求只会得到等价的新鲜计算结果，随后
+// 0205 的交叉验证保证它与原始响应一致。
+func LoadSellerPresignCheckpoint(ctx context.Context, session *SellerSession, path string, refundTemplateTxID pool.RefundTemplateTxID) (seller.SellerOpeningEvidence, error) {
 	var record sellerPresignCheckpoint
 	if err := readCheckpoint(path, &record); err != nil {
-		return nil, err
+		return seller.SellerOpeningEvidence{}, err
 	}
 	stored, err := hex.DecodeString(record.RefundTemplateTxID)
 	if err != nil || len(stored) != len(pool.RefundTemplateTxID{}) {
-		return nil, errors.New("checkpoint correlation ID is malformed")
+		return seller.SellerOpeningEvidence{}, errors.New("checkpoint correlation ID is malformed")
 	}
 	if !bytes.Equal(stored, refundTemplateTxID[:]) {
-		return nil, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
+		return seller.SellerOpeningEvidence{}, fmt.Errorf("checkpoint correlation ID does not match requested RefundTemplateTxID")
 	}
 	requestRaw, err := hex.DecodeString(record.RequestArtifact)
 	if err != nil {
-		return nil, fmt.Errorf("decode checkpoint request artifact: %w", err)
+		return seller.SellerOpeningEvidence{}, fmt.Errorf("decode checkpoint request artifact: %w", err)
 	}
-	prepared, err := session.Seller.PreparePoolOpening(ctx, requestRaw)
+	if session == nil || session.SellerSigner == nil {
+		return seller.SellerOpeningEvidence{}, errors.New("seller session is required")
+	}
+	_, evidence, err := seller.PreparePresign(ctx, requestRaw, session.SellerSigner)
 	if err != nil {
-		return nil, fmt.Errorf("recompute seller presign checkpoint: %w", err)
+		return seller.SellerOpeningEvidence{}, fmt.Errorf("recompute seller presign checkpoint: %w", err)
 	}
-	return prepared.Checkpoint, nil
+	return evidence, nil
 }
 
 func writeCheckpoint(path string, record any) error {

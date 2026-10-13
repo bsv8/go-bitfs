@@ -2,9 +2,9 @@
 //
 // 它接收 0204 首次公开的完整 FundingTransactionRaw（exact Kind 4 bytes），按
 // 报文中的 RefundTemplateTxID 从卖方自己的 checkpoint 加载 0202 保存的预签证
-// 据（用保存的 exact Kind 2 request 字节重跑 seller.PreparePoolOpening 得到等
-// 价 checkpoint），显式传给角色 API 验证资金交易确实匹配退款证据和池输出，并
-// 得到完整的 verified opening、初始付款状态和待广播的资金交易原文。
+// 据（用保存的 exact Kind 2 request 字节重跑 seller.PreparePresign 得到等价
+// 证据包），显式传给纯函数 API 验证资金交易确实匹配退款证据和池输出，并得到
+// 完整的开池证明、初始池证据包和待广播的资金交易原文。
 // SDK 不提交任何交易；真实应用在此处调用自己的节点适配器完成广播与对账。
 package main
 
@@ -17,6 +17,7 @@ import (
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
 	"github.com/bsv8/go-bitfs/pool"
+	"github.com/bsv8/go-bitfs/seller"
 	"github.com/bsv8/go-bitfs/wire"
 )
 
@@ -43,7 +44,7 @@ func main() {
 	}
 	// 读取并严格解码 0204 的 exact Kind 4 bytes。报文中的 FundingTransactionRaw
 	// 原文可能很大，但它仍然必须经过 wire 层的固定类型和编码校验
-	// （VerifyFundingDelivery 内部使用 wire.ParseAs）。
+	// （seller.VerifyFunding 内部使用 wire.ParseAs）。
 	deliveryRaw, err := poolopening.ReadHex(os.Stdin, "FUNDING_TX_DELIVERY_HEX")
 	if err != nil {
 		fail(err)
@@ -63,29 +64,31 @@ func main() {
 	refundTemplateTxID := delivery.RefundTemplateTxID
 	debug("[seller] 按 delivery.RefundTemplateTxID 加载 0202 保存的预签证据并交叉验证")
 	checkpointPath := poolopening.SellerPresignCheckpointPath()
-	presignCheckpoint, err := poolopening.LoadSellerPresignCheckpoint(ctx, session, checkpointPath, refundTemplateTxID)
+	presignEvidence, err := poolopening.LoadSellerPresignCheckpoint(ctx, session, checkpointPath, refundTemplateTxID)
 	if err != nil {
 		fail(fmt.Errorf("load seller presign checkpoint (caller state): %w", err))
 	}
-	// VerifyFundingDelivery 用显式传入的预签 checkpoint 复核派生 hash 一致性，
-	// 验证完整 FundingTransactionRaw 的规范编码、资金 outpoint、池输出和开池
-	// 证据，然后返回完整 verified opening、初始池 checkpoint 和待调用方广播的
-	// 资金交易。任一校验失败都不会产生“已开池”结果；SDK 不执行任何广播或
-	// 持久化——InitialPool 必须在广播决策前由应用保存。
-	fundingVerification, err := session.Seller.VerifyFundingDelivery(presignCheckpoint, deliveryRaw)
+	// VerifyFunding 用显式传入的预签证据包复核派生 hash 一致性，验证完整
+	// FundingTransactionRaw 的规范编码、资金 outpoint、池输出和开池证据，然后
+	// 返回待调用方广播的资金交易与池证据包。任一校验失败都不会产生“已开池”
+	// 结果；SDK 不执行任何广播或持久化——池证据包必须在广播决策前由应用保存。
+	fundingRaw, sellerPool, err := seller.VerifyFunding(deliveryRaw, presignEvidence)
 	if err != nil {
-		fail(fmt.Errorf("seller.VerifyFundingDelivery: %w", err))
+		fail(fmt.Errorf("seller.VerifyFunding: %w", err))
 	}
-	details, err := pool.DeriveOpeningDetails(fundingVerification.Opening.Proof())
+	details, err := pool.DeriveOpeningDetails(sellerPool.Opening)
 	if err != nil {
 		fail(fmt.Errorf("derive seller opening details: %w", err))
 	}
 	if details.RefundTemplateTxID != refundTemplateTxID {
 		fail(fmt.Errorf("opening proof does not match delivery correlation ID"))
 	}
-	initial := fundingVerification.InitialPool.Payment()
+	initial, err := poolopening.DerivePaymentState(sellerPool.Opening, sellerPool.LatestPaymentRawTx)
+	if err != nil {
+		fail(fmt.Errorf("derive initial pool state: %w", err))
+	}
 	debug("[seller] FundingTransactionRaw 已通过验证；广播资金交易是调用方的节点适配器职责")
-	debug("[seller] funding tx to broadcast: %d bytes", len(fundingVerification.FundingTransactionRaw))
+	debug("[seller] funding tx to broadcast: %d bytes", len(fundingRaw))
 	debug("[state] pool opened (locally verified): true")
 	fmt.Printf("POOL_OPENED=true\n")
 	fmt.Printf("FUNDING_TX_ID_HEX=%s\n", hex.EncodeToString(details.FundingTxID[:]))

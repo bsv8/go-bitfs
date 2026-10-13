@@ -16,10 +16,10 @@ import (
 // 已计算签名候选但要求应用先持久化；Complete = 协议材料完整。Broadcast /
 // Confirmed / Latest 只能由应用声明，SDK 绝不使用。
 
-// OpeningCheckpoint 是买方本地开池状态（Prepared 阶段产物）：字段私有，
+// openingCheckpoint 是买方本地开池状态（Prepared 阶段产物）：字段私有，
 // getter 防御性复制。应用必须在发送 Kind 2 之前先持久化本 checkpoint 的
 // evidence；CompletePoolOpening 需要 Request 与 FundingTransactionRaw 原样回传。
-type OpeningCheckpoint struct {
+type openingCheckpoint struct {
 	// refundTemplateTxID 是从 Kind 2 请求规范派生的费用池统一关联 ID；
 	// Restore 时重新派生，不信任持久化的派生值。
 	refundTemplateTxID pool.RefundTemplateTxID
@@ -31,7 +31,7 @@ type OpeningCheckpoint struct {
 }
 
 // RefundTemplateTxID 返回费用池统一关联 ID。
-func (c *OpeningCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
+func (c *openingCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
 	if c == nil {
 		return pool.RefundTemplateTxID{}
 	}
@@ -39,7 +39,7 @@ func (c *OpeningCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
 }
 
 // Request 返回深拷贝的已签 Kind 2 预签请求。
-func (c *OpeningCheckpoint) Request() *pool.RefundPresignRequest {
+func (c *openingCheckpoint) Request() *pool.RefundPresignRequest {
 	if c == nil || c.request == nil {
 		return nil
 	}
@@ -47,16 +47,16 @@ func (c *OpeningCheckpoint) Request() *pool.RefundPresignRequest {
 }
 
 // FundingTransactionRaw 返回资金交易原始字节副本。
-func (c *OpeningCheckpoint) FundingTransactionRaw() []byte {
+func (c *openingCheckpoint) FundingTransactionRaw() []byte {
 	if c == nil {
 		return nil
 	}
 	return append([]byte(nil), c.fundingTransactionRaw...)
 }
 
-// PoolCheckpoint 是买方本地资金池状态（Verified 阶段产物）：完整开池证明 +
+// poolCheckpoint 是买方本地资金池状态（Verified 阶段产物）：完整开池证明 +
 // 初始/最新付款状态。应用负责持久化其 evidence 并自行判断业务最新状态。
-type PoolCheckpoint struct {
+type poolCheckpoint struct {
 	// opening 是完整开池证明（含资金交易原文）。
 	opening *pool.OpeningProof
 	// payment 是当前已验证付款状态（初始状态或上一笔累计付款）。
@@ -64,7 +64,7 @@ type PoolCheckpoint struct {
 }
 
 // Opening 返回深拷贝的完整开池证据。
-func (c *PoolCheckpoint) Opening() *pool.OpeningProof {
+func (c *poolCheckpoint) Opening() *pool.OpeningProof {
 	if c == nil || c.opening == nil {
 		return nil
 	}
@@ -72,7 +72,7 @@ func (c *PoolCheckpoint) Opening() *pool.OpeningProof {
 }
 
 // Payment 返回深拷贝的当前已验证付款状态。
-func (c *PoolCheckpoint) Payment() *pool.PaymentState {
+func (c *poolCheckpoint) Payment() *pool.PaymentState {
 	if c == nil || c.payment == nil {
 		return nil
 	}
@@ -81,23 +81,23 @@ func (c *PoolCheckpoint) Payment() *pool.PaymentState {
 
 // VerifiedPayment 返回经完整重验的不可变 verified payment value；验证失败
 // 返回错误而不是降级包装。
-func (c *PoolCheckpoint) VerifiedPayment() (*pool.VerifiedPaymentState, error) {
+func (c *poolCheckpoint) VerifiedPayment() (*pool.VerifiedPaymentState, error) {
 	if c == nil || c.payment == nil || c.opening == nil {
-		return nil, protocol.Errorf("buyer.PoolCheckpoint.VerifiedPayment", protocol.CodeInvalidEvidence, 0, "checkpoint", "pool checkpoint is empty")
+		return nil, protocol.Errorf("buyer.poolCheckpoint.VerifiedPayment", protocol.CodeInvalidEvidence, 0, "checkpoint", "pool checkpoint is empty")
 	}
 	return pool.VerifyPaymentState(c.payment, c.opening)
 }
 
 // VerifiedOpening 返回经完整重验的不可变 verified opening。
-func (c *PoolCheckpoint) VerifiedOpening() (*pool.VerifiedOpening, error) {
+func (c *poolCheckpoint) VerifiedOpening() (*pool.VerifiedOpening, error) {
 	if c == nil || c.opening == nil {
-		return nil, protocol.Errorf("buyer.PoolCheckpoint.VerifiedOpening", protocol.CodeInvalidEvidence, 0, "checkpoint", "pool checkpoint is empty")
+		return nil, protocol.Errorf("buyer.poolCheckpoint.VerifiedOpening", protocol.CodeInvalidEvidence, 0, "checkpoint", "pool checkpoint is empty")
 	}
 	return pool.VerifyOpeningProof(c.opening)
 }
 
 // RefundTemplateTxID 返回费用池统一关联 ID。
-func (c *PoolCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
+func (c *poolCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
 	if c == nil || c.opening == nil {
 		return pool.RefundTemplateTxID{}
 	}
@@ -108,10 +108,10 @@ func (c *PoolCheckpoint) RefundTemplateTxID() pool.RefundTemplateTxID {
 	return details.RefundTemplateTxID
 }
 
-// AuthorizationCheckpoint 记录一次已签 Kind 5 授权的应用侧上下文：
+// authorizationCheckpoint 记录一次已签 Kind 5 授权的应用侧上下文：
 // PaymentAuthorizationID 是查找键；Request 是 exact 已签 003（发送前必须
 // 先持久化）。
-type AuthorizationCheckpoint struct {
+type authorizationCheckpoint struct {
 	// authorizationID = SHA-256(exact payment_authorization_cbor)，内容寻址键。
 	authorizationID protocol.PaymentAuthorizationID
 	// request 是 exact 已签 Kind 5 授权凭证（深拷贝）。
@@ -119,7 +119,7 @@ type AuthorizationCheckpoint struct {
 }
 
 // AuthorizationID 返回本次授权的 typed ID。
-func (c *AuthorizationCheckpoint) AuthorizationID() protocol.PaymentAuthorizationID {
+func (c *authorizationCheckpoint) AuthorizationID() protocol.PaymentAuthorizationID {
 	if c == nil {
 		return protocol.PaymentAuthorizationID{}
 	}
@@ -127,16 +127,16 @@ func (c *AuthorizationCheckpoint) AuthorizationID() protocol.PaymentAuthorizatio
 }
 
 // Request 返回深拷贝的 exact 已签 003 凭证。
-func (c *AuthorizationCheckpoint) Request() *content.SignedContentRequest {
+func (c *authorizationCheckpoint) Request() *content.SignedContentRequest {
 	if c == nil || c.request == nil {
 		return nil
 	}
 	return content.CloneSignedContentRequest(c.request)
 }
 
-// PrepareOpeningCommand 携带构造 Kind 2 所需的全部显式输入：verified quote、
+// prepareOpeningCommand 携带构造 Kind 2 所需的全部显式输入：verified quote、
 // 资金交易、退款锁定、费率与对手方公钥。
-type PrepareOpeningCommand struct {
+type prepareOpeningCommand struct {
 	// Quote 是买方已验证接受的报价（AcceptQuote 的返回值）。
 	Quote *content.VerifiedQuote
 	// FundingTransactionRaw 是买方资金交易原始字节；输出 0 必须是池输出。
@@ -152,30 +152,30 @@ type PrepareOpeningCommand struct {
 	ArbiterPublicKey protocol.PublicKey
 }
 
-// PreparePoolOpeningResult 是 PreparePoolOpening 的统一 Result：Outbound 是待发送
+// preparePoolOpeningResult 是 PreparePoolOpening 的统一 Result：Outbound 是待发送
 // 的 exact Kind 2 Artifact——发送前必须先持久化 Checkpoint。
-type PreparePoolOpeningResult struct {
+type preparePoolOpeningResult struct {
 	// Outbound 是待发送 exact Kind 2 wire Artifact。
 	Outbound wire.Artifact
 	// Checkpoint 是必须先于 Outbound 发送而持久化的买方开池 checkpoint。
-	Checkpoint *OpeningCheckpoint
+	Checkpoint *openingCheckpoint
 }
 
-// CompleteOpeningResult 是 CompletePoolOpening 的统一 Result：Opening 是
+// completeOpeningResult 是 CompletePoolOpening 的统一 Result：Opening 是
 // verified 开池证明；InitialPool 是初始池 checkpoint（应用需持久化）。
-type CompleteOpeningResult struct {
+type completeOpeningResult struct {
 	// Opening 是含卖方预签与资金交易原文的完整已验证开池证明。
 	Opening *pool.VerifiedOpening
 	// InitialPool 是初始池 checkpoint（sequence=2、卖方/仲裁金额为零）。
-	InitialPool *PoolCheckpoint
+	InitialPool *poolCheckpoint
 }
 
-// RequestContentCommand 携带构造一次 003 授权的全部输入。
-type RequestContentCommand struct {
+// requestContentCommand 携带构造一次 003 授权的全部输入。
+type requestContentCommand struct {
 	// Quote 是已验证报价。
 	Quote *content.VerifiedQuote
 	// Pool 是当前池 checkpoint（opening + previous payment state）。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// ContentHashes 是有序不重复的内容哈希批次（1..64）；等于 SeedHash 即购 seed。
 	ContentHashes [][]byte
 	// DeliveryDeadline 是交付截止时间（UTC Unix 秒）；必须晚于 Facts.Now 且
@@ -185,38 +185,38 @@ type RequestContentCommand struct {
 	Seed []byte
 }
 
-// RequestContentResult 是 RequestContent 的统一 Result：Outbound 是待发送的
+// requestContentResult 是 RequestContent 的统一 Result：Outbound 是待发送的
 // exact Kind 5 Artifact；AuthorizationID 是路由键；Checkpoint 必须在发送前
 // 与 Outbound 一同持久化。
-type RequestContentResult struct {
+type requestContentResult struct {
 	// Outbound 是待发送 exact Kind 5 wire Artifact。
 	Outbound wire.Artifact
 	// AuthorizationID 是本批授权的内容寻址键：SHA-256(exact payment_authorization_cbor)。
 	AuthorizationID protocol.PaymentAuthorizationID
 	// Checkpoint 保存 exact 已签 003，供 VerifyDeliveryAndPreparePayment 与
 	// 仲裁取回路径复用。
-	Checkpoint *AuthorizationCheckpoint
+	Checkpoint *authorizationCheckpoint
 }
 
-// VerifyDeliveryCommand 携带验收一次 004 交付所需的全部证据。
-type VerifyDeliveryCommand struct {
+// verifyDeliveryCommand 携带验收一次 004 交付所需的全部证据。
+type verifyDeliveryCommand struct {
 	// Quote 是已验证报价。
 	Quote *content.VerifiedQuote
 	// Pool 是当前池 checkpoint。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// Request 是本批次的授权 checkpoint（RequestContent 返回并持久化者）。
-	Request *AuthorizationCheckpoint
+	Request *authorizationCheckpoint
 	// DeliveryRaw 是对端发来的 exact Kind 6 bytes。
 	DeliveryRaw []byte
 	// Seed 在批次包含任何块时提供已验证 seed 原文；纯 seed 批次可空。
 	Seed []byte
 }
 
-// PaymentPreparationResult 是 VerifyDeliveryAndPreparePayment 的统一 Result：
+// paymentPreparationResult 是 VerifyDeliveryAndPreparePayment 的统一 Result：
 // Payloads 落盘由应用负责；Outbound 是待发送 exact Kind 7（发送前必须先
 // 持久化 payloads 与本 Result 的全部字段）；NextCandidate 是重建出的目标
 // 未签名状态交易，仅供审计，不进入 wire。
-type PaymentPreparationResult struct {
+type paymentPreparationResult struct {
 	// Payloads 是按授权顺序排列的已验证 payload 字节。
 	Payloads [][]byte
 	// Outbound 是待发送 exact Kind 7 最小付款凭证 Artifact。
@@ -225,42 +225,42 @@ type PaymentPreparationResult struct {
 	NextCandidate *pool.UnsignedPayment
 }
 
-// PrepareCloseCommand 携带立即关闭所需输入：调用方自选基准状态与目标金额。
-type PrepareCloseCommand struct {
+// prepareCloseCommand 携带立即关闭所需输入：调用方自选基准状态与目标金额。
+type prepareCloseCommand struct {
 	// Pool 是当前池 checkpoint。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// Base 是调用方选定的基准付款状态；SDK 不声称它是业务最新。
 	Base *pool.PaymentState
 	// TargetSellerAmountSatoshis 是最终关闭中卖方的累计金额（绝对聪数）。
 	TargetSellerAmountSatoshis protocol.Satoshis
 }
 
-// ClosePreparationResult 是 PrepareClose 的统一 Result：Unsigned 是未签名最终
+// closePreparationResult 是 PrepareClose 的统一 Result：Unsigned 是未签名最终
 // 关闭 candidate，BuyerSignature 是买方 detached 交易签名（均须先持久化再
 // 发送给卖方）。两者都不是 complete transaction。
-type ClosePreparationResult struct {
+type closePreparationResult struct {
 	// Unsigned 是 sequence=4294967295 的未签名关闭 candidate。
 	Unsigned *pool.UnsignedPayment
 	// BuyerSignature 是买方对该 candidate 的 DER+flag 交易签名。
 	BuyerSignature []byte
 }
 
-// VerifyCloseCommand 携带验收卖方完整关闭交易所需的证据。
-type VerifyCloseCommand struct {
+// verifyCloseCommand 携带验收卖方完整关闭交易所需的证据。
+type verifyCloseCommand struct {
 	// Pool 是当前池 checkpoint（用于 opening 归属绑定）。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// Close 是卖方合并后的完整关闭交易。
 	Close *pool.SignedPayment
 }
 
-// ArbitratedContentCommand 携带 008 取回验证所需的本地证据。
-type ArbitratedContentCommand struct {
+// arbitratedContentCommand 携带 008 取回验证所需的本地证据。
+type arbitratedContentCommand struct {
 	// Quote 是已验证报价。
 	Quote *content.VerifiedQuote
 	// Pool 是当前池 checkpoint。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// Request 是取回所引用授权的 checkpoint（exact 已签 003）。
-	Request *AuthorizationCheckpoint
+	Request *authorizationCheckpoint
 	// RetrievalRequestRaw 是本地保存的 exact Kind 10 bytes（重放原请求，
 	// 绝不生成新 nonce）。
 	RetrievalRequestRaw []byte
@@ -270,11 +270,11 @@ type ArbitratedContentCommand struct {
 	Seed []byte
 }
 
-// ArbitratedContentResult 是 VerifyArbitratedContent 的统一 Result：
+// arbitratedContentResult 是 VerifyArbitratedContent 的统一 Result：
 // Available=false 表示 valid unavailable（已验签协议结果，不是 error），应用
 // 按 UnavailableReason 决定新 nonce、等待或终止；Available=true 时 Payloads
 // 为已验证内容字节，落盘由应用负责。两种分支都不产生 Kind 7 或任何付款状态。
-type ArbitratedContentResult struct {
+type arbitratedContentResult struct {
 	// ContentRetrievalRequestID 是本应答对应的 exact Kind 10 请求文档哈希。
 	ContentRetrievalRequestID protocol.ContentRetrievalRequestID
 	// ArbitrationClaimID 是托管记录的仲裁 Claim 身份。
@@ -287,7 +287,7 @@ type ArbitratedContentResult struct {
 	Payloads [][]byte
 }
 
-// ensureOwnership 把 caller-supplied opening evidence 绑定到本 Workflow 公钥；
+// ensureOwnership 把 caller-supplied opening evidence 绑定到本 workflow 公钥；
 // 加载证据绝不等于授权他人开池。
 func ensureOwnership(publicKey []byte, proof *pool.OpeningProof) error {
 	if proof == nil {

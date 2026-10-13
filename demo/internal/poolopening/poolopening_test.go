@@ -170,6 +170,9 @@ func TestPrepareFundingUsesJungleBusAndConfiguredFeeRate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new buyer: %v", err)
 	}
+	// 真实路径要求调用方提供 exact Kind 1 报价字节；本测试只验证费率透传，
+	// 因此直接注入非空报价占位（PrepareOpening 才做报价证据验证）。
+	session.quoteRaw = bytes.Repeat([]byte{0x01}, 32)
 	funding, err := session.PrepareFunding(t.Context())
 	if err != nil {
 		t.Fatalf("prepare funding: %v", err)

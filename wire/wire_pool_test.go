@@ -11,9 +11,9 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv8/go-bitfs/arbiter"
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/content"
+	"github.com/bsv8/go-bitfs/internal/flowtest/arbiter"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
 	"github.com/bsv8/go-bitfs/wire"
@@ -108,6 +108,25 @@ func TestFundingTransactionDeliveryTypedRoundTrip(t *testing.T) {
 	}
 	if len(raw) == 0 || raw[0] != 0x84 || raw[1] != 0x01 || raw[2] != 0x04 {
 		t.Fatalf("002 funding delivery must be a four-element [1,4,...] array: %x", raw)
+	}
+}
+
+func TestPoolCloseEncodersRejectArtifactsAboveGlobalWireLimit(t *testing.T) {
+	oversizedTransaction := bytes.Repeat([]byte{1}, wire.MaxWireParseBytes)
+	request, err := wire.EncodePoolCloseRequest(&pool.PoolCloseRequest{
+		RefundTemplateTxID:             pool.RefundTemplateTxID(bytes.Repeat([]byte{2}, 32)),
+		UnsignedCloseTransactionRaw:    oversizedTransaction,
+		BuyerCloseTransactionSignature: []byte{1},
+	})
+	if !protocol.IsCode(err, protocol.CodeMalformedWire) || !request.IsZero() {
+		t.Fatalf("oversized Kind 12 = artifact %v, err %v; want zero artifact and malformed_wire", request.IsZero(), err)
+	}
+	response, err := wire.EncodePoolCloseResponse(&pool.PoolCloseResponse{
+		RefundTemplateTxID:          pool.RefundTemplateTxID(bytes.Repeat([]byte{2}, 32)),
+		CompleteCloseTransactionRaw: oversizedTransaction,
+	})
+	if !protocol.IsCode(err, protocol.CodeMalformedWire) || !response.IsZero() {
+		t.Fatalf("oversized Kind 13 = artifact %v, err %v; want zero artifact and malformed_wire", response.IsZero(), err)
 	}
 }
 

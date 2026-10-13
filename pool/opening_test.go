@@ -1,16 +1,45 @@
 package pool
 
 import (
+	"encoding/binary"
+	"testing"
+
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 
 	"context"
 	"encoding/hex"
-	"testing"
 
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
+	"github.com/bsv8/go-bitfs/protocol"
 )
+
+func TestParseCanonicalTransactionPreflightsCompactSizeLengths(t *testing.T) {
+	// 一个输入声明 uint64 最大值的 unlocking script，但报文仅有几十字节。
+	// SDK 交易解析器会按声明长度分配，因此必须先由协议层边界扫描拒绝。
+	raw := append([]byte{1, 0, 0, 0, 1}, make([]byte, 36)...)
+	raw = append(raw, 0xff)
+	length := make([]byte, 8)
+	binary.LittleEndian.PutUint64(length, ^uint64(0))
+	raw = append(raw, length...)
+
+	if _, err := ParseCanonicalTransaction(raw); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+		t.Fatalf("untrusted CompactSize script length error = %v, want invalid_evidence", err)
+	}
+}
+
+func TestParseCanonicalTransactionRejectsExcessiveElementCounts(t *testing.T) {
+	// 极短报文不能让 SDK 按声明的 2^32-1 个输入循环。
+	for _, raw := range [][]byte{
+		{1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff},
+		{1, 0, 0, 0, 0, 0xfd, 0x11, 0x27, 0, 0, 0, 0},
+	} {
+		if _, err := ParseCanonicalTransaction(raw); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+			t.Fatalf("excessive element count %x = %v, want invalid_evidence", raw, err)
+		}
+	}
+}
 
 func TestRefundTemplateTxIDGoldenValueAndByteOrder(t *testing.T) {
 	_, proof := mustRefundExpiryFixture(t, 500000100)

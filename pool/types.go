@@ -107,6 +107,26 @@ type FundingTransactionDelivery struct {
 	FundingTransactionRaw []byte
 }
 
+// PoolCloseRequest 是 Kind 12 买方关池请求。它把买方已经签名的未完成最终
+// 关闭交易发送给卖方；交易签名仍是 MultisigPool 交易签名，不是 wire 文档签名。
+type PoolCloseRequest struct {
+	// RefundTemplateTxID 是费用池统一关联 ID，必须是报文的首个业务字段。
+	RefundTemplateTxID RefundTemplateTxID
+	// UnsignedCloseTransactionRaw 是 sequence 为最终关闭值的未签名交易原文。
+	UnsignedCloseTransactionRaw []byte
+	// BuyerCloseTransactionSignature 是买方对未签名关闭交易的分离式交易签名。
+	BuyerCloseTransactionSignature []byte
+}
+
+// PoolCloseResponse 是 Kind 13 卖方关池响应。完整交易的 unlocking script
+// 携带买方与卖方的交易签名；接收方仍须按本地 OpeningProof 完整验证交易。
+type PoolCloseResponse struct {
+	// RefundTemplateTxID 是费用池统一关联 ID，必须是报文的首个业务字段。
+	RefundTemplateTxID RefundTemplateTxID
+	// CompleteCloseTransactionRaw 是包含买卖双方签名的完整关闭交易原文。
+	CompleteCloseTransactionRaw []byte
+}
+
 // PaymentUpdate 是 Kind 7 PaymentUpdate 使用的最小付款凭证传输容器。
 //
 // 它只携带内容授权哈希和买方对确定性重建状态交易的签名；费用池 ID 与未签名

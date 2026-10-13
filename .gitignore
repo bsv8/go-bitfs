@@ -45,6 +45,9 @@ website/.docusaurus/
 website/generated-api/
 website/i18n/zh-CN/docusaurus-plugin-content-docs-api/current/*.md
 node_modules/
+typescript/node_modules/
+typescript/dist/
+*.tgz
 
 # Demo 02 运行时 checkpoint 与 outbox 产物（应用本地状态，绝不入库）
 **/demo/.state/

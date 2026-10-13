@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	masterseed "github.com/bsv8/MasterSeed"
-	"github.com/bsv8/go-bitfs/buyer"
+	"github.com/bsv8/go-bitfs/internal/flowtest/buyer"
+	"github.com/bsv8/go-bitfs/internal/flowtest/seller"
 	"github.com/bsv8/go-bitfs/pool"
 	"github.com/bsv8/go-bitfs/protocol"
-	"github.com/bsv8/go-bitfs/seller"
 )
 
 func openNamedPool(t *testing.T, f *protocolFixture, satoshis uint64) *openedPool {

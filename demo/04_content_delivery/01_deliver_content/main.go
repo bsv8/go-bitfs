@@ -1,8 +1,8 @@
 // Command seller delivers a content batch (BitFS 004).
 //
-// fixture 先构造一张 003（买方侧），再由卖方角色 API 验证其全链证据并构造、
-// 签署 exact Kind 6 Artifact。卖方在生成 004 的同时把 DeliveryCheckpoint 与
-// payload 保存到应用状态（persist-before-send）。
+// fixture 先构造一张 003（买方侧），再由卖方纯函数 API 验证其全链证据并构造、
+// 签署 exact Kind 6 Artifact。卖方在生成 004 的同时把交付证据包与 payload
+// 保存到应用状态（persist-before-send）。
 package main
 
 import (
@@ -30,12 +30,12 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("build prerequisite 003 request: %w", err))
 	}
-	debug("[seller] seller.DeliverContent verifies 003 against caller-held quote/pool state and signs the delivery")
+	debug("[seller] seller.PrepareDelivery verifies 003 against caller-held quote/pool state and signs the delivery")
 	if err := f.DeliverRound(ctx, now, round, [][]byte{append([]byte(nil), f.Seed...)}); err != nil {
 		fail(err)
 	}
-	debug("[seller] DeliveryCheckpoint saved by the demo (caller responsibility): target sequence %d, absolute seller amount %d",
-		round.Delivery.PaymentSequence(), round.Delivery.SellerAmountAfterSatoshis())
+	debug("[seller] delivery evidence saved by the demo (caller responsibility): target sequence %d, absolute seller amount %d",
+		round.AuthorizationTerms.PaymentSequence, round.AuthorizationTerms.SellerAmountAfterSatoshis)
 	debug("[delivery] PaymentAuthorizationID bound by content_delivery_cbor: %s", round.PaymentID.String())
 	fmt.Printf("PAYMENT_AUTHORIZATION_ID=%s\n", round.PaymentID.String())
 	fmt.Printf("SIGNED_CONTENT_DELIVERY_HEX=%x\n", round.Kind6Raw)

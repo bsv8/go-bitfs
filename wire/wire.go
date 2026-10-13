@@ -72,6 +72,12 @@ const (
 	// content_payloads_id and attaches the payloads verbatim.
 	// Direction: arbiter -> buyer.
 	ContentRetrievalResponse Kind = 11
+	// PoolCloseRequest 携带费用池关联 ID、未签名最终关闭交易和买方分离式交易签名。
+	// 方向：买方 -> 卖方。
+	PoolCloseRequest Kind = 12
+	// PoolCloseResponse 携带包含买卖双方交易签名的完整最终关闭交易。
+	// 方向：卖方 -> 买方。
+	PoolCloseResponse Kind = 13
 )
 
 var strictDec cbor.DecMode

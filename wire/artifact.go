@@ -45,12 +45,15 @@ func (a Artifact) IsZero() bool { return a.raw == nil }
 // 载整包（payload 上限 + Claim 上限 + 签名上限 + 外壳开销）分别决定两个下
 // 界；任何超限输入直接以 malformed_wire 拒绝，保证超大不可信输入不会消耗解
 // 码内存与 CPU。应用可设置更小的传输层限额，但不得静默抬高本值。
-const maxWireParseBytes = max(content.MaxContentPayloadsCBORBytes+1024, arbitration.MaxArbitrationRequestBytes)
+// MaxWireParseBytes 是完整 BitFS 报文的协议解析上限，也是 bitcoin-libp2p
+// uvarint transport 的默认单帧接收上限。应用可以配置更小的本地限额，但不能
+// 配置得更大后绕过 wire parser 的协议边界。
+const MaxWireParseBytes = max(content.MaxContentPayloadsCBORBytes+1024, arbitration.MaxArbitrationRequestBytes)
 
 // enforceWireSizeLimit 在任何 CBOR 解码之前执行。
 func enforceWireSizeLimit(op string, raw []byte) error {
-	if len(raw) > maxWireParseBytes {
-		return protocol.Errorf(op, protocol.CodeMalformedWire, 0, "wire", "message exceeds the protocol size limit %d bytes", maxWireParseBytes)
+	if len(raw) > MaxWireParseBytes {
+		return protocol.Errorf(op, protocol.CodeMalformedWire, 0, "wire", "message exceeds the protocol size limit %d bytes", MaxWireParseBytes)
 	}
 	return nil
 }
@@ -64,7 +67,7 @@ func parseHeaderKind(raw []byte) (Kind, error) {
 	if version != protocol.WireVersion {
 		return 0, protocol.Errorf("wire.Parse", protocol.CodeUnsupportedVersion, uint16(kindValue), "wire_version", "unsupported wire version %d", version)
 	}
-	if kindValue == 0 || kindValue > 11 {
+	if kindValue == 0 || kindValue > 13 {
 		return 0, protocol.Errorf("wire.Parse", protocol.CodeUnsupportedKind, uint16(kindValue), "wire_kind", "unsupported wire kind %d", kindValue)
 	}
 	return Kind(kindValue), nil
@@ -106,6 +109,12 @@ func decodeArtifact(artifact Artifact) error {
 		return err
 	case ContentRetrievalResponse:
 		_, err := DecodeContentRetrievalResponse(artifact)
+		return err
+	case PoolCloseRequest:
+		_, err := DecodePoolCloseRequest(artifact)
+		return err
+	case PoolCloseResponse:
+		_, err := DecodePoolCloseResponse(artifact)
 		return err
 	default:
 		return protocol.Errorf("wire.decodeArtifact", protocol.CodeUnsupportedKind, uint16(artifact.Kind()), "wire_kind", "unsupported wire kind %d", artifact.Kind())

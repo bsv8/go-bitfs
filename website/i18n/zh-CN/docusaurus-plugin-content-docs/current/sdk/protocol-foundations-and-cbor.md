@@ -7,7 +7,7 @@ title: 01 · 协议基础与 CBOR
 
 返回 [SDK API 框架入口](sdk-api-framework-design.md)。
 
-当前代码已落地本页的全部边界：`protocol`、`content`、`pool`、`arbitration`、`buyer.Workflow`、`seller.Workflow`、`arbiter.Workflow` 和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
+当前代码已落地本页的全部边界：`protocol`、`content`、`pool`、`arbitration`、`buyer`/`seller`/`arbiter` 的纯函数步骤和 `wire` 均可直接使用；本文中的伪代码用于说明职责，不替代 Go 包的实际签名。
 
 ## 设计目标
 
@@ -25,7 +25,7 @@ title: 01 · 协议基础与 CBOR
 
 ## 包边界
 
-新 API 采用四层结构：共享协议基础、纯领域包、exact bytes wire 层，以及作为唯一推荐应用入口的角色 workflow。
+新 API 采用四层结构：共享协议基础、纯领域包、exact bytes wire 层，以及作为唯一推荐应用入口的角色纯函数步骤。
 
 ```text
 protocol/     共享基础：受约束 Signer 端口（+ NewPrivateKeySigner）、显式
@@ -39,7 +39,7 @@ arbitration/  007/008 托管证据的纯领域函数；无角色状态
 wire/         面向 exact bytes 的类型化 encoder 与严格 decoder，返回不可变
               wire.Artifact
 buyer/, seller/, arbiter/
-              角色 workflow 门面：产生下一个待发送 Artifact、交易或必须持久化
+              角色纯函数步骤：产生下一个待发送 Artifact、交易或普通证据包
               的 opaque checkpoint。交付上下文的串行化由调用方应用负责
 ```
 
@@ -74,7 +74,7 @@ const (
     CodeMalformedWire        // 报文结构、数组形状或字段宽度畸形
     CodeNonCanonical         // 结构合法但编码不是 deterministic CBOR
     CodeUnsupportedVersion   // wire version 不是 1
-    CodeUnsupportedKind      // Kind 不在 1..11 或与路由声明不一致
+    CodeUnsupportedKind      // Kind 不在 1..13 或与路由声明不一致
     CodeInvalidSignature     // 消息签名或交易签名验证失败
     CodeInvalidEvidence      // 哈希不匹配、池绑定失败、金额守恒破坏等
     CodeUnauthorized         // 角色公钥与操作者身份不符
@@ -125,6 +125,8 @@ const (
     ArbitrationResponse Kind = 9         // 仲裁方 -> 卖方
     ContentRetrievalRequest Kind = 10    // 买方 -> 仲裁方
     ContentRetrievalResponse Kind = 11   // 仲裁方 -> 买方
+    PoolCloseRequest Kind = 12           // 买方 -> 卖方
+    PoolCloseResponse Kind = 13          // 卖方 -> 买方
 )
 
 // 每个 Kind 恰好一个类型化 encoder（返回 transport-ready Artifact）与一个
@@ -134,11 +136,11 @@ artifact, err := wire.EncodeFileQuote(signedQuote) // Kind 1
 decoded, err := wire.DecodeFileQuote(artifact)     // *content.SignedFileQuote
 ```
 
-Wire v1 保持不变：每条完整报文都以 `[protocol.WireVersion, wire_kind, ...]` 开头，外层版本/kind 对由各自的 encoder 注入、每个严格 decoder 复核，并通过 `protocol.SignWireDocument` 纳入普通消息签名。认证文档自身不携带版本或 kind 元素。定义了 `RefundTemplateTxID` 的报文在 CBOR 文档中携带它；0201 预签请求从 RefundTx 推导该值，不包含单独的关联 ID 字段。
+Wire v1 采用统一外层格式：每条完整报文都以 `[protocol.WireVersion, wire_kind, ...]` 开头，外层版本/kind 对由各自的 encoder 注入、每个严格 decoder 复核，并通过 `protocol.SignWireDocument` 纳入普通消息签名。认证文档自身不携带版本或 kind 元素。定义了 `RefundTemplateTxID` 的报文在 CBOR 文档中携带它；0201 预签请求从 RefundTx 推导该值，不包含单独的关联 ID 字段。
 
-006 没有新的应用层关闭报文，关闭行为使用 002/005 中已保存的原始交易，不应虚构新的 CBOR `CloseRequest`。
+费用池开池与协商关池统一归属 002 费用池生命周期 wire 规范。Kind 12 携带买方的未签名最终关闭交易和分离式交易签名；Kind 13 返回完整交易。应用应使用这些 Artifact，并由应用层负责传输、持久化、重试、广播和确认跟踪。
 
-解析得到的 Artifact 只回答“字节是否符合某类报文模式”；随后由角色 workflow 使用 SDK 固定验证器校验签名、报价有效期、费用池输入和金额——不存在需要调用方配置的签名验证回调。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
+解析得到的 Artifact 只回答“字节是否符合某类报文模式”；随后由角色纯函数步骤使用 SDK 固定验证器校验签名、报价有效期、费用池输入和金额——不存在需要调用方配置的签名验证回调。解码器绝不能把“成功解码”暴露为“已验证”或“已付款”。
 
 所有协议身份公钥都必须编码为合法的 33 字节压缩 secp256k1 公钥。固定验证层会在它们进入签名的 001/003/004 条款或 002 费用池证据前拒绝 65 字节未压缩公钥。
 
@@ -175,4 +177,4 @@ func CheckContentRequestTiming(requestTerms *PaymentAuthorization, quoteTerms *F
 func VerifyContentPayloadsContext(ctx context.Context, quoteTerms *FileQuoteTerms, contentHashes, payloads [][]byte, seed []byte) ([]byte, error)
 ```
 
-[03 · 角色 workflow API](role-workflow-api.md) 中的角色 workflow 负责组合以上能力；普通应用应优先使用角色 API，而不是直接调用领域函数。
+[03 · 角色纯函数 API](role-workflow-api.md) 中的步骤函数负责组合以上能力；普通应用应优先使用它们，而不是直接调用领域函数。

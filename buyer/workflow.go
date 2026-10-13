@@ -12,19 +12,19 @@ import (
 	"github.com/bsv8/go-bitfs/wire"
 )
 
-// Workflow 是 Buyer 角色 API（001–006 与 008 取回）。它只持有固定的受约束
+// workflow 是 Buyer 角色 API（001–006 与 008 取回）。它只持有固定的受约束
 // Signer 及其派生公钥；没有存储、网络、节点、时钟或广播副作用。所有时间与
 // 高度判断使用调用方显式传入的一份 Facts；签名一律由 SDK 构造 digest 后交给
 // Signer 并固定自验。
-type Workflow struct {
+type workflow struct {
 	signer    protocol.Signer
 	publicKey protocol.PublicKey
 }
 
-// NewWorkflow 固定并验证 Signer 公钥后返回 Buyer 角色 API。直接私钥必须经
+// newWorkflow 固定并验证 Signer 公钥后返回 Buyer 角色 API。直接私钥必须经
 // protocol.NewPrivateKeySigner 进入，不存在第二构造器。
-func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
-	const op = "buyer.NewWorkflow"
+func newWorkflow(signer protocol.Signer) (*workflow, error) {
+	const op = "buyer.newWorkflow"
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "buyer workflow requires a signer")
 	}
@@ -33,25 +33,25 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
 	publicKey := bound.PublicKey()
-	return &Workflow{signer: bound, publicKey: publicKey}, nil
+	return &workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
-func (workflow *Workflow) PublicKey() []byte {
+func (workflow *workflow) PublicKey() []byte {
 	if workflow == nil {
 		return nil
 	}
 	return append([]byte(nil), workflow.publicKey[:]...)
 }
 
-func (workflow *Workflow) requireSelf(op string) error {
-	if workflow == nil || workflow.signer == nil {
+func (workflow *workflow) requireSelf(op string) error {
+	if workflow == nil {
 		return protocol.Errorf(op, protocol.CodeUnauthorized, 0, "workflow", "buyer workflow is required")
 	}
 	return nil
 }
 
-func (workflow *Workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoolEngine, error) {
+func (workflow *workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoolEngine, error) {
 	if proof == nil {
 		return nil, protocol.Errorf("buyer", protocol.CodeInvalidEvidence, 0, "opening_proof", "opening proof is required")
 	}
@@ -61,7 +61,7 @@ func (workflow *Workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoo
 // AcceptQuote 严格解析 exact Kind 1 bytes，验签、过期判断（唯一时间事实为
 // facts.Now）与买方归属绑定全部通过后，返回不可变 VerifiedQuote。本操作是
 // 纯验证：不签名、无长计算，因此不接收 context。应用决定保存位置。
-func (workflow *Workflow) AcceptQuote(facts protocol.Facts, rawKind1 []byte) (*content.VerifiedQuote, error) {
+func (workflow *workflow) AcceptQuote(facts protocol.Facts, rawKind1 []byte) (*content.VerifiedQuote, error) {
 	const op = "buyer.AcceptQuote"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -78,15 +78,12 @@ func (workflow *Workflow) AcceptQuote(facts protocol.Facts, rawKind1 []byte) (*c
 }
 
 // PreparePoolOpening 构造并签署 Kind 2 预签请求：返回待发送 Artifact 与必须
-// 先持久化的 OpeningCheckpoint。本操作不含任何时间/高度判断（纯交易构造），
+// 先持久化的 openingCheckpoint。本操作不含任何时间/高度判断（纯交易构造），
 // 因此不接收 Facts，也不接收无用参数。资金交易原文只存在于 checkpoint；SDK 不持久化。
-func (workflow *Workflow) PreparePoolOpening(ctx context.Context, command PrepareOpeningCommand) (*PreparePoolOpeningResult, error) {
+func (workflow *workflow) PreparePoolOpening(ctx context.Context, command prepareOpeningCommand) (*preparePoolOpeningResult, error) {
 	const op = "buyer.PreparePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
-	}
-	if command.Quote == nil {
-		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 2, "quote", "verified quote is required")
 	}
 	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: workflow.publicKey[:], SellerPublicKey: command.SellerPublicKey[:], ArbiterPublicKey: command.ArbiterPublicKey[:]})
 	if err != nil {
@@ -110,14 +107,14 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, command Prepar
 	if err != nil {
 		return nil, err
 	}
-	checkpoint := &OpeningCheckpoint{refundTemplateTxID: refundTemplateTxID, request: pool.CloneRefundPresignRequest(request), fundingTransactionRaw: append([]byte(nil), command.FundingTransactionRaw...)}
-	return &PreparePoolOpeningResult{Outbound: outbound, Checkpoint: checkpoint}, nil
+	checkpoint := &openingCheckpoint{refundTemplateTxID: refundTemplateTxID, request: pool.CloneRefundPresignRequest(request), fundingTransactionRaw: append([]byte(nil), command.FundingTransactionRaw...)}
+	return &preparePoolOpeningResult{Outbound: outbound, Checkpoint: checkpoint}, nil
 }
 
-// CompletePoolOpening 用保存的 OpeningCheckpoint 验收 exact Kind 3：重派生池
+// CompletePoolOpening 用保存的 openingCheckpoint 验收 exact Kind 3：重派生池
 // ID 并拒绝任何错配，验卖方预签，产出 verified opening + 初始池 checkpoint。
 // 纯验证路径：不接收 context。
-func (workflow *Workflow) CompletePoolOpening(checkpoint *OpeningCheckpoint, rawKind3 []byte) (*CompleteOpeningResult, error) {
+func (workflow *workflow) CompletePoolOpening(checkpoint *openingCheckpoint, rawKind3 []byte) (*completeOpeningResult, error) {
 	const op = "buyer.CompletePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -170,15 +167,15 @@ func (workflow *Workflow) CompletePoolOpening(checkpoint *OpeningCheckpoint, raw
 	if _, err := pool.VerifyPaymentState(initial, proof); err != nil {
 		return nil, err
 	}
-	return &CompleteOpeningResult{
+	return &completeOpeningResult{
 		Opening:     verifiedOpening,
-		InitialPool: &PoolCheckpoint{opening: proof, payment: initial},
+		InitialPool: &poolCheckpoint{opening: proof, payment: initial},
 	}, nil
 }
 
 // PrepareFundingDelivery 把 verified opening 携带的资金交易打包成 Kind 4
 // Artifact；纯打包路径，不接收 context；不广播资金交易——广播边界属于应用。
-func (workflow *Workflow) PrepareFundingDelivery(poolCheckpoint *PoolCheckpoint) (wire.Artifact, error) {
+func (workflow *workflow) PrepareFundingDelivery(poolCheckpoint *poolCheckpoint) (wire.Artifact, error) {
 	const op = "buyer.PrepareFundingDelivery"
 	if err := workflow.requireSelf(op); err != nil {
 		return wire.Artifact{}, err
@@ -206,8 +203,8 @@ func (workflow *Workflow) PrepareFundingDelivery(poolCheckpoint *PoolCheckpoint)
 }
 
 // RequestContent 验证报价/池/批次上下文/聚合价格/余额后签署 003：返回待发送
-// Kind 5 Artifact、授权 typed ID 与必须先持久化的 AuthorizationCheckpoint。
-func (workflow *Workflow) RequestContent(ctx context.Context, facts protocol.Facts, command RequestContentCommand) (*RequestContentResult, error) {
+// Kind 5 Artifact、授权 typed ID 与必须先持久化的 authorizationCheckpoint。
+func (workflow *workflow) RequestContent(ctx context.Context, facts protocol.Facts, command requestContentCommand) (*requestContentResult, error) {
 	const op = "buyer.RequestContent"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -314,17 +311,17 @@ func (workflow *Workflow) RequestContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	return &RequestContentResult{
+	return &requestContentResult{
 		Outbound:        outbound,
 		AuthorizationID: authID,
-		Checkpoint:      &AuthorizationCheckpoint{authorizationID: authID, request: signedRequest},
+		Checkpoint:      &authorizationCheckpoint{authorizationID: authID, request: signedRequest},
 	}, nil
 }
 
 // VerifyDeliveryAndPreparePayment 验收 exact Kind 6 并产生整个批次的唯一
 // Kind 7 签名凭证。方法名显式暴露"会产生买方交易签名"；先保存 payloads 与
 // Result 再发送 Outbound。
-func (workflow *Workflow) VerifyDeliveryAndPreparePayment(ctx context.Context, facts protocol.Facts, command VerifyDeliveryCommand) (*PaymentPreparationResult, error) {
+func (workflow *workflow) VerifyDeliveryAndPreparePayment(ctx context.Context, facts protocol.Facts, command verifyDeliveryCommand) (*paymentPreparationResult, error) {
 	const op = "buyer.VerifyDeliveryAndPreparePayment"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -405,7 +402,7 @@ func (workflow *Workflow) VerifyDeliveryAndPreparePayment(ctx context.Context, f
 		return nil, err
 	}
 	seed := append([]byte(nil), command.Seed...)
-	effectiveSeed, err := content.VerifyContentPayloadsContext(ctx, quoteTerms, contentHashes, payloads, seed)
+	effectiveSeed, err := content.VerifyContentPayloads(ctx, quoteTerms, contentHashes, payloads, seed)
 	if err != nil {
 		return nil, err
 	}
@@ -452,13 +449,13 @@ func (workflow *Workflow) VerifyDeliveryAndPreparePayment(ctx context.Context, f
 	for index := range payloads {
 		verifiedPayloads[index] = append([]byte(nil), payloads[index]...)
 	}
-	return &PaymentPreparationResult{Payloads: verifiedPayloads, Outbound: outbound, NextCandidate: unsigned}, nil
+	return &paymentPreparationResult{Payloads: verifiedPayloads, Outbound: outbound, NextCandidate: unsigned}, nil
 }
 
 // PrepareClose 从调用方选定的基准状态与目标金额构造未签名关闭 candidate 和
 // 买方 detached 签名。SDK 不声称 base 是业务最新，也不判断目标金额是否符合
 // 订单或账本；不广播。
-func (workflow *Workflow) PrepareClose(ctx context.Context, facts protocol.Facts, command PrepareCloseCommand) (*ClosePreparationResult, error) {
+func (workflow *workflow) PrepareClose(ctx context.Context, facts protocol.Facts, command prepareCloseCommand) (*closePreparationResult, error) {
 	const op = "buyer.PrepareClose"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -499,12 +496,12 @@ func (workflow *Workflow) PrepareClose(ctx context.Context, facts protocol.Facts
 	if err := engine.VerifyBuyerPayment(unsigned, buyerSignature, opening); err != nil {
 		return nil, fmt.Errorf("verify immediate close: %w", err)
 	}
-	return &ClosePreparationResult{Unsigned: unsigned, BuyerSignature: buyerSignature}, nil
+	return &closePreparationResult{Unsigned: unsigned, BuyerSignature: buyerSignature}, nil
 }
 
 // VerifyCompletedClose 验证卖方完整关闭交易在给定 opening 下密码学、结构与
 // 交易关系全部正确，返回不可变 Complete 结果；不声称已广播或已确认。
-func (workflow *Workflow) VerifyCompletedClose(command VerifyCloseCommand) (*pool.VerifiedSignedTransaction, error) {
+func (workflow *workflow) VerifyCompletedClose(command verifyCloseCommand) (*pool.VerifiedSignedTransaction, error) {
 	const op = "buyer.VerifyCompletedClose"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -533,7 +530,7 @@ func (workflow *Workflow) VerifyCompletedClose(command VerifyCloseCommand) (*poo
 
 // BuildMaturedRefund 在显式事实判定退款到期后合并双方退款签名，返回可广播的
 // verified refund transaction；是否广播由应用决定。
-func (workflow *Workflow) BuildMaturedRefund(facts protocol.Facts, poolCheckpoint *PoolCheckpoint) (*pool.VerifiedSignedTransaction, error) {
+func (workflow *workflow) BuildMaturedRefund(facts protocol.Facts, poolCheckpoint *poolCheckpoint) (*pool.VerifiedSignedTransaction, error) {
 	const op = "buyer.BuildMaturedRefund"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -577,7 +574,7 @@ func (workflow *Workflow) BuildMaturedRefund(facts protocol.Facts, poolCheckpoin
 // RequestArbitratedContent 为一条托管记录构造 exact Kind 10 Artifact：默认入口
 // 由 SDK 生成安全随机 nonce；网络超时重试必须原样重放已持久化的 Artifact，
 // 绝不能重新调用本方法生成新 nonce。
-func (workflow *Workflow) RequestArbitratedContent(ctx context.Context, command ArbitrationRetrievalCommand) (wire.Artifact, error) {
+func (workflow *workflow) RequestArbitratedContent(ctx context.Context, command arbitrationRetrievalCommand) (wire.Artifact, error) {
 	const op = "buyer.RequestArbitratedContent"
 	if err := workflow.requireSelf(op); err != nil {
 		return wire.Artifact{}, err
@@ -589,16 +586,16 @@ func (workflow *Workflow) RequestArbitratedContent(ctx context.Context, command 
 	return workflow.buildRetrievalRequest(ctx, command, nonce)
 }
 
-// ArbitrationRetrievalCommand 携带构造 Kind 10 所需的本地证据：opening（经池
+// arbitrationRetrievalCommand 携带构造 Kind 10 所需的本地证据：opening（经池
 // checkpoint）+ exact 已签 003。
-type ArbitrationRetrievalCommand struct {
+type arbitrationRetrievalCommand struct {
 	// Pool 是当前池 checkpoint。
-	Pool *PoolCheckpoint
+	Pool *poolCheckpoint
 	// Authorization 是 exact 已签 003 的 checkpoint。
-	Authorization *AuthorizationCheckpoint
+	Authorization *authorizationCheckpoint
 }
 
-func (workflow *Workflow) buildRetrievalRequest(ctx context.Context, command ArbitrationRetrievalCommand, nonce protocol.RetrievalNonce) (wire.Artifact, error) {
+func (workflow *workflow) buildRetrievalRequest(ctx context.Context, command arbitrationRetrievalCommand, nonce protocol.RetrievalNonce) (wire.Artifact, error) {
 	const op = "buyer.buildRetrievalRequest"
 	opening := command.Pool.Opening()
 	authorization := command.Authorization.Request()
@@ -632,7 +629,7 @@ func (workflow *Workflow) buildRetrievalRequest(ctx context.Context, command Arb
 // VerifyArbitratedContent 时间无关地验收 exact Kind 10/11：available 分支额外
 // 复核 payload 归属与价格；unavailable 分支作为已验签协议结果返回。过期报价、
 // 截止或退款锁定绝不拒绝已签托管证据；available 不生成 Kind 7。
-func (workflow *Workflow) VerifyArbitratedContent(ctx context.Context, command ArbitratedContentCommand) (*ArbitratedContentResult, error) {
+func (workflow *workflow) VerifyArbitratedContent(ctx context.Context, command arbitratedContentCommand) (*arbitratedContentResult, error) {
 	const op = "buyer.VerifyArbitratedContent"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -700,7 +697,7 @@ func (workflow *Workflow) VerifyArbitratedContent(ctx context.Context, command A
 	if err != nil {
 		return nil, err
 	}
-	outcome := &ArbitratedContentResult{ContentRetrievalRequestID: result.ContentRetrievalRequestID, ArbitrationClaimID: built.ArbitrationClaimID, Available: result.Available, UnavailableReason: result.UnavailableReason}
+	outcome := &arbitratedContentResult{ContentRetrievalRequestID: result.ContentRetrievalRequestID, ArbitrationClaimID: built.ArbitrationClaimID, Available: result.Available, UnavailableReason: result.UnavailableReason}
 	if !result.Available {
 		return outcome, nil
 	}
@@ -708,7 +705,7 @@ func (workflow *Workflow) VerifyArbitratedContent(ctx context.Context, command A
 	if err != nil {
 		return nil, err
 	}
-	effectiveSeed, err := content.VerifyContentPayloadsContext(ctx, quoteTerms, contentHashes, result.Payloads, append([]byte(nil), command.Seed...))
+	effectiveSeed, err := content.VerifyContentPayloads(ctx, quoteTerms, contentHashes, result.Payloads, append([]byte(nil), command.Seed...))
 	if err != nil {
 		return nil, err
 	}

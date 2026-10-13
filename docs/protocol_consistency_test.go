@@ -35,8 +35,8 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 				"custody_gone",
 				"Kind 11 unavailable = [1, 11,",
 				"Kind 11 available = [1, 11,",
-				// 006 关池不新增报文；008 不产生 005、不关池。
-				"006 继续复用交易构造与签名 API",
+				// 006 的关池 Kind 与费用池开池定义共同归属 002；008 不产生 005、不关池。
+				"Kind 12/13 交换关池请求和完整关闭交易，报文定义与开池一起归属 002",
 				"可交付分支只取回托管内容，\n  不替 Buyer 关池，不产生 005"},
 			forbidden: []string{
 				// 旧 v4 外形绝不能作为现行真值回归（迁移说明中的“已删除”
@@ -50,7 +50,7 @@ func TestProtocolDocumentationCurrentTruth(t *testing.T) {
 		"spec/v1/wire-messages.cddl": {
 			required: []string{
 				"wire-version = 1",
-				"wire-kind = 1..11",
+				"wire-kind = 1..13",
 				`wire-signature-domain = "bitfs/wire-signature"`,
 				"kind-1-file-quote", "kind-2-refund-presign-request",
 				"kind-3-refund-presign-response", "kind-4-funding-transaction-delivery",

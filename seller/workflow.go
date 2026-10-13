@@ -13,18 +13,18 @@ import (
 	"github.com/bsv8/go-bitfs/wire"
 )
 
-// Workflow 是 Seller 角色 API（001–007）。它只持有固定的受约束 Signer 及其
+// workflow 是 Seller 角色 API（001–007）。它只持有固定的受约束 Signer 及其
 // 派生公钥；没有存储、待处理请求索引、内容仓库、节点、时钟或广播副作用。
 // 所有时间/高度判断使用调用方显式传入的一份 Facts。
-type Workflow struct {
+type workflow struct {
 	signer    protocol.Signer
 	publicKey protocol.PublicKey
 }
 
-// NewWorkflow 固定并验证 Signer 公钥后返回 Seller 角色 API。直接私钥必须经
+// newWorkflow 固定并验证 Signer 公钥后返回 Seller 角色 API。直接私钥必须经
 // protocol.NewPrivateKeySigner 进入，不存在第二构造器。
-func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
-	const op = "seller.NewWorkflow"
+func newWorkflow(signer protocol.Signer) (*workflow, error) {
+	const op = "seller.newWorkflow"
 	if signer == nil {
 		return nil, protocol.Errorf(op, protocol.CodeSignerUnavailable, 0, "signer", "seller workflow requires a signer")
 	}
@@ -33,33 +33,33 @@ func NewWorkflow(signer protocol.Signer) (*Workflow, error) {
 		return nil, protocol.Wrap(err, op, protocol.CodeInvalidEvidence, 0, "signer")
 	}
 	publicKey := bound.PublicKey()
-	return &Workflow{signer: bound, publicKey: publicKey}, nil
+	return &workflow{signer: bound, publicKey: publicKey}, nil
 }
 
 // PublicKey 返回本角色的固定压缩公钥副本。
-func (workflow *Workflow) PublicKey() []byte {
+func (workflow *workflow) PublicKey() []byte {
 	if workflow == nil {
 		return nil
 	}
 	return append([]byte(nil), workflow.publicKey[:]...)
 }
 
-func (workflow *Workflow) requireSelf(op string) error {
+func (workflow *workflow) requireSelf(op string) error {
 	if workflow == nil || workflow.signer == nil {
 		return protocol.Errorf(op, protocol.CodeUnauthorized, 0, "workflow", "seller workflow is required")
 	}
 	return nil
 }
 
-func (workflow *Workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoolEngine, error) {
+func (workflow *workflow) engineFor(proof *pool.OpeningProof) (*pool.MultisigPoolEngine, error) {
 	if proof == nil {
 		return nil, protocol.Errorf("seller", protocol.CodeInvalidEvidence, 0, "opening_proof", "opening proof is required")
 	}
 	return pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey})
 }
 
-// ensureOwnership 把 opening evidence 绑定到本 Workflow 公钥。
-func (workflow *Workflow) ensureOwnership(op string, proof *pool.OpeningProof) error {
+// ensureOwnership 把 opening evidence 绑定到本 workflow 公钥。
+func (workflow *workflow) ensureOwnership(op string, proof *pool.OpeningProof) error {
 	if proof == nil {
 		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 0, "opening_proof", "opening proof is required")
 	}
@@ -81,7 +81,7 @@ func refundGate(op string, facts protocol.Facts, lockTime uint32) error {
 // CreateQuote 以单一 QuoteDraft 签署确定性 Kind 1 条款：先 sanitize 文件名再
 // 编码与签名，返回待发送 Artifact 与最终规范化 terms（展示实际签署值）。
 // 唯一时间事实为 facts.Now。
-func (workflow *Workflow) CreateQuote(ctx context.Context, facts protocol.Facts, draft QuoteDraft) (*QuoteResult, error) {
+func (workflow *workflow) CreateQuote(ctx context.Context, facts protocol.Facts, draft QuoteDraft) (*quoteResult, error) {
 	const op = "seller.CreateQuote"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -126,13 +126,13 @@ func (workflow *Workflow) CreateQuote(ctx context.Context, facts protocol.Facts,
 	if err != nil {
 		return nil, err
 	}
-	return &QuoteResult{Outbound: outbound, Terms: finalTerms}, nil
+	return &quoteResult{Outbound: outbound, Terms: finalTerms}, nil
 }
 
 // PreparePoolOpening 验证 exact Kind 2 并计算卖方退款预签：返回待发送 Kind 3
-// Artifact 与必须先持久化的 OpeningCheckpoint。相同的重复请求只会得到等价的
+// Artifact 与必须先持久化的 openingCheckpoint。相同的重复请求只会得到等价的
 // 新鲜计算结果——SDK 不存储、不重放。
-func (workflow *Workflow) PreparePoolOpening(ctx context.Context, rawKind2 []byte) (*PreparePoolOpeningResult, error) {
+func (workflow *workflow) PreparePoolOpening(ctx context.Context, rawKind2 []byte) (*preparePoolOpeningResult, error) {
 	const op = "seller.PreparePoolOpening"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -168,24 +168,16 @@ func (workflow *Workflow) PreparePoolOpening(ctx context.Context, rawKind2 []byt
 	if err != nil {
 		return nil, err
 	}
-	return &PreparePoolOpeningResult{Outbound: outbound, Checkpoint: &OpeningCheckpoint{opening: proof}}, nil
+	return &preparePoolOpeningResult{Outbound: outbound, Checkpoint: &openingCheckpoint{opening: proof}}, nil
 }
 
 // VerifyFundingDelivery 用保存的预签 checkpoint 验收 exact Kind 4：完成开池
 // 证明并解析初始退款状态。返回的 FundingTransactionRaw 由应用自行广播；
 // InitialPool 必须在广播决策前持久化。方法名不含 Accept/Broadcast：验收证据
 // 与提交网络是两件事。
-func (workflow *Workflow) VerifyFundingDelivery(checkpoint *OpeningCheckpoint, rawKind4 []byte) (*FundingVerificationResult, error) {
+func (workflow *workflow) VerifyFundingDelivery(checkpoint *openingCheckpoint, rawKind4 []byte) (*fundingVerificationResult, error) {
 	const op = "seller.VerifyFundingDelivery"
 	if err := workflow.requireSelf(op); err != nil {
-		return nil, err
-	}
-	deliveryArtifact, err := wire.ParseAs(wire.FundingTransactionDelivery, rawKind4)
-	if err != nil {
-		return nil, err
-	}
-	delivery, err := wire.DecodeFundingTransactionDelivery(deliveryArtifact)
-	if err != nil {
 		return nil, err
 	}
 	proof := checkpoint.Opening()
@@ -195,11 +187,27 @@ func (workflow *Workflow) VerifyFundingDelivery(checkpoint *OpeningCheckpoint, r
 	if err := workflow.ensureOwnership(op, proof); err != nil {
 		return nil, err
 	}
-	if _, err := pool.ParseCanonicalTransaction(delivery.FundingTransactionRaw); err != nil {
+	return verifyFundingDelivery(proof, rawKind4)
+}
+
+// verifyFundingDelivery 是 VerifyFunding 与 VerifyFundingDelivery 共用的纯证据
+// 实现：只用调用方提供的预签证明与 exact Kind 4 完成资金交易验证、初始退款状态
+// 重建与全量复核，不读取任何角色身份或签名能力。
+func verifyFundingDelivery(proof *pool.OpeningProof, rawKind4 []byte) (*fundingVerificationResult, error) {
+	const op = "seller.VerifyFunding"
+	deliveryArtifact, err := wire.ParseAs(wire.FundingTransactionDelivery, rawKind4)
+	if err != nil {
 		return nil, err
 	}
-	engine, err := workflow.engineFor(proof)
+	delivery, err := wire.DecodeFundingTransactionDelivery(deliveryArtifact)
 	if err != nil {
+		return nil, err
+	}
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: proof.BuyerPublicKey, SellerPublicKey: proof.SellerPublicKey, ArbiterPublicKey: proof.ArbiterPublicKey})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := pool.ParseCanonicalTransaction(delivery.FundingTransactionRaw); err != nil {
 		return nil, err
 	}
 	derivedRefundTemplateTxID, err := engine.TransactionID(proof.RefundTemplateRaw)
@@ -234,25 +242,31 @@ func (workflow *Workflow) VerifyFundingDelivery(checkpoint *OpeningCheckpoint, r
 	if _, err := pool.VerifyPaymentState(initial, proof); err != nil {
 		return nil, err
 	}
-	return &FundingVerificationResult{
+	return &fundingVerificationResult{
 		Opening:               verifiedOpening,
-		InitialPool:           &PoolCheckpoint{opening: proof, payment: initial},
+		InitialPool:           &poolCheckpoint{opening: proof, payment: initial},
 		FundingTransactionRaw: append([]byte(nil), delivery.FundingTransactionRaw...),
 	}, nil
 }
 
-// DeliverContent 验证买方 003 全链证据后构造并签署 Kind 6：返回待发送
-// Artifact 与必须先持久化的 DeliveryCheckpoint（先保存后发送）。
-func (workflow *Workflow) DeliverContent(ctx context.Context, facts protocol.Facts, command DeliveryCommand) (*DeliveryResult, error) {
-	const op = "seller.DeliverContent"
-	if err := workflow.requireSelf(op); err != nil {
-		return nil, err
-	}
+type deliveryRequestPreflight struct {
+	authorization      *content.PaymentAuthorization
+	quoteTerms         *content.FileQuoteTerms
+	contentHashes      [][]byte
+	authorizationID    protocol.PaymentAuthorizationID
+	refundTemplateTxID pool.RefundTemplateTxID
+	expectedPrice      uint64
+}
+
+// preflightDeliveryRequest 是 InspectDeliveryRequest 与 DeliverContent 共用的
+// 无 payload 校验：从 exact evidence 重验请求签名、报价/开池绑定、时间、当前池
+// 状态、目标序号和容量，并从规范授权文档派生授权 ID 与有序内容哈希。
+func preflightDeliveryRequest(op string, facts protocol.Facts, quote *content.SignedFileQuote, checkpoint *poolCheckpoint, rawKind5 []byte) (*deliveryRequestPreflight, error) {
 	now, err := facts.RequireNow()
 	if err != nil {
 		return nil, err
 	}
-	requestArtifact, err := wire.ParseAs(wire.ContentRequest, command.RequestRaw)
+	requestArtifact, err := wire.ParseAs(wire.ContentRequest, rawKind5)
 	if err != nil {
 		return nil, err
 	}
@@ -260,16 +274,13 @@ func (workflow *Workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	opening := command.Pool.Opening()
-	previous := command.Pool.Payment()
-	localQuote := content.CloneSignedFileQuote(command.Quote)
+	opening := checkpoint.Opening()
+	previous := checkpoint.Payment()
+	localQuote := content.CloneSignedFileQuote(quote)
 	if localQuote == nil || opening == nil || previous == nil {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "command", "quote and pool checkpoint are required")
 	}
-	if err := workflow.ensureOwnership(op, opening); err != nil {
-		return nil, err
-	}
-	engine, err := workflow.engineFor(opening)
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{BuyerPublicKey: opening.BuyerPublicKey, SellerPublicKey: opening.SellerPublicKey, ArbiterPublicKey: opening.ArbiterPublicKey})
 	if err != nil {
 		return nil, err
 	}
@@ -283,52 +294,77 @@ func (workflow *Workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err := refundGate(op, facts, deliveryLockDetails.RefundLockTime); err != nil {
 		return nil, err
 	}
-	requestTerms, quoteTerms, err := content.VerifyContentRequestEvidence(request, localQuote, opening)
+	authorization, quoteTerms, err := content.VerifyContentRequestEvidence(request, localQuote, opening)
 	if err != nil {
 		return nil, err
 	}
-	if err := content.CheckContentRequestTiming(requestTerms, quoteTerms, now); err != nil {
+	if err := content.CheckContentRequestTiming(authorization, quoteTerms, now); err != nil {
 		return nil, err
 	}
-	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(requestTerms.RefundTemplateTxID))
-	if previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 != requestTerms.PaymentSequence {
+	refundTemplateTxID := pool.RefundTemplateTxID(bytes.Clone(authorization.RefundTemplateTxID))
+	if previous.RefundTemplateTxID != refundTemplateTxID || previous.PaymentSequence+1 != authorization.PaymentSequence {
 		return nil, staleSequenceErr(op)
 	}
 	if err := engine.VerifyAcceptedPayment(previous, opening); err != nil {
 		return nil, fmt.Errorf("verify current pool state: %w", err)
 	}
-	if requestTerms.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
+	if authorization.SellerAmountAfterSatoshis < previous.SellerAmountSatoshis {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "seller_amount_after_satoshis", "authorization amount cannot decrease")
 	}
-	expectedPrice := requestTerms.SellerAmountAfterSatoshis - previous.SellerAmountSatoshis
-	if err := engine.CheckPaymentCapacity(pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: requestTerms.PaymentSequence, SellerAmountAfterSatoshis: requestTerms.SellerAmountAfterSatoshis}); err != nil {
+	if err := engine.CheckPaymentCapacity(pool.PaymentUpdateInput{Opening: opening, Previous: previous, PaymentSequence: authorization.PaymentSequence, SellerAmountAfterSatoshis: authorization.SellerAmountAfterSatoshis}); err != nil {
 		return nil, fmt.Errorf("check delivery payment capacity: %w", err)
 	}
-	contentHashes, err := content.DecodeContentHashes(requestTerms.ContentHashesCBOR)
+	contentHashes, err := content.DecodeContentHashes(authorization.ContentHashesCBOR)
 	if err != nil {
 		return nil, err
 	}
+	authorizationID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		return nil, err
+	}
+	return &deliveryRequestPreflight{
+		authorization:      authorization,
+		quoteTerms:         quoteTerms,
+		contentHashes:      contentHashes,
+		authorizationID:    authorizationID,
+		refundTemplateTxID: refundTemplateTxID,
+		expectedPrice:      authorization.SellerAmountAfterSatoshis - previous.SellerAmountSatoshis,
+	}, nil
+}
+
+// DeliverContent 验证买方 003 全链证据后构造并签署 Kind 6：返回待发送
+// Artifact 与必须先持久化的 deliveryCheckpoint（先保存后发送）。
+func (workflow *workflow) DeliverContent(ctx context.Context, facts protocol.Facts, command deliveryCommand) (*deliveryResult, error) {
+	const op = "seller.DeliverContent"
+	if err := workflow.requireSelf(op); err != nil {
+		return nil, err
+	}
+	opening := command.Pool.Opening()
+	if err := workflow.ensureOwnership(op, opening); err != nil {
+		return nil, err
+	}
+	preflight, err := preflightDeliveryRequest(op, facts, command.Quote, command.Pool, command.RequestRaw)
+	if err != nil {
+		return nil, err
+	}
+	previous := command.Pool.Payment()
 	payloads := make([][]byte, len(command.ContentPayloads))
 	for index := range command.ContentPayloads {
 		payloads[index] = append([]byte(nil), command.ContentPayloads[index]...)
 	}
 	seed := append([]byte(nil), command.Seed...)
-	effectiveSeed, err := content.VerifyContentPayloadsContext(ctx, quoteTerms, contentHashes, payloads, seed)
+	effectiveSeed, err := content.VerifyContentPayloads(ctx, preflight.quoteTerms, preflight.contentHashes, payloads, seed)
 	if err != nil {
 		return nil, err
 	}
-	price, err := content.ContentHashesPriceSatoshis(ctx, quoteTerms, contentHashes, effectiveSeed)
+	price, err := content.ContentHashesPriceSatoshis(ctx, preflight.quoteTerms, preflight.contentHashes, effectiveSeed)
 	if err != nil {
 		return nil, fmt.Errorf("calculate aggregate content price: %w", err)
 	}
-	if price != expectedPrice || requestTerms.SellerAmountAfterSatoshis != previous.SellerAmountSatoshis+price {
+	if price != preflight.expectedPrice || preflight.authorization.SellerAmountAfterSatoshis != previous.SellerAmountSatoshis+price {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 6, "seller_amount_after_satoshis", "authorization amount or sequence does not match verified content price")
 	}
-	authID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
-	if err != nil {
-		return nil, err
-	}
-	delivery, err := content.NewSignedContentDelivery(ctx, authID, payloads, workflow.signer)
+	delivery, err := content.NewSignedContentDelivery(ctx, preflight.authorizationID, payloads, workflow.signer)
 	if err != nil {
 		return nil, err
 	}
@@ -336,13 +372,13 @@ func (workflow *Workflow) DeliverContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
-	checkpoint := &DeliveryCheckpoint{refundTemplateTxID: refundTemplateTxID, authorizationID: authID, paymentSequence: protocol.PaymentSequence(requestTerms.PaymentSequence), sellerAmountAfterSatoshis: protocol.Satoshis(requestTerms.SellerAmountAfterSatoshis)}
-	return &DeliveryResult{Outbound: outbound, Checkpoint: checkpoint}, nil
+	checkpoint := &deliveryCheckpoint{refundTemplateTxID: preflight.refundTemplateTxID, authorizationID: preflight.authorizationID, paymentSequence: protocol.PaymentSequence(preflight.authorization.PaymentSequence), sellerAmountAfterSatoshis: protocol.Satoshis(preflight.authorization.SellerAmountAfterSatoshis)}
+	return &deliveryResult{Outbound: outbound, Checkpoint: checkpoint}, nil
 }
 
 // CompletePayment 验证买方最小 Kind 7 凭证、补签并合并完整交易：返回完整交易
 // （仅供应用决定是否广播）与 next pool checkpoint；SDK 不声称节点接受。
-func (workflow *Workflow) CompletePayment(ctx context.Context, facts protocol.Facts, command PaymentCommand) (*CompletePaymentResult, error) {
+func (workflow *workflow) CompletePayment(ctx context.Context, facts protocol.Facts, command paymentCommand) (*completePaymentResult, error) {
 	const op = "seller.CompletePayment"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -445,25 +481,25 @@ func (workflow *Workflow) CompletePayment(ctx context.Context, facts protocol.Fa
 	if err != nil {
 		return nil, fmt.Errorf("verify merged payment: %w", err)
 	}
-	next := &PoolCheckpoint{opening: pool.CloneOpeningProof(opening), payment: clonePaymentState(&signed.State)}
-	return &CompletePaymentResult{
+	next := &poolCheckpoint{opening: pool.CloneOpeningProof(opening), payment: clonePaymentState(&signed.State)}
+	return &completePaymentResult{
 		Transaction: verified,
 		NextPool:    next,
 	}, nil
 }
 
-// CompletePaymentResult 是 CompletePayment 的统一 Result：Transaction 是完整
+// completePaymentResult 是 CompletePayment 的统一 Result：Transaction 是完整
 // 签名交易（是否广播由应用决定）；NextPool 是合并后的本地 verified 状态。
-type CompletePaymentResult struct {
+type completePaymentResult struct {
 	// Transaction 是签名完整的付款交易；广播边界属于应用。
 	Transaction *pool.VerifiedSignedTransaction
 	// NextPool 是本笔付款之后的池 checkpoint（verified 本地状态）。
-	NextPool *PoolCheckpoint
+	NextPool *poolCheckpoint
 }
 
 // CompleteClose 校验买方关闭 candidate 结构与角色签名后补签并合并完整交易。
 // 它不读取任何卖方数据库金额，也不判断 candidate 是否匹配业务目标。
-func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Facts, command CloseCommand) (*pool.VerifiedSignedTransaction, error) {
+func (workflow *workflow) CompleteClose(ctx context.Context, facts protocol.Facts, command closeCommand) (*pool.VerifiedSignedTransaction, error) {
 	const op = "seller.CompleteClose"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err
@@ -471,6 +507,9 @@ func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 	unsigned := command.Unsigned
 	if unsigned == nil || unsigned.PaymentSequence != ^uint32(0) {
 		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 0, "unsigned_close", "immediate close must use the final sequence")
+	}
+	if command.Pool == nil || command.Pool.payment == nil {
+		return nil, protocol.Errorf(op, protocol.CodeStateConflict, 0, "pool_checkpoint", "seller pool checkpoint is required")
 	}
 	opening := command.Pool.Opening()
 	if err := workflow.ensureOwnership(op, opening); err != nil {
@@ -487,6 +526,15 @@ func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 	if err != nil {
 		return nil, err
 	}
+	if command.Pool.payment.PaymentSequence == ^uint32(0) {
+		if err := engine.VerifyBuyerPayment(unsigned, command.BuyerSignature, opening); err != nil {
+			return nil, protocol.WrapClassified(fmt.Errorf("verify buyer close signature: %w", err), op, 0, "buyer_close_transaction_signature")
+		}
+		if err := engine.PaymentStateMatchesUnsigned(command.Pool.payment, unsigned, opening); err != nil || !bytes.Equal(command.Pool.payment.BuyerTransactionSignature, command.BuyerSignature) {
+			return nil, protocol.Errorf(op, protocol.CodeStateConflict, 0, "payment_sequence", "pool is already final with a different close candidate")
+		}
+		return pool.VerifySignedTransaction(command.Pool.payment.RawTx, opening)
+	}
 	if err := refundGate(op, facts, details.RefundLockTime); err != nil {
 		return nil, err
 	}
@@ -494,7 +542,7 @@ func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 		return nil, protocol.Errorf(op, protocol.CodeInsufficientBalance, 0, "outputs_satoshis", "immediate close outputs exceed the pool capacity")
 	}
 	if err := engine.VerifyBuyerPayment(unsigned, command.BuyerSignature, opening); err != nil {
-		return nil, fmt.Errorf("verify buyer close signature: %w", err)
+		return nil, protocol.WrapClassified(fmt.Errorf("verify buyer close signature: %w", err), op, 0, "buyer_close_transaction_signature")
 	}
 	sellerSignature, err := pool.NewSellerPoolAdapter(engine, workflow.signer).SignSellerPayment(ctx, unsigned, opening)
 	if err != nil {
@@ -512,7 +560,7 @@ func (workflow *Workflow) CompleteClose(ctx context.Context, facts protocol.Fact
 
 // PrepareArbitration 验证本地开池、买方授权与本方已发交付后，签署紧凑 Claim
 // 证据并返回 exact Kind 8 Artifact。它不构造也不预测仲裁方响应。
-func (workflow *Workflow) PrepareArbitration(ctx context.Context, facts protocol.Facts, command ArbitrationCommand) (wire.Artifact, error) {
+func (workflow *workflow) PrepareArbitration(ctx context.Context, facts protocol.Facts, command arbitrationCommand) (wire.Artifact, error) {
 	const op = "seller.PrepareArbitration"
 	if err := workflow.requireSelf(op); err != nil {
 		return wire.Artifact{}, err
@@ -601,7 +649,7 @@ func (workflow *Workflow) PrepareArbitration(ctx context.Context, facts protocol
 // CompleteArbitratedPayment 从 exact Kind 8/9 完整验证托管收款路径：独立重建
 // paid candidate、验证回执消息签名与仲裁交易签名，然后补签卖方交易签名并合并
 // 完整交易。不广播；是否入账由应用决定。
-func (workflow *Workflow) CompleteArbitratedPayment(ctx context.Context, facts protocol.Facts, command ArbitratedPaymentCommand) (*pool.VerifiedSignedTransaction, error) {
+func (workflow *workflow) CompleteArbitratedPayment(ctx context.Context, facts protocol.Facts, command arbitratedPaymentCommand) (*pool.VerifiedSignedTransaction, error) {
 	const op = "seller.CompleteArbitratedPayment"
 	if err := workflow.requireSelf(op); err != nil {
 		return nil, err

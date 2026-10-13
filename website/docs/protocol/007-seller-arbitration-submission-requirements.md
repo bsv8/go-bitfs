@@ -53,10 +53,10 @@ frozen fee before requesting any signature:
 raw Kind 8 received -> strict decode -> evidence verification
   -> application verifies the on-chain UTXO
   -> application prices the fee
-  -> arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
+  -> arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
   -> atomic custody persistence (append-only: request, payload, Claim ID,
      fee stay immutable once written)
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
   -> persist/send exact Kind 9
 ```
 
@@ -64,14 +64,14 @@ A zero fee fails as invalid evidence before anything is persisted or signed.
 An amount that cannot fit after the Buyer-authorized Seller amount fails with
 the `CodeInsufficientBalance` error category; there is no free or partially-paid fallback.
 
-`arbiter.PrepareArbitration` has no transaction-signing side effect. It returns opaque
-prepared evidence with deep-copy getters for the Claim ID, frozen fee,
-authorization hash, payloads, deadline, and unsigned candidate. On restart,
-the application re-runs `arbiter.PrepareArbitration` from the saved exact raw Kind 8 bytes
-and saved fee; it must not fabricate the opaque prepared value. Custody
-records are append-only: after signing, the exact canonical Kind 9 bytes are
-attached to the same record without overwriting the request, payload, Claim
-ID, or fee.
+`arbiter.PrepareArbitration` has no transaction-signing side effect. It returns
+plain `PreparedArbitrationEvidence` data: the exact Kind 8 bytes, the
+independently rebuilt unsigned candidate, the Claim ID, and the frozen fee.
+The application persists that plain evidence and passes it back to
+`arbiter.SignPreparedArbitration`, which revalidates every field from the
+exact Kind 8 bytes before any signer is reached. Custody records are
+append-only: after signing, the exact canonical Kind 9 bytes are attached to
+the same record without overwriting the request, payload, Claim ID, or fee.
 
 The Receipt binds the Claim ID, the absolute arbiter amount, and the exact
 `ForkID|All` transaction signature under the ordinary message signature

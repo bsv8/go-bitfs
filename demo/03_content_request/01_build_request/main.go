@@ -1,8 +1,8 @@
 // Command buyer builds a signed BitFS 003 content request.
 //
-// 报价、开池证据和最新付款状态都由 fixture（调用方应用）显式持有；买方角色
+// 报价、开池证据和最新付款状态都由 fixture（调用方应用）显式持有；买方纯函数
 // API 校验报价/池/批次上下文/聚合价格/余额后签署授权，返回待发送的 exact
-// Kind 5 Artifact 与必须先持久化的 AuthorizationCheckpoint。
+// Kind 5 Artifact 与必须先持久化的授权证据包。
 package main
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/fixture"
+	"github.com/bsv8/go-bitfs/pool"
 )
 
 func main() {
@@ -27,10 +28,13 @@ func main() {
 	}
 	now := time.Now().UTC()
 	debug("=== Step 003: Build Content Request ===")
-	poolID := f.BuyerPool.RefundTemplateTxID()
+	details, err := pool.DeriveOpeningDetails(f.BuyerPool.Opening)
+	if err != nil {
+		fail(fmt.Errorf("derive pool correlation id: %w", err))
+	}
 	debug("[state] FileQuoteTermsID: %s", f.VerifiedQuote.ID().String())
-	debug("[state] RefundTemplateTxID: %s", hex.EncodeToString(poolID[:]))
-	debug("[state] current accepted payment sequence: %d", f.BuyerPool.Payment().PaymentSequence)
+	debug("[state] RefundTemplateTxID: %s", hex.EncodeToString(details.RefundTemplateTxID[:]))
+	debug("[state] current accepted payment sequence: %d", f.LatestPayment.PaymentSequence)
 
 	round, err := f.RequestSeed(ctx, now)
 	if err != nil {

@@ -1,6 +1,8 @@
 package integration_test
 
 import (
+	"bytes"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,11 @@ func TestDemo02OfflineEmptyStateSmoke(t *testing.T) {
 		cmd.Env = append(os.Environ(),
 			"DEMO_02_OFFLINE=1",
 			"DEMO_02_STATE_DIR="+stateDir,
+			// 离线验收使用显式 TEST-ONLY 固定密钥，不能依赖开发机未提交的
+			// demo/.env；三个值不同以保持角色绑定约束。
+			"BUYER_PRIVATE_KEY_HEX="+hex.EncodeToString(bytes.Repeat([]byte{0x11}, 32)),
+			"SELLER_PRIVATE_KEY_HEX="+hex.EncodeToString(bytes.Repeat([]byte{0x22}, 32)),
+			"ARBITER_PRIVATE_KEY_HEX="+hex.EncodeToString(bytes.Repeat([]byte{0x33}, 32)),
 		)
 		if s.inFile != "" {
 			in, err := os.Open(joinPath(tmp, s.inFile))

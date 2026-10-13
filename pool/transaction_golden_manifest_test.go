@@ -13,6 +13,7 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
+	"github.com/bsv8/go-bitfs/internal/conformance"
 	"github.com/bsv8/go-bitfs/protocol"
 )
 
@@ -238,7 +239,10 @@ func buildTransactionManifest(t *testing.T) *transactionGoldenManifest {
 
 func TestTransactionGoldenManifestMatchesFrozenFile(t *testing.T) {
 	manifest := buildTransactionManifest(t)
-	path := filepath.Join("testdata", "v1", "transactions.json")
+	path, err := conformance.FixturePath(".", "transaction_manifest")
+	if err != nil {
+		t.Fatalf("resolve transaction_manifest from fixtures/manifest.json: %v", err)
+	}
 	if *transactionManifestUpdate {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

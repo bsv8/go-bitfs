@@ -36,34 +36,33 @@ func main() {
 	}
 	latest := f.LatestPayment
 	debug("[state] latest non-final payment has been merged and saved by the caller")
-	debug("[buyer] buyer.PrepareClose creates final unsigned transaction and buyer signature from explicit state")
-	closePrep, err := f.Buyer.PrepareClose(ctx, f.Facts(now), buyer.PrepareCloseCommand{
+	debug("[buyer] buyer.PrepareCloseArtifact creates and signs Kind 12 from explicit state")
+	kind12, err := buyer.PrepareCloseArtifact(ctx, f.Facts(now), buyer.PrepareCloseInput{
 		Pool:                       f.BuyerPool,
-		Base:                       latest,
 		TargetSellerAmountSatoshis: protocol.Satoshis(latest.SellerAmountSatoshis),
-	})
+	}, f.BuyerSigner)
 	if err != nil {
-		fail(fmt.Errorf("buyer.PrepareClose: %w", err))
+		fail(fmt.Errorf("buyer.PrepareCloseArtifact: %w", err))
 	}
-	debug("[close] unsigned transaction bytes: %d", len(closePrep.Unsigned.RawTx))
-	debug("[close] buyer signature produced (detached; persisted before sending)")
-	debug("[seller] seller.CompleteClose adds seller signature without broadcasting")
-	closed, err := f.Seller.CompleteClose(ctx, f.Facts(now), seller.CloseCommand{
-		Pool:           f.SellerPool,
-		Unsigned:       closePrep.Unsigned,
-		BuyerSignature: closePrep.BuyerSignature,
-	})
+	kind12Raw := kind12.Bytes() // 应用先持久化 exact Kind 12 再发送
+	debug("[close] exact Kind 12 bytes: %d", len(kind12Raw))
+	debug("[seller] seller.CompleteCloseArtifact verifies Kind 12 and returns Kind 13 without broadcasting")
+	kind13, err := seller.CompleteCloseArtifact(ctx, f.Facts(now), seller.CompleteCloseArtifactInput{
+		Pool:       f.SellerPool,
+		RequestRaw: kind12Raw,
+	}, f.SellerSigner)
 	if err != nil {
-		fail(fmt.Errorf("seller.CompleteClose: %w", err))
+		fail(fmt.Errorf("seller.CompleteCloseArtifact: %w", err))
 	}
-	debug("[close] seller signature produced and merged")
-	debug("[buyer] buyer.VerifyCompletedClose verifies the fully signed final transaction; the caller broadcasts it")
-	verifiedClose, err := f.Buyer.VerifyCompletedClose(buyer.VerifyCloseCommand{
-		Pool:  f.BuyerPool,
-		Close: &pool.SignedPayment{State: *closed.State(), RawTx: closed.RawTx()},
+	kind13Raw := kind13.Bytes() // 应用先持久化 exact Kind 13，再交给买方验收
+	debug("[close] seller response contains the complete transaction: %d bytes", len(kind13Raw))
+	debug("[buyer] buyer.VerifyCompletedCloseArtifact verifies Kind 13; the caller broadcasts the transaction")
+	verifiedClose, err := buyer.VerifyCompletedCloseArtifact(buyer.VerifyCompletedCloseArtifactInput{
+		Pool:        f.BuyerPool,
+		ResponseRaw: kind13Raw,
 	})
 	if err != nil {
-		fail(fmt.Errorf("buyer.VerifyCompletedClose: %w", err))
+		fail(fmt.Errorf("buyer.VerifyCompletedCloseArtifact: %w", err))
 	}
 	finalTransaction := verifiedClose.RawTx()
 	txID := hex.EncodeToString(finalTransactionTxID(finalTransaction))

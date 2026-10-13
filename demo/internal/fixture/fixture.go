@@ -1,11 +1,12 @@
 // Package fixture 提供结构稳定的内存 demo fixture。
 //
 // 它作为“调用方应用”显式持有并传递全部本地状态：exact wire 字节（先保存后
-// 发送）、买卖双侧 checkpoint、最新付款状态和内容字节都保存在 Fixture 自身
-// 字段里，每一步都显式传给角色 API。它不创建任何 Store 或节点 backend，也不
-// 代表 BSV 节点；广播与持久化在真实应用中由调用方实现。
+// 发送）、买卖双侧普通证据包、最新付款状态和内容字节都保存在 Fixture 自身
+// 字段里，每一步都显式传给角色纯函数 API。它不创建任何 Store 或节点 backend，
+// 也不代表 BSV 节点；广播与持久化在真实应用中由调用方实现。
 //
 // 时间与高度全部来自显式 Facts{Now, BlockHeight}；SDK 不读取系统时钟。
+// 角色 Signer 只提供给单次调用，SDK 不持有任何跨步骤对象。
 package fixture
 
 import (
@@ -22,7 +23,6 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 	tx "github.com/bsv-blockchain/go-sdk/transaction"
 	masterseed "github.com/bsv8/MasterSeed"
-	"github.com/bsv8/go-bitfs/arbiter"
 	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/content"
 	"github.com/bsv8/go-bitfs/pool"
@@ -36,42 +36,42 @@ import (
 const blockHeight protocol.BlockHeight = 900000
 
 // Fixture 显式保存从报价到开池完成所需的全部对象和中间结果。
-// 它扮演调用方应用的本地状态存储：后续 003–008 演示把这些字段逐个显式传回
-// 角色 workflow，而不是依赖任何 SDK 内部加载行为。
+// 它扮演调用方应用的本地状态存储：后续 003–008 演示把这些字段逐个显式
+// 传回角色纯函数 API，而不是依赖任何 SDK 内部加载行为。
 type Fixture struct {
-	Buyer      *buyer.Workflow   // 买方角色 API（001–006、008）
-	Seller     *seller.Workflow  // 卖方角色 API（001–007）
-	Arbiter    *arbiter.Workflow // 仲裁方角色 API（007 托管签署、008 取回应答）
-	BuyerKey   *ec.PrivateKey    // 买方私钥（仅用于派生公钥与本地资金交易签名）
-	SellerKey  *ec.PrivateKey    // 卖方私钥
-	ArbiterKey *ec.PrivateKey    // 仲裁方私钥
+	BuyerSigner   protocol.Signer // 买方受约束 Signer（单次调用专用）
+	SellerSigner  protocol.Signer // 卖方受约束 Signer
+	ArbiterSigner protocol.Signer // 仲裁方受约束 Signer
+	BuyerKey      *ec.PrivateKey  // 买方私钥（仅用于派生公钥与本地资金交易签名）
+	SellerKey     *ec.PrivateKey  // 卖方私钥
+	ArbiterKey    *ec.PrivateKey  // 仲裁方私钥
 
 	// ---- 001 报价 ----
 	QuoteRaw      []byte                   // exact Kind 1 bytes（应用先持久化再发送）
 	VerifiedQuote *content.VerifiedQuote   // 买方验收快照（不可变 verified value）
-	SignedQuote   *content.SignedFileQuote // 卖方持有的 exact 已签报价（DeliverContent 输入）
+	SignedQuote   *content.SignedFileQuote // 卖方持有的 exact 已签报价（展示层解码）
 	Seed          []byte                   // MasterSeed 原文（可交付内容之一）
 	SeedHash      []byte                   // SHA-256(MasterSeed)，纯 seed 批次的内容哈希
 	FileBytes     []byte                   // 源文件字节（块划分与哈希来源）
 
-	// ---- 002 开池（双侧各自保存）----
-	FundingTransactionRaw []byte                    // 买方私密资金交易原文（0204 前不进入报文）
-	ExpiryLockTime        protocol.RefundLockTime   // 退款交易到期锁定时间（低于阈值按区块高解释）
-	BuyerOpeningProofCBOR []byte                    // canonical opening proof 编码（买方恢复池 checkpoint 用）
-	BuyerOpening          *buyer.OpeningCheckpoint  // 买方开池 checkpoint（Kind2 + 私有资金交易）
-	BuyerPool             *buyer.PoolCheckpoint     // 买方当前池 checkpoint（opening + 最新付款状态）
-	SellerOpening         *seller.OpeningCheckpoint // 卖方预签 checkpoint
-	SellerPool            *seller.PoolCheckpoint    // 卖方当前池 checkpoint
+	// ---- 002 开池（双侧各自保存普通证据包）----
+	FundingTransactionRaw []byte                       // 买方私密资金交易原文（0204 前不进入报文）
+	ExpiryLockTime        protocol.RefundLockTime      // 退款交易到期锁定时间（低于阈值按区块高解释）
+	BuyerOpeningProofCBOR []byte                       // canonical opening proof 编码（展示/持久化格式）
+	BuyerOpening          buyer.BuyerOpeningEvidence   // 买方开池证据（Kind2 + 私有资金交易）
+	BuyerPool             buyer.BuyerPoolEvidence      // 买方当前池证据（opening + 最新付款状态）
+	SellerOpening         seller.SellerOpeningEvidence // 卖方预签证据（Kind2 + Kind3）
+	SellerPool            seller.SellerPoolEvidence    // 卖方当前池证据
 
-	// LatestPayment 是双方共享的“节点已确认”最新付款状态；demo 中由卖方
-	// CompletePayment 的合并结果直接同步给双方使用。
+	// LatestPayment 是双方共享的“节点已确认”最新付款状态视图；demo 中由
+	// 卖方 CompletePayment 的合并结果重建，仅供展示与计算目标金额。
 	LatestPayment *pool.PaymentState
 
 	// authorizations 是应用侧付款授权索引：
 	// PaymentAuthorizationID = SHA-256(exact payment_authorization_cbor) ->
-	// exact 已签 Kind 5 授权 checkpoint。真实应用应使用数据库唯一索引并
-	// 持久化该映射；哈希是内容寻址键，不可解码出池 ID 或金额。
-	authorizations map[protocol.PaymentAuthorizationID]*buyer.AuthorizationCheckpoint
+	// exact 已签 Kind 5 授权证据包。真实应用应使用数据库唯一索引并持久化
+	// 该映射；哈希是内容寻址键，不可解码出池 ID 或金额。
+	authorizations map[protocol.PaymentAuthorizationID]buyer.BuyerAuthorizationEvidence
 }
 
 // Facts 以给定时刻为唯一时间事实组装一份显式事实集（高度为 demo 固定值）。
@@ -81,10 +81,10 @@ func (f *Fixture) Facts(at time.Time) protocol.Facts {
 
 // New 创建一套已经完成 002 开池的显式状态。
 //
-// 初始化顺序与真实业务流程一致：读取文件并生成 seed，加载三方密钥并经
-// protocol.NewPrivateKeySigner 构造角色 workflow，卖方创建报价并持久化 exact
-// 字节，买方从字节验收，然后依次执行退款预签、买方验收、资金交付和卖方验收。
-// 每一步都是“load → 角色 API → persist（变量赋值）→ send”。
+// 初始化顺序与真实业务流程一致：读取文件并生成 seed，加载三方密钥并构造
+// 受约束 Signer，卖方 CreateQuote 并持久化 exact 字节，买方从字节验收，然后
+// 依次执行买家 PrepareOpening、卖家 PreparePresign、买家 CompleteOpening、
+// 资金交付和卖方验收。每一步都是“load → 角色 API → persist（变量赋值）→ send”。
 func New(ctx context.Context) (*Fixture, error) {
 	// 文件内容同时决定报价中的 SeedHash、传输的 seed，以及卖方可交付的
 	// 完整 Block；读取失败意味着整个 fixture 无法建立。
@@ -110,59 +110,42 @@ func New(ctx context.Context) (*Fixture, error) {
 	if err != nil {
 		return nil, err
 	}
-	buyerWorkflow, err := buyer.NewWorkflow(signers.buyer)
-	if err != nil {
-		return nil, fmt.Errorf("create buyer workflow: %w", err)
-	}
-	sellerWorkflow, err := seller.NewWorkflow(signers.seller)
-	if err != nil {
-		return nil, fmt.Errorf("create seller workflow: %w", err)
-	}
-	arbiterWorkflowInst, err := arbiter.NewWorkflow(signers.arbiter)
-	if err != nil {
-		return nil, fmt.Errorf("create arbiter workflow: %w", err)
-	}
 
 	now := time.Now().UTC()
 	facts := protocol.Facts{Now: now, BlockHeight: blockHeight}
 
-	buyerPubKey, err := protocol.PublicKeyFromBytes(buyerKey.PubKey().Compressed())
-	if err != nil {
-		return nil, fmt.Errorf("parse buyer public key: %w", err)
-	}
-	sellerPubKey, err := protocol.PublicKeyFromBytes(sellerKey.PubKey().Compressed())
-	if err != nil {
-		return nil, fmt.Errorf("parse seller public key: %w", err)
-	}
+	buyerPubKey := mustTypedKey(buyerKey.PubKey().Compressed())
+	sellerPubKey := mustTypedKey(sellerKey.PubKey().Compressed())
+	arbiterPubKey := mustTypedKey(arbiterKey.PubKey().Compressed())
 
 	f := &Fixture{
-		Buyer:          buyerWorkflow,
-		Seller:         sellerWorkflow,
-		Arbiter:        arbiterWorkflowInst,
+		BuyerSigner:    signers.buyer,
+		SellerSigner:   signers.seller,
+		ArbiterSigner:  signers.arbiter,
 		BuyerKey:       buyerKey,
 		SellerKey:      sellerKey,
 		ArbiterKey:     arbiterKey,
 		Seed:           seed,
 		SeedHash:       seedHash,
 		FileBytes:      fileBytes,
-		authorizations: make(map[protocol.PaymentAuthorizationID]*buyer.AuthorizationCheckpoint),
+		authorizations: make(map[protocol.PaymentAuthorizationID]buyer.BuyerAuthorizationEvidence),
 	}
 
 	// ---- 001：卖方创建报价 → 应用持久化 exact bytes → 买方验收。----
-	quoteResult, err := sellerWorkflow.CreateQuote(ctx, facts, seller.QuoteDraft{
+	quoteArtifact, _, err := seller.CreateQuote(ctx, facts, signers.seller, seller.QuoteDraft{
 		SeedHash:                   seedHash,
 		BuyerPublicKey:             buyerPubKey,
 		SeedPriceSatoshis:          100,
 		FullBlockPriceSatoshis:     1000,
 		FileSizeBytes:              uint64(len(fileBytes)),
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(now.Add(time.Hour).Unix()),
-		SupportedArbiterPublicKeys: []protocol.PublicKey{mustTypedKey(arbiterKey.PubKey().Compressed())},
+		SupportedArbiterPublicKeys: []protocol.PublicKey{arbiterPubKey},
 		RecommendedFilename:        filepath.Base(filePath),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create fixture quote: %w", err)
 	}
-	f.QuoteRaw = quoteResult.Outbound.Bytes() // persist-before-send：先保存 exact Artifact 字节
+	f.QuoteRaw = quoteArtifact.Bytes() // persist-before-send：先保存 exact Artifact 字节
 	sellerQuoteArtifact, err := wire.ParseAs(wire.FileQuote, f.QuoteRaw)
 	if err != nil {
 		return nil, fmt.Errorf("parse persisted quote artifact: %w", err)
@@ -171,9 +154,13 @@ func New(ctx context.Context) (*Fixture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode fixture quote for seller side: %w", err)
 	}
-	f.VerifiedQuote, err = buyerWorkflow.AcceptQuote(facts, f.QuoteRaw)
+	f.VerifiedQuote, err = buyer.AcceptQuote(facts, f.QuoteRaw)
 	if err != nil {
 		return nil, fmt.Errorf("accept fixture quote: %w", err)
+	}
+	// 纯验收入口不绑定买方身份；调用方必须自行比较报价中的买方公钥。
+	if !bytes.Equal(f.VerifiedQuote.BuyerPublicKey(), buyerPubKey[:]) {
+		return nil, fmt.Errorf("fixture quote is addressed to another buyer")
 	}
 
 	// ---- 002：两阶段开池，全部中间值由 fixture 显式持有。----
@@ -184,46 +171,49 @@ func New(ctx context.Context) (*Fixture, error) {
 	f.FundingTransactionRaw = funding
 	f.ExpiryLockTime = protocol.RefundLockTime(now.Add(time.Hour).Unix())
 
-	prepared, err := buyerWorkflow.PreparePoolOpening(ctx, buyer.PrepareOpeningCommand{
-		Quote:                           f.VerifiedQuote,
+	openingOutbound, openingEvidence, err := buyer.PrepareOpening(ctx, buyer.PrepareOpeningInput{
+		QuoteRaw:                        f.QuoteRaw,
 		FundingTransactionRaw:           funding,
 		ExpiryLockTime:                  f.ExpiryLockTime,
 		MinerFeeRateSatoshisPerKilobyte: protocol.SatoshisPerKilobyte(1),
 		SellerPublicKey:                 sellerPubKey,
-		ArbiterPublicKey:                mustPublicKey(arbiterKey.PubKey().Compressed()),
-	})
+		ArbiterPublicKey:                arbiterPubKey,
+	}, signers.buyer)
 	if err != nil {
 		return nil, fmt.Errorf("prepare fixture opening: %w", err)
 	}
-	f.BuyerOpening = prepared.Checkpoint // 应用先持久化 checkpoint 再发送 Kind 2
+	f.BuyerOpening = openingEvidence // 应用先持久化证据再发送 Kind 2
 
-	presignResult, err := sellerWorkflow.PreparePoolOpening(ctx, prepared.Outbound.Bytes())
+	presignOutbound, sellerOpeningEvidence, err := seller.PreparePresign(ctx, openingOutbound.Bytes(), signers.seller)
 	if err != nil {
 		return nil, fmt.Errorf("presign fixture opening: %w", err)
 	}
-	f.SellerOpening = presignResult.Checkpoint // 应用先持久化预签证据再发送 Kind 3
+	f.SellerOpening = sellerOpeningEvidence // 应用先持久化预签证据再发送 Kind 3
 
-	completed, err := buyerWorkflow.CompletePoolOpening(f.BuyerOpening, presignResult.Outbound.Bytes())
+	completedOpening, buyerPool, err := buyer.CompleteOpening(openingEvidence, presignOutbound.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("accept fixture refund presign: %w", err)
 	}
-	f.BuyerPool = completed.InitialPool
-	openingProofCBOR, err := pool.EncodeOpeningProof(f.BuyerPool.Opening())
+	f.BuyerOpening = completedOpening
+	f.BuyerPool = buyerPool
+	openingProofCBOR, err := pool.EncodeOpeningProof(buyerPool.Opening)
 	if err != nil {
 		return nil, fmt.Errorf("encode canonical opening proof: %w", err)
 	}
 	f.BuyerOpeningProofCBOR = openingProofCBOR
 
-	deliveryArtifact, err := buyerWorkflow.PrepareFundingDelivery(f.BuyerPool)
+	deliveryArtifact, err := buyer.PrepareFundingDelivery(f.BuyerPool)
 	if err != nil {
 		return nil, fmt.Errorf("build funding delivery: %w", err)
 	}
-	fundingVerification, err := sellerWorkflow.VerifyFundingDelivery(f.SellerOpening, deliveryArtifact.Bytes())
-	if err != nil {
+	if _, sellerPool, err := seller.VerifyFunding(deliveryArtifact.Bytes(), f.SellerOpening); err != nil {
 		return nil, fmt.Errorf("accept fixture funding: %w", err)
+	} else {
+		f.SellerPool = sellerPool
 	}
-	f.SellerPool = fundingVerification.InitialPool
-	f.LatestPayment = fundingVerification.InitialPool.Payment()
+	if err := f.syncLatestPayment(f.BuyerPool.Opening, f.BuyerPool.LatestPaymentRawTx); err != nil {
+		return nil, fmt.Errorf("derive fixture initial pool state: %w", err)
+	}
 	return f, nil
 }
 
@@ -249,16 +239,6 @@ func newSigners(buyerKey, sellerKey, arbiterKey *ec.PrivateKey) (*signerSet, err
 		return nil, fmt.Errorf("create arbiter signer: %w", err)
 	}
 	return &signerSet{buyer: buyerSigner, seller: sellerSigner, arbiter: arbiterSigner}, nil
-}
-
-// mustPublicKey 把压缩公钥字节解析成协议 PublicKey 类型；demo 的密钥来自本
-// 地配置，解析失败直接 panic 以暴露配置错误。
-func mustPublicKey(compressed []byte) protocol.PublicKey {
-	publicKey, err := protocol.PublicKeyFromBytes(compressed)
-	if err != nil {
-		panic(fmt.Sprintf("fixture: parse compressed public key: %v", err))
-	}
-	return publicKey
 }
 
 // BlockCount 返回报价文件按协议块长划分的块数（含尾块）。
@@ -299,64 +279,76 @@ func (f *Fixture) BlockHashes(count int) ([][]byte, error) {
 // PurchaseRound 是一轮完整 003→004→005 的双侧产物：三个 exact wire Artifact
 // 字节都遵循 persist-before-send（先赋值保存再交给对端角色 API）。
 type PurchaseRound struct {
-	Request    *buyer.RequestContentResult     // 003 结果（含 AuthorizationCheckpoint）
-	Kind5Raw   []byte                          // exact Kind 5 bytes（先保存后发送）
-	Delivery   *seller.DeliveryCheckpoint      // 卖方交付 checkpoint（验收 005 时回传）
-	Kind6Raw   []byte                          // exact Kind 6 bytes
-	Payment    *buyer.PaymentPreparationResult // 005 买方最小凭证构造结果
-	Kind7Raw   []byte                          // exact Kind 7 bytes
-	PaymentID  protocol.PaymentAuthorizationID // 本批次授权 ID（路由键）
-	AcceptedTx *pool.VerifiedSignedTransaction // 卖方合并后的完整付款交易
+	Authorization      buyer.BuyerAuthorizationEvidence // 003 证据（exact Kind 1 + Kind 5）
+	AuthorizationTerms *content.PaymentAuthorization    // 003 授权条款快照（展示用）
+	Kind5Raw           []byte                           // exact Kind 5 bytes（先保存后发送）
+	Delivery           seller.SellerDeliveryEvidence    // 卖方交付证据（Kind1 + Kind5 + Kind6）
+	Kind6Raw           []byte                           // exact Kind 6 bytes
+	Payloads           [][]byte                         // 005 验收返回的已验证 payload 批次
+	Kind7Raw           []byte                           // exact Kind 7 bytes
+	PaymentID          protocol.PaymentAuthorizationID  // 本批次授权 ID（路由键）
+	AcceptedTx         *pool.VerifiedSignedTransaction  // 卖方合并后的完整付款交易
 }
 
 // RequestSeed 只执行 003：买方从当前池状态请求 seed 内容。返回值由调用方
-// 决定何时发送；fixture 同时把授权 checkpoint 存入付款授权索引。
+// 决定何时发送；fixture 同时把授权证据包存入付款授权索引。
 func (f *Fixture) RequestSeed(ctx context.Context, at time.Time) (*PurchaseRound, error) {
-	request, err := f.Buyer.RequestContent(ctx, f.Facts(at), buyer.RequestContentCommand{
-		Quote:            f.VerifiedQuote,
+	outbound, authorization, err := buyer.PrepareContentRequest(ctx, f.Facts(at), buyer.RequestContentInput{
+		QuoteRaw:         f.QuoteRaw,
 		Pool:             f.BuyerPool,
 		ContentHashes:    [][]byte{append([]byte(nil), f.SeedHash...)},
 		DeliveryDeadline: content.UnixSeconds(at.Add(30 * time.Minute).Unix()),
-	})
+	}, f.BuyerSigner)
 	if err != nil {
-		return nil, fmt.Errorf("buyer.RequestContent: %w", err)
+		return nil, fmt.Errorf("buyer.PrepareContentRequest: %w", err)
 	}
-	round := &PurchaseRound{Request: request, PaymentID: request.AuthorizationID}
-	round.Kind5Raw = request.Outbound.Bytes() // 应用先持久化 exact Kind 5 与 checkpoint 再发送
-	f.authorizations[request.AuthorizationID] = request.Checkpoint
+	request, terms, err := decodeSignedRequest(authorization.RawKind5)
+	if err != nil {
+		return nil, err
+	}
+	paymentID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		return nil, err
+	}
+	round := &PurchaseRound{
+		Authorization:      authorization,
+		AuthorizationTerms: terms,
+		PaymentID:          paymentID,
+		Kind5Raw:           outbound.Bytes(), // 应用先持久化 exact Kind 5 与证据包再发送
+	}
+	f.authorizations[paymentID] = authorization
 	return round, nil
 }
 
 // DeliverRound 对已构造的 003 执行卖方交付（004）。调用方必须已保存
-// round.Kind5Raw 与 round.Request.Checkpoint。
+// round.Kind5Raw 与 round.Authorization。
 func (f *Fixture) DeliverRound(ctx context.Context, at time.Time, round *PurchaseRound, payloads [][]byte) error {
-	delivery, err := f.Seller.DeliverContent(ctx, f.Facts(at), seller.DeliveryCommand{
-		Quote:           f.SignedQuote,
+	outbound, delivery, err := seller.PrepareDelivery(ctx, f.Facts(at), seller.DeliveryInput{
+		QuoteRaw:        f.QuoteRaw,
 		Pool:            f.SellerPool,
 		RequestRaw:      round.Kind5Raw,
 		ContentPayloads: payloads,
-	})
+	}, f.SellerSigner)
 	if err != nil {
-		return fmt.Errorf("seller.DeliverContent: %w", err)
+		return fmt.Errorf("seller.PrepareDelivery: %w", err)
 	}
-	round.Delivery = delivery.Checkpoint // 应用先保存 payload 与 checkpoint 再发送 Kind 6
-	round.Kind6Raw = delivery.Outbound.Bytes()
+	round.Delivery = delivery // 应用先保存 payload 与证据包再发送 Kind 6
+	round.Kind6Raw = outbound.Bytes()
 	return nil
 }
 
 // PayRound 对已交付批次执行买方验收与最小 005 构造。纯 seed 批次无需 seed。
 func (f *Fixture) PayRound(ctx context.Context, at time.Time, round *PurchaseRound) error {
-	payment, err := f.Buyer.VerifyDeliveryAndPreparePayment(ctx, f.Facts(at), buyer.VerifyDeliveryCommand{
-		Quote:       f.VerifiedQuote,
-		Pool:        f.BuyerPool,
-		Request:     round.Request.Checkpoint,
-		DeliveryRaw: round.Kind6Raw,
-	})
+	payloads, outbound, err := buyer.VerifyDelivery(ctx, f.Facts(at), buyer.VerifyDeliveryInput{
+		Authorization: round.Authorization,
+		Pool:          f.BuyerPool,
+		DeliveryRaw:   round.Kind6Raw,
+	}, f.BuyerSigner)
 	if err != nil {
-		return fmt.Errorf("buyer.VerifyDeliveryAndPreparePayment: %w", err)
+		return fmt.Errorf("buyer.VerifyDelivery: %w", err)
 	}
-	round.Payment = payment
-	round.Kind7Raw = payment.Outbound.Bytes() // 先持久化 payloads 与 Result 再发送 Kind 7
+	round.Payloads = payloads
+	round.Kind7Raw = outbound.Bytes() // 先持久化 payloads 与结果再发送 Kind 7
 	return nil
 }
 
@@ -364,21 +356,25 @@ func (f *Fixture) PayRound(ctx context.Context, at time.Time, round *PurchaseRou
 // 成功后双方本地状态推进到同一确认 checkpoint。
 func (f *Fixture) CompleteRound(ctx context.Context, at time.Time, round *PurchaseRound) error {
 	authorization, ok := f.authorizations[round.PaymentID]
-	if !ok || authorization == nil {
+	if !ok || len(authorization.RawKind5) == 0 {
 		return fmt.Errorf("no signed content request indexed under authorization id %s", round.PaymentID.String())
 	}
-	completedPay, err := f.Seller.CompletePayment(ctx, f.Facts(at), seller.PaymentCommand{
+	raw, sellerPool, err := seller.CompletePayment(ctx, f.Facts(at), seller.CompletePaymentInput{
 		Pool:       f.SellerPool,
-		Request:    authorization.Request(),
+		Delivery:   round.Delivery,
+		RequestRaw: authorization.RawKind5,
 		UpdateRaw:  round.Kind7Raw,
-		Checkpoint: round.Delivery,
-	})
+	}, f.SellerSigner)
 	if err != nil {
 		return fmt.Errorf("seller.CompletePayment: %w", err)
 	}
-	round.AcceptedTx = completedPay.Transaction
-	f.advanceSellerPool(completedPay.NextPool)
-	return f.advanceBuyerPoolFromTx(completedPay.Transaction.RawTx())
+	verified, err := pool.VerifySignedTransaction(raw, f.SellerPool.Opening)
+	if err != nil {
+		return fmt.Errorf("pool.VerifySignedTransaction: %w", err)
+	}
+	round.AcceptedTx = verified
+	f.SellerPool = sellerPool
+	return f.advanceBuyerPoolFromTx(raw)
 }
 
 // RunSeedPurchase 是 03–07 各演示使用的便捷组合：一轮完整 seed 购买
@@ -401,35 +397,81 @@ func (f *Fixture) RunSeedPurchase(ctx context.Context, at time.Time) (*PurchaseR
 }
 
 // LookupPaymentAuthorization 演示应用的付款授权查找：用最小 005 携带的
-// PaymentAuthorizationID 取回精确的原始签名 003。哈希不可解码，找不到就
-// 必须拒绝或请求对端重发，不能扫描池或按连接猜池。
-func (f *Fixture) LookupPaymentAuthorization(paymentAuthorizationID protocol.PaymentAuthorizationID) (*content.SignedContentRequest, error) {
-	checkpoint, ok := f.authorizations[paymentAuthorizationID]
-	if !ok || checkpoint == nil || checkpoint.Request() == nil {
-		return nil, fmt.Errorf("no signed content request indexed under authorization id %s", paymentAuthorizationID.String())
+// PaymentAuthorizationID 取回精确的原始签名 003 证据包。哈希不可解码，找不到
+// 就必须拒绝或请求对端重发，不能扫描池或按连接猜池。
+func (f *Fixture) LookupPaymentAuthorization(paymentAuthorizationID protocol.PaymentAuthorizationID) (buyer.BuyerAuthorizationEvidence, error) {
+	authorization, ok := f.authorizations[paymentAuthorizationID]
+	if !ok || len(authorization.RawKind5) == 0 {
+		return buyer.BuyerAuthorizationEvidence{}, fmt.Errorf("no signed content request indexed under authorization id %s", paymentAuthorizationID.String())
 	}
-	return checkpoint.Request(), nil
+	return authorization, nil
 }
 
-// advanceSellerPool 把卖方侧 checkpoint 推进到合并后的新状态。
-func (f *Fixture) advanceSellerPool(next *seller.PoolCheckpoint) {
-	f.SellerPool = next
-	f.LatestPayment = next.Payment()
-}
-
-// advanceBuyerPoolFromTx 用 canonical opening proof + 完整付款 raw tx 恢复
-// 买方侧池 checkpoint（Restore 全量重验，不信任任何派生字段）。
+// advanceBuyerPoolFromTx 用 canonical opening 证据 + 完整付款 raw tx 推进
+// 买方侧池证据包（SDK 在下一步会全量重验，不信任任何派生字段）。
 func (f *Fixture) advanceBuyerPoolFromTx(paymentRawTx []byte) error {
-	next, err := buyer.RestorePoolCheckpoint(f.BuyerOpeningProofCBOR, paymentRawTx)
-	if err != nil {
-		return fmt.Errorf("buyer.RestorePoolCheckpoint: %w", err)
+	evidence := buyer.BuyerPoolEvidence{
+		Opening:            pool.CloneOpeningProof(f.BuyerPool.Opening),
+		LatestPaymentRawTx: bytes.Clone(paymentRawTx),
 	}
-	f.BuyerPool = next
+	if err := f.syncLatestPayment(evidence.Opening, evidence.LatestPaymentRawTx); err != nil {
+		return err
+	}
+	f.BuyerPool = evidence
 	return nil
 }
 
+// syncLatestPayment 从池证据包重建应用侧最新付款状态视图：LatestPaymentRawTx
+// 为空时按初始退款状态重建；重建结果经 pool.VerifyPaymentState 全量复核。
+func (f *Fixture) syncLatestPayment(opening *pool.OpeningProof, latestPaymentRawTx []byte) error {
+	if opening == nil {
+		return fmt.Errorf("fixture pool opening evidence is required")
+	}
+	engine, err := pool.NewMultisigPoolEngine(pool.MultisigPoolEngineConfig{
+		BuyerPublicKey:   opening.BuyerPublicKey,
+		SellerPublicKey:  opening.SellerPublicKey,
+		ArbiterPublicKey: opening.ArbiterPublicKey,
+	})
+	if err != nil {
+		return err
+	}
+	raw := latestPaymentRawTx
+	if len(raw) == 0 {
+		raw, err = engine.BuildRefundSubmission(opening)
+		if err != nil {
+			return err
+		}
+	}
+	state, err := engine.ParsePaymentState(raw, opening)
+	if err != nil {
+		return err
+	}
+	if _, err := pool.VerifyPaymentState(state, opening); err != nil {
+		return err
+	}
+	f.LatestPayment = state
+	return nil
+}
+
+// decodeSignedRequest 严格解析 exact Kind 5，返回已签请求与授权条款快照。
+func decodeSignedRequest(rawKind5 []byte) (*content.SignedContentRequest, *content.PaymentAuthorization, error) {
+	artifact, err := wire.ParseAs(wire.ContentRequest, rawKind5)
+	if err != nil {
+		return nil, nil, err
+	}
+	request, err := wire.DecodeContentRequest(artifact)
+	if err != nil {
+		return nil, nil, err
+	}
+	terms, err := content.DecodePaymentAuthorization(request.PaymentAuthorizationCBOR)
+	if err != nil {
+		return nil, nil, err
+	}
+	return request, terms, nil
+}
+
 // buildFundingTx 创建供内存 fixture 使用的最小资金交易。它使用零哈希作为
-// 输入占位符，不代表真实可花费 UTXO；真实 JungleBus 资金交易由
+// 输入占位符，不代表真实可花费 UTXO；真实资金交易由
 // demo/internal/poolopening 负责构造。
 func buildFundingTx(buyerPub, sellerPub, arbiterPub []byte) ([]byte, error) {
 	lock, err := pool.Build2of3LockingScript(pool.MultisigPoolPublicKeys{

@@ -2,10 +2,10 @@
 //
 // 0202 的 Kind 3 响应显式携带费用池统一关联 ID RefundTemplateTxID。本命令从
 // stdin 读取响应，展示层解码出该关联 ID，按它从买方自己的 checkpoint 加载
-// 0201 保存的 OpeningCheckpoint（exact Kind 2 bytes + 私有资金交易原文，经
-// buyer.RestoreOpeningCheckpoint 全量重验恢复），显式传给角色 API；
-// buyer.CompletePoolOpening 重新派生 hash、拒绝一切错配并验证卖方签名。
-// 跨进程、无 session、无需原请求文件，全部由调用方状态承载。
+// 0201 保存的普通开池证据包（exact Kind 2 bytes + 私有资金交易原文，恢复时
+// 全量重验），显式传给纯函数 API；buyer.CompleteOpening 重新派生 hash、拒绝
+// 一切错配并验证卖方签名。跨进程、无 session、无需原请求文件，全部由调用方
+// 状态承载。
 package main
 
 import (
@@ -14,14 +14,15 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bsv8/go-bitfs/buyer"
 	"github.com/bsv8/go-bitfs/demo/internal/demoenv"
 	"github.com/bsv8/go-bitfs/demo/internal/poolopening"
 	"github.com/bsv8/go-bitfs/wire"
 )
 
 func main() {
-	// 加载与 0201 相同的买方配置。workflow 只持有受约束 Signer；本地状态来自
-	// demo checkpoint，而不是 SDK 内部存储。
+	// 加载与 0201 相同的买方配置。BuyerSigner 只在下一次 API 调用时临时传入；
+	// 本地状态来自 demo checkpoint，而不是 SDK 内部存储。
 	if err := demoenv.Load(); err != nil {
 		fail(err)
 	}
@@ -59,22 +60,25 @@ func main() {
 	debug("[buyer] refund tx hash: %s", hex.EncodeToString(refundTemplateTxID[:]))
 	debug("[buyer] 从应用 checkpoint 找回 0201 的 request/资金交易原文并检验卖方退款签名")
 	checkpointPath := poolopening.BuyerOpeningCheckpointPath()
-	openingCheckpoint, err := poolopening.LoadBuyerOpeningCheckpoint(checkpointPath, refundTemplateTxID)
+	openingEvidence, err := poolopening.LoadBuyerOpeningCheckpoint(checkpointPath, refundTemplateTxID)
 	if err != nil {
 		fail(fmt.Errorf("load buyer opening checkpoint (caller state): %w", err))
 	}
-	// CompletePoolOpening 用显式传入的本地状态重新派生 hash 并拒绝一切错配，
-	// 针对原请求验证卖方签名，然后返回完整 verified opening 和初始池
-	// checkpoint。SDK 不保存任何结果；保存仍是调用方的责任。
-	completed, err := session.Buyer.CompletePoolOpening(openingCheckpoint, responseRaw)
+	// CompleteOpening 用显式传入的本地证据包重新派生 hash 并拒绝一切错配，
+	// 针对原请求验证卖方签名，然后返回补全后的开池证据包与初始池证据包。
+	// SDK 不保存任何结果；保存仍是调用方的责任。
+	_, poolEvidence, err := buyer.CompleteOpening(openingEvidence, responseRaw)
 	if err != nil {
-		fail(fmt.Errorf("buyer.CompletePoolOpening: %w", err))
+		fail(fmt.Errorf("buyer.CompleteOpening: %w", err))
 	}
 	poolPath := poolopening.BuyerPoolCheckpointPath()
-	if err := poolopening.SaveBuyerPoolCheckpoint(poolPath, completed.InitialPool); err != nil {
+	if err := poolopening.SaveBuyerPoolCheckpoint(poolPath, poolEvidence); err != nil {
 		fail(fmt.Errorf("save buyer pool checkpoint (caller responsibility): %w", err))
 	}
-	initial := completed.InitialPool.Payment()
+	initial, err := poolopening.DerivePaymentState(poolEvidence.Opening, poolEvidence.LatestPaymentRawTx)
+	if err != nil {
+		fail(fmt.Errorf("derive initial pool state: %w", err))
+	}
 	debug("[buyer] seller refund signature: valid")
 	debug("[buyer] 初始池证据已保存到应用 checkpoint %s", poolPath)
 	debug("[buyer] initial payment sequence: %d", initial.PaymentSequence)

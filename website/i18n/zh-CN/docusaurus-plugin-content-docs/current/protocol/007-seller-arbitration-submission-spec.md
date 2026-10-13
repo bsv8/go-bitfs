@@ -64,9 +64,9 @@ Arbiter = ArbiterAmountSatoshis (> 0)
 
 ```text
 应用按自己的收费策略计算 arbiter_amount_sat
-arbiter.PrepareArbitration(ctx, facts, rawKind8, arbiterAmountSat)
+arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
   -> 应用原子持久化精确 Kind 8、Claim ID、费用与 payload bundle
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared)
+  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
   -> 持久化/发送精确 Kind 9
 ```
 

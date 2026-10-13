@@ -1,0 +1,12 @@
+{
+  "format": "bitfs-libp2p-transport",
+  "version": 1,
+  "field_comments_zh": {
+    "protocol_id": "libp2p stream 协议标识，Go 与 TypeScript 必须完全相同",
+    "framing": "消息边界编码；长度是 payload 原始字节数",
+    "max_wire_frame_bytes": "本地允许接收的最大单条完整 BitFS wire 报文字节数"
+  },
+  "protocol_id": "/bitfs/wire/1.0.0",
+  "framing": "unsigned-varint-byte-length-prefix",
+  "max_wire_frame_bytes": 16843609
+}

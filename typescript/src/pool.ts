@@ -194,7 +194,7 @@ export class MultisigPoolEngine {
     if (!this.#isParticipant(publicKey)) throw new WireError('unauthorized', 0, 'signer_public_key', 'Signer 不是本费用池参与方')
     const digest = forkIDAllDigest(unsignedRaw, 0, BigInt(poolOutputSatoshis), this.#lockingScript)
     let der: Uint8Array
-    try { der = new Uint8Array(await signer.sign({ purpose: 'transaction', wireKind: 0, digest: copy(digest) }, signal)) } catch { throw new WireError('signer_unavailable', 0, 'signature', 'Signer 无法完成交易签名') }
+    try { der = new Uint8Array(await signer.sign({ purpose: 'transaction', wireKind: 0, digest: copy(digest), transactionRaw: copy(unsignedRaw) }, signal)) } catch { throw new WireError('signer_unavailable', 0, 'signature', 'Signer 无法完成交易签名') }
     verifyDigestSignature(publicKey, digest, der)
     const output = new Uint8Array(der.byteLength + 1); output.set(der); output[der.byteLength] = SIGHASH_FORKID_ALL
     return output
@@ -401,7 +401,7 @@ export class MultisigPoolEngine {
     return equal(fromHex(parsed.toHex()), unsignedRaw)
   }
 
-  /** 从上一已接受状态构造下一笔未签名累计付款交易。 */
+  /** 从上一已接受状态构造累计付款；延续原 nLockTime，只有最终关闭解除锁定。 */
   async buildPaymentUpdate (opening: OpeningProof, previous: PaymentState, paymentSequence: number, sellerAmountAfterSatoshis: bigint): Promise<Uint8Array> {
     await this.verifyOpening(opening)
     const details = await this.deriveOpeningDetails(opening)

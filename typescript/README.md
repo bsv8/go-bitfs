@@ -32,7 +32,8 @@ SDK 不再提供 `BuyerWorkflow`/`SellerWorkflow`/`ArbiterWorkflow` 等跨步骤
   `inspectSellerDeliveryRequest`、`prepareSellerDelivery`、`completeSellerPayment`、`completeSellerClose`、
   `completeSellerCloseArtifact`、`prepareSellerArbitration`、`completeSellerArbitratedPayment`）、买方
   （`acceptBuyerQuote`、`prepareBuyerOpening`、`completeBuyerOpening`、
-  `prepareBuyerFundingDelivery`、`prepareBuyerContentRequest`、`verifyBuyerDelivery`、
+  `prepareBuyerFundingDelivery`、`inspectBuyerPool`、`inspectBuyerContentRequest`、
+  `prepareBuyerContentRequest`、`verifyBuyerDelivery`、
   `prepareBuyerClose` / `prepareBuyerCloseArtifact`、
   `verifyBuyerCompletedCloseArtifact`、
   `verifyBuyerCompletedClose`、`buildBuyerMaturedRefund`、
@@ -75,5 +76,17 @@ seed 或满足授权价格；读取后仍须把同一 Kind 5 和池证据连同 
   的 exact Kind 8 独立重建交易与 digest 后才签名，不存在接受任意 `receiptCBOR` 或
   调用方 candidate 的公开签名入口；candidate 由退款模板、付款授权和仲裁费在 SDK
   内部唯一重建；
-- 买方推进池状态的唯一方式是从链上取得完整付款交易原文并按 `latestPaymentRawTx`
-  传入下一步，由 SDK 全量重验；不存在跳过链上结果的入口。
+- 买方通过 `latestBuyerPayment: { rawKind5, rawKind7 }` 传入已签本地付款，或通过
+  `latestPaymentRawTx` 传入完整双签交易，两者不能同时提供。池内付款不要求逐笔上链。
+  `inspectBuyerPool` 重验签名、池绑定、交易构造后返回序号和累计金额；应用负责选择
+  最新状态、保证本地付款日志连续，并在发送报文之前持久化原文；
+- 开池退款状态的 `sequence` 为 2，付款按 3、4、5 递增，普通付款始终延续开池时
+  固定的 `lockTime`。高度锁由应用按当前真实链高度加等待区块数计算，再通过
+  `expiryLockTime` 传入 SDK；SDK 不推算链高度。最终关闭的 `sequence` 和 `lockTime`
+  均为 `0xffffffff`；
+- 关池目标金额不能低于所给基准中的已签付款。`verifyBuyerCompletedCloseArtifact`
+  可携带保存的 `requestRaw`（Kind 12），逐字节核对候选与买方签名，拒绝替换响应；
+- `SigningRequest` 的 `transactionRaw` / `documentCBOR` 为原文副本；卖方退款预签
+  另携带 `openingRequestRaw`，Kind 5 携带 `authorizationContext` 的资金交易、退款
+  模板与本次未签付款交易。钱包可独立核验固定摘要和额度，但不能改变 SDK 哈希规则。
+  SDK 仍用绑定公钥立即验证返回签名。

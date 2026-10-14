@@ -150,7 +150,11 @@ export async function prepareSellerPresign (rawKind2: Uint8Array, signer: Signer
   const engine = new MultisigPoolEngine({ buyerPublicKey: request.buyerPublicKey, sellerPublicKey: request.sellerPublicKey, arbiterPublicKey: request.arbiterPublicKey })
   const terms = await engine.deriveRefundTerms(request.refundTemplateRaw, request.minerFeeRateSatoshisPerKilobyte)
   engine.verifyRole('buyer', request.refundTemplateRaw, terms.poolOutputSatoshis, request.buyerRefundSignature)
-  const sellerRefundSignature = await engine.signRole(bound, 'seller', request.refundTemplateRaw, terms.poolOutputSatoshis)
+  const presigningSigner: Signer = {
+    publicKey: () => bound.publicKey(),
+    sign: (signingRequest, signal) => bound.sign({ ...signingRequest, openingRequestRaw: copyBytes(rawKind2) }, signal)
+  }
+  const sellerRefundSignature = await engine.signRole(presigningSigner, 'seller', request.refundTemplateRaw, terms.poolOutputSatoshis)
   const outbound = encodeRefundPresignResponse(terms.refundTemplateTxId, sellerRefundSignature)
   return { outbound, opening: { rawKind2: copyBytes(rawKind2), rawKind3: outbound.bytes() } }
 }
@@ -210,7 +214,7 @@ async function preflightSellerDelivery (facts: Readonly<PureFunctionFacts>, quot
   const { authorization, quoteTerms } = await verifyContentRequestEvidence(request, quote, opening)
   checkContentRequestTiming(authorization, quoteTerms, now)
   if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence + 1 !== authorization.paymentSequence) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号不是上一状态加一')
-  await verifyAcceptedPayment(previous, opening)
+  if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
   if (authorization.sellerAmountAfterSatoshis < previous.sellerAmountSatoshis) throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额不能倒退')
   await checkPaymentCapacity(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
   const contentHashes = decodeValidatedHashes(authorization.contentHashes)
@@ -242,6 +246,27 @@ export async function inspectSellerDeliveryRequest (facts: Readonly<PureFunction
     deliveryDeadlineUnixSeconds: preflight.authorization.deliveryDeadlineUnixSeconds,
     contentHashes: preflight.contentHashes.map(copyBytes)
   }
+}
+
+/** 买方预检自己的 Kind 5；支持已验证的本地 Kind 5/7 基准状态。 */
+export async function inspectBuyerContentRequest (facts: Readonly<PureFunctionFacts>, input: { quoteRaw: Uint8Array, pool: BuyerPoolEvidence, requestRaw: Uint8Array }): Promise<DeliveryRequestSummary> {
+  const checkpoint = await buyerPoolCheckpoint(input.pool)
+  const preflight = await preflightSellerDelivery(facts, decodeKind1Quote(input.quoteRaw), checkpoint, input.requestRaw)
+  return {
+    paymentAuthorizationID: copyBytes(preflight.authorizationID),
+    fileQuoteTermsID: copyBytes(preflight.authorization.fileQuoteTermsID),
+    refundTemplateTxID: copyBytes(preflight.refundTemplateTxID),
+    paymentSequence: preflight.authorization.paymentSequence,
+    sellerAmountAfterSatoshis: preflight.authorization.sellerAmountAfterSatoshis,
+    deliveryDeadlineUnixSeconds: preflight.authorization.deliveryDeadlineUnixSeconds,
+    contentHashes: preflight.contentHashes.map(copyBytes)
+  }
+}
+
+/** 验证所给状态后提取序号和累计金额；不证明状态最新或日志连续。 */
+export async function inspectBuyerPool (pool: BuyerPoolEvidence): Promise<{ paymentSequence: number, sellerAmountSatoshis: bigint }> {
+  const checkpoint = await buyerPoolCheckpoint(pool)
+  return { paymentSequence: checkpoint.payment.paymentSequence, sellerAmountSatoshis: checkpoint.payment.sellerAmountSatoshis }
 }
 
 /**
@@ -515,7 +540,7 @@ export async function prepareBuyerContentRequest (facts: Readonly<PureFunctionFa
   if (!equal(opening.buyerPublicKey, terms.buyerPublicKey) || !equal(opening.sellerPublicKey, signedQuote.sellerPublicKey)) throw new WireError('invalid_evidence', 5, 'participant_public_keys', '费用池参与方与报价不一致')
   if (!verifiedQuote.allowsArbiter(opening.arbiterPublicKey)) throw new WireError('invalid_evidence', 5, 'supported_arbiter_public_keys', '开池仲裁方不在报价白名单内')
   if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence >= FINAL_POOL_SEQUENCE - 1) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号陈旧')
-  await verifyAcceptedPayment(previous, opening)
+  if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
   const targetSequence = previous.paymentSequence + 1
   const hashes = input.contentHashes.map(copyBytes)
   const price = await contentHashesPriceSatoshis(terms, hashes, input.seed)
@@ -530,7 +555,18 @@ export async function prepareBuyerContentRequest (facts: Readonly<PureFunctionFa
     contentHashes: hashes,
     deliveryDeadlineUnixSeconds: input.deliveryDeadline
   }
-  const outbound = await createContentRequest(bound, authorization)
+  const unsigned = checkpoint.buyerLocal === true
+    ? await buildBuyerLocalState(opening, previous, targetSequence, sellerAmountAfter)
+    : await buildPaymentUpdate(opening, previous, targetSequence, sellerAmountAfter)
+  const authorizingSigner: Signer = {
+    publicKey: () => bound.publicKey(),
+    sign: (request, signal) => bound.sign({ ...request, authorizationContext: {
+      unsignedTransactionRaw: copyBytes(unsigned),
+      fundingTransactionRaw: copyBytes(opening.fundingTransactionRaw),
+      refundTemplateRaw: copyBytes(opening.refundTemplateRaw)
+    } }, signal)
+  }
+  const outbound = await createContentRequest(authorizingSigner, authorization)
   return { outbound, authorization: { rawKind1: copyBytes(input.quoteRaw), rawKind5: outbound.bytes() } }
 }
 
@@ -561,11 +597,13 @@ export async function verifyBuyerDelivery (facts: Readonly<PureFunctionFacts>, i
   const payloads = decodeContentPayloads(delivery.contentPayloadsCBOR)
   const effectiveSeed = await verifyContentPayloads(quoteTerms, hashes, payloads, input.seed)
   if (previous.paymentSequence + 1 !== authorization.paymentSequence || previous.paymentSequence >= FINAL_POOL_SEQUENCE - 1) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号陈旧')
-  await verifyAcceptedPayment(previous, opening)
+  if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
   const price = await contentHashesPriceSatoshis(quoteTerms, hashes, effectiveSeed)
   if (previous.sellerAmountSatoshis > MAX_UINT64 - price || authorization.sellerAmountAfterSatoshis !== previous.sellerAmountSatoshis + price) throw new WireError('invalid_evidence', 7, 'seller_amount_after_satoshis', '卖方金额与聚合内容价格不一致')
   await checkPaymentCapacity(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
-  const unsigned = await buildPaymentUpdate(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
+  const unsigned = checkpoint.buyerLocal === true
+    ? await buildBuyerLocalState(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
+    : await buildPaymentUpdate(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
   const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
   const buyerSignature = await engine.signRole(bound, 'buyer', unsigned, details.poolOutputSatoshis)
   const outbound = encodePaymentUpdate(requestID, buyerSignature)
@@ -588,7 +626,10 @@ async function prepareBuyerCloseArtifactData (facts: Readonly<PureFunctionFacts>
   if (!equal(bound.publicKey(), opening.buyerPublicKey)) throw new WireError('unauthorized', 0, 'buyer_public_key', 'Signer 与开池买方不一致')
   const details = await deriveOpeningDetails(opening)
   checkRefundNotExpired(facts, details.refundLockTime)
-  const unsignedRaw = await buildImmediateClose(opening, checkpoint.payment, input.targetSellerAmountSatoshis)
+  if (input.targetSellerAmountSatoshis < checkpoint.payment.sellerAmountSatoshis) throw new WireError('state_conflict', 12, 'target_seller_amount_satoshis', '关池金额不能低于已签付款')
+  const unsignedRaw = checkpoint.buyerLocal === true
+    ? await buildBuyerLocalState(opening, checkpoint.payment, FINAL_POOL_SEQUENCE, input.targetSellerAmountSatoshis)
+    : await buildImmediateClose(opening, checkpoint.payment, input.targetSellerAmountSatoshis)
   validatePoolCloseTransactionRaw(unsignedRaw)
   const unsigned = await parseUnsignedPayment(unsignedRaw, opening)
   if (unsigned.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'payment_sequence', '立即关闭不是最终状态')
@@ -610,7 +651,7 @@ export async function prepareBuyerCloseArtifact (facts: Readonly<PureFunctionFac
 /** 买方验收卖方完整关闭交易，返回完整交易原文；不声称已广播或已确认。 */
 export async function verifyBuyerCompletedClose (input: VerifyCompletedCloseInput): Promise<Uint8Array> {
   const checkpoint = await buyerPoolCheckpoint(input.pool)
-  return await verifyBuyerCompletedCloseForOpening(input.closeRaw, checkpoint.opening)
+  return await verifyBuyerCompletedCloseForOpening(input.closeRaw, checkpoint.opening, checkpoint)
 }
 
 /** 严格解析 Kind 13、核对费用池关联 ID 并验证完整关闭交易。 */
@@ -619,13 +660,24 @@ export async function verifyBuyerCompletedCloseArtifact (input: VerifyCompletedC
   const checkpoint = await buyerPoolCheckpoint(input.pool)
   const details = await deriveOpeningDetails(checkpoint.opening)
   if (!equal(details.refundTemplateTxId, response.refundTemplateTxID)) throw new WireError('state_conflict', 13, 'refund_template_txid', '关池响应属于另一个费用池')
-  return await verifyBuyerCompletedCloseForOpening(response.completeCloseTransactionRaw, checkpoint.opening)
+  return await verifyBuyerCompletedCloseForOpening(response.completeCloseTransactionRaw, checkpoint.opening, checkpoint, input.requestRaw)
 }
 
-async function verifyBuyerCompletedCloseForOpening (closeRaw: Uint8Array, opening: OpeningProof): Promise<Uint8Array> {
+async function verifyBuyerCompletedCloseForOpening (closeRaw: Uint8Array, opening: OpeningProof, checkpoint: PoolCheckpoint, requestRaw?: Uint8Array): Promise<Uint8Array> {
   validatePoolCloseTransactionRaw(closeRaw)
   const state = await parsePaymentState(closeRaw, opening)
   if (state.paymentSequence !== FINAL_POOL_SEQUENCE) throw new WireError('invalid_evidence', 0, 'close_payment', '缺少最终签名关闭状态')
+  if (state.sellerAmountSatoshis < checkpoint.payment.sellerAmountSatoshis) throw new WireError('state_conflict', 12, 'target_seller_amount_satoshis', '关池金额不能低于已签付款')
+  const expectedUnsigned = checkpoint.buyerLocal === true
+    ? await buildBuyerLocalState(opening, checkpoint.payment, FINAL_POOL_SEQUENCE, state.sellerAmountSatoshis)
+    : await buildImmediateClose(opening, checkpoint.payment, state.sellerAmountSatoshis)
+  if (!await paymentStateMatchesUnsigned(state, expectedUnsigned, opening)) throw new WireError('state_conflict', 12, 'close_payment', '关池交易不是由所给基准付款状态构造')
+  if (requestRaw != null) {
+    const request = decodePoolCloseRequest(requestRaw)
+    if (!equal((await deriveOpeningDetails(opening)).refundTemplateTxId, request.refundTemplateTxID)
+      || !await paymentStateMatchesUnsigned(state, request.unsignedCloseTransactionRaw, opening)
+      || !equal(state.buyerTransactionSignature, request.buyerCloseTransactionSignature)) throw new WireError('state_conflict', 12, 'close_request', '关池响应不是由保存的 Kind 12 请求构造')
+  }
   await new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey }).verifyCompletedFinalPayment(state, opening)
   return await verifySignedTransaction(closeRaw, opening)
 }
@@ -825,11 +877,34 @@ export async function verifyArbiterCustody (rawKind8: Uint8Array, rawKind9: Uint
 interface PoolCheckpoint {
   opening: OpeningProof
   payment: PaymentState
+  /** true 仅来自已验证 Kind 5/7；卖方始终要求完整签名状态。 */
+  buyerLocal?: boolean
 }
 
 async function buyerPoolCheckpoint (evidence: BuyerPoolEvidence): Promise<PoolCheckpoint> {
   const opening = cloneOpening(evidence.opening)
   await verifyOpening(opening)
+  if (evidence.latestBuyerPayment != null) {
+    if ((evidence.latestPaymentRawTx?.byteLength ?? 0) !== 0) throw new WireError('state_conflict', 0, 'buyer_pool', '不能同时提供双签状态和买方本地状态')
+    const request = decodeKind5Request(evidence.latestBuyerPayment.rawKind5)
+    const authorization = await verifySignedContentRequestForOpening(request, opening)
+    const update = decodeKind7Update(evidence.latestBuyerPayment.rawKind7)
+    if (!equal(update.paymentAuthorizationId, sha256(request.paymentAuthorizationCBOR))) throw new WireError('state_conflict', 7, 'payment_authorization_id', '本地付款未引用已签授权')
+    const initialRaw = await buildRefundSubmission(opening)
+    const initial = await parsePaymentState(initialRaw, opening)
+    await verifyAcceptedPayment(initial, opening)
+    if (authorization.paymentSequence <= initial.paymentSequence || authorization.paymentSequence >= FINAL_POOL_SEQUENCE) throw new WireError('state_conflict', 7, 'payment_sequence', '本地付款序号无效')
+    const unsigned = await buildBuyerLocalState(opening, initial, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis)
+    const parsed = await parseUnsignedPayment(unsigned, opening)
+    const details = await deriveOpeningDetails(opening)
+    const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
+    engine.verifyRole('buyer', unsigned, details.poolOutputSatoshis, update.buyerPaymentTransactionSignature)
+    return { opening, buyerLocal: true, payment: {
+      ...parsed, refundTemplateTxId: details.refundTemplateTxId,
+      buyerTransactionSignature: copyBytes(update.buyerPaymentTransactionSignature),
+      sellerTransactionSignature: new Uint8Array(), arbiterTransactionSignature: new Uint8Array()
+    } }
+  }
   if ((evidence.latestPaymentRawTx?.byteLength ?? 0) === 0) {
     const initialRaw = await buildRefundSubmission(opening)
     const initial = await parsePaymentState(initialRaw, opening)
@@ -839,6 +914,21 @@ async function buyerPoolCheckpoint (evidence: BuyerPoolEvidence): Promise<PoolCh
   const state = await parsePaymentState(evidence.latestPaymentRawTx!, opening)
   await verifyPreviousPayment(state, opening)
   return { opening, payment: state }
+}
+
+/**
+ * 累计付款继承开池到期锁定值；仅最终关闭使用 final nLockTime。
+ * 重建只依赖所给状态，不读取时钟、节点或持久日志。
+ */
+async function buildBuyerLocalState (opening: OpeningProof, previous: PaymentState, sequence: number, sellerAmount: bigint): Promise<Uint8Array> {
+  const details = await deriveOpeningDetails(opening)
+  if (sellerAmount < 0n || sellerAmount > MAX_SAFE_AMOUNT || details.poolOutputSatoshis > MAX_SAFE_AMOUNT
+    || opening.minerFeeRateSatoshisPerKilobyte > MAX_SAFE_AMOUNT) throw new WireError('invalid_evidence', 0, 'amount', '费用池金额超过安全整数')
+  const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey })
+  return await engine.buildState({ previousRaw: previous.rawTx, paymentSequence: sequence,
+    sellerAmountSatoshis: Number(sellerAmount), poolOutputSatoshis: Number(details.poolOutputSatoshis),
+    minerFeeRateSatoshisPerKilobyte: Number(opening.minerFeeRateSatoshisPerKilobyte),
+    lockTime: sequence === FINAL_POOL_SEQUENCE ? FINAL_POOL_SEQUENCE : details.refundLockTime })
 }
 
 async function sellerPoolCheckpoint (evidence: SellerPoolEvidence): Promise<PoolCheckpoint> {

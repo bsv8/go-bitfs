@@ -8,13 +8,28 @@ import type { WireKind } from './wire.js'
 /** 普通 wire 消息与交易摘要签名使用的固定用途，供 HSM/KMS 审计。 */
 export type SigningPurpose = 'wire_message' | 'transaction'
 
-/** SDK 已构造好的签名请求；Signer 只能签 32 字节 digest，不能自行选择哈希。 */
+/** SDK 构造固定摘要及核验证据；Signer 可重算核验，但不能改变哈希规则。 */
 export interface SigningRequest {
   purpose: SigningPurpose
   /** 普通消息为 1..13，交易签名固定为 0。 */
   wireKind: number
   /** 已构造好的 32 字节摘要。 */
   digest: Uint8Array
+  /** transaction 签名携带 exact 未签名交易；钱包自行核验前序证据与摘要。 */
+  transactionRaw?: Uint8Array
+  /** wire_message 签名携带 exact 认证文档；设备可重建固定域摘要。 */
+  documentCBOR?: Uint8Array
+  /** 卖方预签退款时的 exact Kind 2；设备核验模板与买方签名。 */
+  openingRequestRaw?: Uint8Array
+  /** Kind 5 的已核验开池与本次候选，用于钱包独立核算授权额度。 */
+  authorizationContext?: {
+    /** 本次授权对应的未签名付款交易。 */
+    unsignedTransactionRaw: Uint8Array
+    /** 含费用池 output[0] 的完整资金交易。 */
+    fundingTransactionRaw: Uint8Array
+    /** 带原始到期锁定值的退款模板。 */
+    refundTemplateRaw: Uint8Array
+  }
 }
 
 /** 唯一密钥操作端口；不暴露私钥、seed、WIF 或自定义 verifier。 */
@@ -64,7 +79,7 @@ export async function signWireDocument (signer: Signer, kind: WireKind, document
   const digest = wireSignatureDigest(kind, documentCBOR)
   let signature: Uint8Array
   try {
-    signature = new Uint8Array(await signer.sign({ purpose: 'wire_message', wireKind: kind, digest: new Uint8Array(digest) }, signal))
+    signature = new Uint8Array(await signer.sign({ purpose: 'wire_message', wireKind: kind, digest: new Uint8Array(digest), documentCBOR: new Uint8Array(documentCBOR) }, signal))
   } catch (error) {
     if (isAborted(signal) || (error instanceof DOMException && error.name === 'AbortError')) throw new WireError('canceled', kind, 'signature', '签名操作已取消')
     // Workflow 的冻结 Signer 会用结构化 unauthorized 报告生命周期内换钥；

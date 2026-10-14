@@ -34,15 +34,22 @@ export interface BuyerOpeningEvidence {
 }
 
 /**
- * 买方视角的资金池普通证据包：完整开池证明加当前链上付款状态原文。
- * 省略 `latestPaymentRawTx` 表示池仍处于初始退款状态，SDK 会从 opening 重建；
- * 提供时 SDK 逐字节解析并全量重验，绝不信任调用方声明的序号或金额。
+ * 买方视角的费用池证据：递进付款保存在双方本地，不要求逐笔上链。
+ * 完整双签状态与买方 Kind 5/7 二选一；均省略时从 opening 重建初始退款。
+ * SDK 验证所给状态的签名与池归属；调用方负责最新状态选择与日志连续性。
  */
 export interface BuyerPoolEvidence {
   /** 含资金交易原文的完整开池证明。 */
   opening: OpeningProof
-  /** 链上取得的最新完整付款交易原文；省略/空表示初始退款状态。 */
+  /** 本地保存或链上取得的完整双签付款交易；不能与 latestBuyerPayment 同时提供。 */
   latestPaymentRawTx?: Uint8Array
+  /** 买方已签付款证据；只能证明该状态成立，不能证明它是最新状态。 */
+  latestBuyerPayment?: {
+    /** 对应本次付款的 exact Kind 5 授权。 */
+    rawKind5: Uint8Array
+    /** 对同一授权的 exact Kind 7 交易签名。 */
+    rawKind7: Uint8Array
+  }
 }
 
 /** 一次已签授权的普通证据包：exact Kind 1 报价与买方 exact Kind 5 授权。 */
@@ -67,7 +74,7 @@ export interface SellerPoolEvidence {
   opening: OpeningProof
   /** 资金交易原文副本；必须与 Opening 内部一致。 */
   fundingTransactionRaw: Uint8Array
-  /** 链上取得的最新完整付款交易原文；省略/空表示初始退款状态。 */
+  /** 本地保存或链上取得的完整双签付款交易；省略/空表示初始退款状态。 */
   latestPaymentRawTx?: Uint8Array
 }
 
@@ -163,7 +170,7 @@ export interface VerifyDeliveryInput {
 
 /** 立即关闭所需的输入：调用方自选基准池证据与目标金额。 */
 export interface PrepareCloseInput {
-  /** 当前池普通证据包；latestPaymentRawTx 就是本关闭的基准状态。 */
+  /** 当前池普通证据包；所给双签交易或 Kind 5/7 是本关闭的基准状态。 */
   pool: BuyerPoolEvidence
   /** 最终关闭中卖方的累计金额（绝对聪数）。 */
   targetSellerAmountSatoshis: bigint
@@ -183,6 +190,8 @@ export interface VerifyCompletedCloseArtifactInput {
   pool: BuyerPoolEvidence
   /** 卖方发来的 exact Kind 13 关池响应。 */
   responseRaw: Uint8Array
+  /** 保存的 exact Kind 12；提供时核对候选原文和买方签名未被替换。 */
+  requestRaw?: Uint8Array
 }
 
 /** 构造 exact Kind 10 所需的本地证据。 */

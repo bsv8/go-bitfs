@@ -194,6 +194,7 @@ func buildRoleFixture(t *testing.T) *roleFixture {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(2000000000),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{mustRolePublicKey(t, arbiterKey.PubKey().Compressed())},
 		RecommendedFilename:        "file.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -602,6 +603,7 @@ func buildPriceVectors(t *testing.T, ctx context.Context) []rolePriceVector {
 			FileSizeBytes:             vector.FileSizeBytes,
 			QuoteExpiresAtUnixSeconds: 2000000000,
 			RecommendedFilename:       "file.bin",
+			MaxBlocksPerBatch:         64,
 		}
 		arbiters, err := content.EncodeSupportedArbiterPublicKeys([][]byte{mustRoleKey(t, "33").PubKey().Compressed()})
 		if err != nil {

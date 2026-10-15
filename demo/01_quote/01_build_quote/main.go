@@ -130,6 +130,7 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(expiresAt),
 		SupportedArbiterPublicKeys: arbiterPubkeys,
 		RecommendedFilename:        filename,
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		return fmt.Errorf("seller.CreateQuote: %w", err)

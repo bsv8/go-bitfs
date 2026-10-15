@@ -306,6 +306,7 @@ func TestPureFunctionsAreRepeatable(t *testing.T) {
 		FileSizeBytes:             4096,
 		QuoteExpiresAtUnixSeconds: 2000000000,
 		RecommendedFilename:       "file.bin",
+		MaxBlocksPerBatch:         64,
 	}
 	arbiters, err := content.EncodeSupportedArbiterPublicKeys([][]byte{mustPub(t, "33")})
 	if err != nil {

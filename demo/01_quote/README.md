@@ -69,6 +69,7 @@ quoteResult, err := sellerWorkflow.CreateQuote(ctx, facts, seller.QuoteDraft{
     QuoteExpiresAtUnixSeconds:  facts.Now.Add(validFor).Unix(),
     SupportedArbiterPublicKeys: [][]byte{arbiterPubKey},
     RecommendedFilename:        filename,
+    MaxBlocksPerBatch:           4, // 卖方每批最多接受 4 个 Block
 })
 
 rawKind1 := quoteResult.Outbound.Bytes() // 应用先持久化 exact bytes 再发送

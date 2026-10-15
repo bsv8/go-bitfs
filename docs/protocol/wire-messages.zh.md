@@ -308,7 +308,8 @@ file_quote_terms_cbor = deterministic-CBOR([
   file_size_bytes,
   quote_expires_at_unix_seconds,
   supported_arbiter_public_keys_cbor,
-  recommended_filename
+  recommended_filename,
+  max_blocks_per_batch
 ])
 
 file_quote_terms_id = SHA-256(file_quote_terms_cbor)
@@ -977,3 +978,9 @@ Kind 11 仍必须通过 TLS 或等价的、验证 Arbiter 身份的安全传输�
 - [RFC 9052 · COSE Structures and Process](https://www.rfc-editor.org/rfc/rfc9052.html)
 - [BIP 340 · Domain Separation](https://bips.dev/340/)
 - [RFC 9175 · Secure Request-Response Binding](https://www.rfc-editor.org/rfc/rfc9175.html#section-4)
+
+### 卖方批次上限
+
+`max_blocks_per_batch` 是报价第九项、必填整数 1–64，与其它条款一起签名并计入 `file_quote_terms_id`。缺失、零值、越界均拒绝，不推断默认值。它限制每次付款授权中的非 Seed Block 数；总内容条目仍不得超过 64。买方策略器可选更小批次，协议不保存买方批次设置或另一次开池协商值。该开发期结构调整保持 WireVersion=1 和 `/bitfs/wire/1.0.0`，SDK 从 0.4.0 起只接受九项报价。已有八项报价不再解码。
+
+正常交易中，买方生成请求前及卖方接受请求时执行批次上限。历史仲裁和买方仲裁取回只核验已签授权、交付、计价与证据绑定，不追溯批次上限；独立仲裁 Claim 不增加报价或批次上限字段。

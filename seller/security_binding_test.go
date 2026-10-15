@@ -404,6 +404,7 @@ func TestWorkflowBindsSignerPublicKeyAcrossKinds(t *testing.T) {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(testBaseTime.Add(time.Hour).Unix()),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{f.arbiterPubKey},
 		RecommendedFilename:        "rotate.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -449,6 +450,7 @@ func TestWorkflowBindsSignerPublicKeyAcrossKinds(t *testing.T) {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(testBaseTime.Add(2 * time.Hour).Unix()),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{f.arbiterPubKey},
 		RecommendedFilename:        "rotate2.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	assertInvalidSignatureOrUnauthorized(t, err, "seller.CreateQuote after key rotation")
 

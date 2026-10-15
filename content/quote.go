@@ -80,13 +80,14 @@ func EncodeFileQuoteTerms(terms *FileQuoteTerms) ([]byte, error) {
 		terms.QuoteExpiresAtUnixSeconds,
 		bstr(terms.SupportedArbiterPublicKeysCBOR),
 		terms.RecommendedFilename,
+		terms.MaxBlocksPerBatch,
 	})
 }
 
 // DecodeFileQuoteTerms validates and decodes canonical FileQuoteTerms bytes.
 func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	const op = "content.DecodeFileQuoteTerms"
-	values, err := decodeArray(data, 8)
+	values, err := decodeArray(data, 9)
 	if err != nil {
 		return nil, malformed(op, "file_quote_terms_cbor", err)
 	}
@@ -114,6 +115,9 @@ func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	}
 	if err := decode(values[7], &terms.RecommendedFilename); err != nil {
 		return nil, err
+	}
+	if err := decode(values[8], &terms.MaxBlocksPerBatch); err != nil {
+		return nil, malformed(op, "max_blocks_per_batch", err)
 	}
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return nil, invalidEvidence(op, err)
@@ -313,6 +317,9 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 		if !bytes.Equal(terms.SeedHash, emptySeedHash.Bytes()) {
 			return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "seed_hash", "empty-file quote seed_hash must equal sha256 of empty seed")
 		}
+	}
+	if terms.MaxBlocksPerBatch < 1 || terms.MaxBlocksPerBatch > MaxContentBatchItems {
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "max_blocks_per_batch", "卖方每批最大 Block 数必须为 1..%d", MaxContentBatchItems)
 	}
 	if terms.QuoteExpiresAtUnixSeconds <= 0 {
 		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "quote_expires_at_unix_seconds", "is required")

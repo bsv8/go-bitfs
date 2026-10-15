@@ -141,6 +141,7 @@ func New(ctx context.Context) (*Fixture, error) {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(now.Add(time.Hour).Unix()),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{arbiterPubKey},
 		RecommendedFilename:        filepath.Base(filePath),
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create fixture quote: %w", err)

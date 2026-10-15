@@ -60,6 +60,7 @@ func goldenQuote(t *testing.T) *content.SignedFileQuote {
 		QuoteExpiresAtUnixSeconds:      2000000000,
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "file.bin",
+		MaxBlocksPerBatch:              64,
 	}
 	quote, err := content.NewSignedFileQuote(context.Background(), terms, mustGoldenSigner(t, "22"))
 	if err != nil {

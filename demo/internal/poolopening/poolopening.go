@@ -188,6 +188,7 @@ func (session *BuyerSession) EnsureOfflineQuote(ctx context.Context, now time.Ti
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(now.Add(time.Hour).Unix()),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{mustPublicKey(session.ArbiterPublicKey)},
 		RecommendedFilename:        "offline-smoke.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		return fmt.Errorf("offline CreateQuote: %w", err)

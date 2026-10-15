@@ -839,3 +839,25 @@ func cloneSignedContentDelivery(delivery *SignedContentDelivery) *SignedContentD
 		ContentPayloadsCBOR:            append([]byte(nil), delivery.ContentPayloadsCBOR...),
 	}
 }
+
+// ValidateContentBatch 校验卖方签名报价的批次上限。只数非 Seed 的 Block，
+// 同时保留总条目 1..64 的协议硬上限；策略器可选择更少的块，SDK 不替应用调度。
+func ValidateContentBatch(terms *FileQuoteTerms, hashes [][]byte) error {
+	const op = "content.ValidateContentBatch"
+	if err := ValidateFileQuoteTerms(terms); err != nil {
+		return err
+	}
+	if err := validateContentHashes(hashes); err != nil {
+		return invalidEvidence(op, err)
+	}
+	var blocks uint64
+	for _, hash := range hashes {
+		if !bytes.Equal(hash, terms.SeedHash) {
+			blocks++
+		}
+	}
+	if blocks > terms.MaxBlocksPerBatch {
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 5, "max_blocks_per_batch", "本次请求 %d 个 Block，超过卖方报价上限 %d", blocks, terms.MaxBlocksPerBatch)
+	}
+	return nil
+}

@@ -10,6 +10,7 @@ import {
   decodePaymentAuthorization,
   sanitizeRecommendedFilename,
   validateFileQuoteTerms,
+  validateContentBatch,
   verifyContentPayloads,
   verifyContentRequestEvidence,
   verifyQuote,
@@ -212,6 +213,7 @@ async function preflightSellerDelivery (facts: Readonly<PureFunctionFacts>, quot
   checkRefundNotExpired(facts, details.refundLockTime)
   const request = decodeKind5Request(rawKind5)
   const { authorization, quoteTerms } = await verifyContentRequestEvidence(request, quote, opening)
+  validateContentBatch(quoteTerms, authorization.contentHashes)
   checkContentRequestTiming(authorization, quoteTerms, now)
   if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence + 1 !== authorization.paymentSequence) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号不是上一状态加一')
   if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
@@ -539,6 +541,7 @@ export async function prepareBuyerContentRequest (facts: Readonly<PureFunctionFa
   if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
   const targetSequence = previous.paymentSequence + 1
   const hashes = input.contentHashes.map(copyBytes)
+  validateContentBatch(terms, hashes)
   const price = await contentHashesPriceSatoshis(terms, hashes, input.seed)
   if (previous.sellerAmountSatoshis > MAX_UINT64 - price) throw new WireError('insufficient_balance', 5, 'seller_amount_after_satoshis', '聚合价格超过剩余池余额')
   const sellerAmountAfter = previous.sellerAmountSatoshis + price

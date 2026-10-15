@@ -90,3 +90,9 @@ seed 或满足授权价格；读取后仍须把同一 Kind 5 和池证据连同 
   另携带 `openingRequestRaw`，Kind 5 携带 `authorizationContext` 的资金交易、退款
   模板与本次未签付款交易。钱包可独立核验固定摘要和额度，但不能改变 SDK 哈希规则。
   SDK 仍用绑定公钥立即验证返回签名。
+
+## 0.4.0 报价参数
+
+`createSellerQuote` 和 `createFileQuote` 的报价必填 `maxBlocksPerBatch: number`（卖方每批最多接受的非 Seed Block 数，整数 1–64）。`acceptBuyerQuote` 返回验签后的同名字段；买方策略器据此选择本批块数，`prepareBuyerContentRequest` 在签名前、`inspectSellerDeliveryRequest` / `prepareSellerDelivery` 在接受请求前检查上限。SDK 不提供买方批次设置，也不自动拆分请求。Seed 不占 Block 数，总条目仍受 64 限制。
+
+Wire v1 与传输标识保持不变；本次开发期升级以九项报价直接替换旧八项报价。历史仲裁与买方取回不追加批次上限追溯检查。历史仲裁、买方本地证据取回及仲裁费用检查接口已包含在正式源码与构建产物中，不需要应用侧 patch。

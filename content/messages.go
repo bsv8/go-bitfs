@@ -30,6 +30,8 @@ type FileQuoteTerms struct {
 	// 与经济条款一起进入卖方统一签名；不同文件名产生不同 file_quote_terms_id。
 	// 它只是展示事实，不是内容/价格/身份的真值。
 	RecommendedFilename string
+	// MaxBlocksPerBatch 是卖方每次付款授权接受的最大 Block 数（1..64）；Seed 不计入，缺失或零值拒绝。
+	MaxBlocksPerBatch uint64
 }
 
 // SignedFileQuote is the complete Kind 1 FileQuote wire message payload:

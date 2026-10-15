@@ -77,6 +77,7 @@ func TestDocumentedMainPathSignerWorkflowQuoteAccept(t *testing.T) {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(facts.Now.Add(time.Hour).Unix()),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{typedArbiter},
 		RecommendedFilename:        "file.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		t.Fatal(err)

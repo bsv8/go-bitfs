@@ -224,6 +224,7 @@ func newProtocolFixture(t *testing.T) *protocolFixture {
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(f.QuoteExpiresAt),
 		SupportedArbiterPublicKeys: []protocol.PublicKey{mustTypedPublicKey(t, f.arbiterPubKey[:])},
 		RecommendedFilename:        "file.bin",
+		MaxBlocksPerBatch:          64,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -279,6 +279,9 @@ func (workflow *workflow) RequestContent(ctx context.Context, facts protocol.Fac
 	if err != nil {
 		return nil, err
 	}
+	if err := content.ValidateContentBatch(terms, contentHashes); err != nil {
+		return nil, err
+	}
 	seed := append([]byte(nil), command.Seed...)
 	price, err := content.ContentHashesPriceSatoshis(ctx, terms, contentHashes, seed)
 	if err != nil {

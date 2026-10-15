@@ -107,6 +107,7 @@ func (workflow *workflow) CreateQuote(ctx context.Context, facts protocol.Facts,
 		QuoteExpiresAtUnixSeconds:      int64(draft.QuoteExpiresAtUnixSeconds),
 		SupportedArbiterPublicKeysCBOR: supportedCBOR,
 		RecommendedFilename:            content.SanitizeRecommendedFilename(draft.RecommendedFilename),
+		MaxBlocksPerBatch:              draft.MaxBlocksPerBatch,
 	}
 	if err := content.ValidateFileQuoteTerms(terms); err != nil {
 		return nil, invalidEvidence(err)
@@ -316,6 +317,9 @@ func preflightDeliveryRequest(op string, facts protocol.Facts, quote *content.Si
 	}
 	contentHashes, err := content.DecodeContentHashes(authorization.ContentHashesCBOR)
 	if err != nil {
+		return nil, err
+	}
+	if err := content.ValidateContentBatch(quoteTerms, contentHashes); err != nil {
 		return nil, err
 	}
 	authorizationID, err := content.PaymentAuthorizationID(request.PaymentAuthorizationCBOR)

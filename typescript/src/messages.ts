@@ -3,6 +3,7 @@ import { encodeCanonical, type CBORValue } from './cbor.js'
 import { WIRE_VERSION } from './constants.js'
 import { signWireDocument, type Signer } from './protocol.js'
 import { Artifact, parse } from './wire.js'
+import { validateFileQuoteTerms } from './content.js'
 
 /** Kind 1 报价的业务条款；金额单位均为 satoshi，时间单位为 UTC Unix 秒。 */
 export interface FileQuoteTerms {
@@ -22,6 +23,8 @@ export interface FileQuoteTerms {
   supportedArbiterPublicKeys: Uint8Array[]
   /** 已经过 sanitize 的单一展示文件名。 */
   recommendedFilename: string
+  /** 卖方每次付款授权接受的最大 Block 数（1..64）；Seed 不计入，无默认值。 */
+  maxBlocksPerBatch: number
 }
 
 /** Kind 5 买方累计付款授权。 */
@@ -73,10 +76,11 @@ export function encodeSupportedArbiterPublicKeys (keys: readonly Uint8Array[]): 
 }
 
 export function encodeFileQuoteTerms (terms: Readonly<FileQuoteTerms>): Uint8Array {
+  validateFileQuoteTerms(terms)
   return encodeCanonical([
     copy(terms.seedHash), copy(terms.buyerPublicKey), terms.seedPriceSatoshis,
     terms.fullBlockPriceSatoshis, terms.fileSizeBytes, terms.quoteExpiresAtUnixSeconds,
-    encodeSupportedArbiterPublicKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename
+    encodeSupportedArbiterPublicKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch)
   ])
 }
 

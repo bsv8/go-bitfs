@@ -120,6 +120,7 @@ export function validateFileQuoteTerms (terms: FileQuoteTerms): void {
   if (terms.buyerPublicKey.byteLength !== 33 || !secp256k1.utils.isValidPublicKey(terms.buyerPublicKey, true)) throw invalid(op, 'buyer_public_key', '报价买方公钥无效')
   validateUint64(terms.seedPriceSatoshis, op, 'seed_price_satoshis')
   validateUint64(terms.fullBlockPriceSatoshis, op, 'full_block_price_satoshis')
+  if (!Number.isSafeInteger(terms.maxBlocksPerBatch) || terms.maxBlocksPerBatch < 1 || terms.maxBlocksPerBatch > MAX_CONTENT_BATCH_ITEMS) throw invalid(op, 'max_blocks_per_batch', `卖方每批最大 Block 数必须为 1..${MAX_CONTENT_BATCH_ITEMS}`)
   validateUint64(terms.fileSizeBytes, op, 'file_size_bytes')
   if (terms.quoteExpiresAtUnixSeconds <= 0n || terms.quoteExpiresAtUnixSeconds > MAX_INT64) throw invalid(op, 'quote_expires_at_unix_seconds', '报价失效时间必须是正 Unix 秒')
   if (terms.fileSizeBytes === 0n && !equalBytes(terms.seedHash, emptySeedHash())) throw invalid(op, 'seed_hash', '空文件的 seed_hash 必须等于空 seed 的 SHA-256')
@@ -131,7 +132,7 @@ export function validateFileQuoteTerms (terms: FileQuoteTerms): void {
 /** 严格解码 exact 规范报价条款字节。 */
 export function decodeFileQuoteTerms (raw: Uint8Array): FileQuoteTerms {
   const op = 'content.DecodeFileQuoteTerms'
-  const values = decodeStrictArray(raw, 8, op, 'file_quote_terms_cbor')
+  const values = decodeStrictArray(raw, 9, op, 'file_quote_terms_cbor')
   const terms: FileQuoteTerms = {
     seedHash: bytesField(values[0], op, 'seed_hash'),
     buyerPublicKey: bytesField(values[1], op, 'buyer_public_key'),
@@ -140,7 +141,8 @@ export function decodeFileQuoteTerms (raw: Uint8Array): FileQuoteTerms {
     fileSizeBytes: uintField(values[4], op, 'file_size_bytes'),
     quoteExpiresAtUnixSeconds: uintField(values[5], op, 'quote_expires_at_unix_seconds'),
     supportedArbiterPublicKeys: decodeSupportedArbiterPublicKeys(bytesField(values[6], op, 'supported_arbiter_public_keys_cbor')),
-    recommendedFilename: textField(values[7], op, 'recommended_filename')
+    recommendedFilename: textField(values[7], op, 'recommended_filename'),
+    maxBlocksPerBatch: Number(uintField(values[8], op, 'max_blocks_per_batch'))
   }
   validateFileQuoteTerms(terms)
   if (!equalBytes(encodeFileQuoteTerms(terms), raw)) throw new WireError('non_canonical', 1, 'file_quote_terms_cbor', '报价条款不是确定性编码')
@@ -462,7 +464,7 @@ function encodeTerms (terms: FileQuoteTerms): Uint8Array {
   return encodeCanonical([
     copyBytes(terms.seedHash), copyBytes(terms.buyerPublicKey), terms.seedPriceSatoshis,
     terms.fullBlockPriceSatoshis, terms.fileSizeBytes, terms.quoteExpiresAtUnixSeconds,
-    encodeArbiterKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename
+    encodeArbiterKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch)
   ])
 }
 function encodeAuthorization (authorization: PaymentAuthorization): Uint8Array {
@@ -550,4 +552,12 @@ function equalBytes (left: Uint8Array, right: Uint8Array): boolean { return left
 function copyBytes (value: Uint8Array): Uint8Array { return new Uint8Array(value) }
 function cloneTerms (terms: FileQuoteTerms): FileQuoteTerms {
   return { ...terms, seedHash: copyBytes(terms.seedHash), buyerPublicKey: copyBytes(terms.buyerPublicKey), supportedArbiterPublicKeys: terms.supportedArbiterPublicKeys.map(copyBytes) }
+}
+
+/** 保留协议总条目上限，并强制执行卖方签名的 Block 上限；Seed 不计入 Block 数。 */
+export function validateContentBatch (terms: FileQuoteTerms, hashes: readonly Uint8Array[]): void {
+  validateFileQuoteTerms(terms)
+  validateContentHashes(hashes)
+  const blocks = hashes.filter(hash => !equalBytes(hash, terms.seedHash)).length
+  if (blocks > terms.maxBlocksPerBatch) throw new WireError('invalid_evidence', 5, 'max_blocks_per_batch', `本次请求 ${blocks} 个 Block，超过卖方报价上限 ${terms.maxBlocksPerBatch}`)
 }

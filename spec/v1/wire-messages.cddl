@@ -38,6 +38,7 @@ file-quote-terms = [
   quote-expires-at-unix-seconds: int,
   supported-arbiter-public-keys-cbor: bstr,
   recommended-filename: tstr,      ; 必须先过 sanitize 规则再编码与签名
+  max-blocks-per-batch: uint .gt 0 .le 64,     ; 卖方每批最多接受的 Block 数；Seed 不计入
 ]
 
 kind-1-file-quote = [

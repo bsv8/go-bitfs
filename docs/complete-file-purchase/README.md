@@ -214,6 +214,7 @@ qr, err := sellerWorkflow.CreateQuote(ctx, facts, seller.QuoteDraft{
     QuoteExpiresAtUnixSeconds:  now.Add(24 * time.Hour).Unix(),
     SupportedArbiterPublicKeys: [][]byte{arbiterPubKey},
     RecommendedFilename:        "bigfile.bin",
+    MaxBlocksPerBatch:           4, // 卖方每批最多接受 4 个 Block
 })
 if err != nil { /* ... */ }
 

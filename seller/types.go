@@ -32,6 +32,8 @@ type QuoteDraft struct {
 	SupportedArbiterPublicKeys []protocol.PublicKey
 	// RecommendedFilename 是唯一的文件名来源：sanitize 后进入签名条款。
 	RecommendedFilename string
+	// MaxBlocksPerBatch 是卖方声明的每批最大 Block 数（1..64），无隐式默认值。
+	MaxBlocksPerBatch uint64
 }
 
 // quoteResult 是 CreateQuote 的统一 Result：Outbound 是待发送 exact Kind 1；

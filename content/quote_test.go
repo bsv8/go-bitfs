@@ -25,6 +25,7 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 		QuoteExpiresAtUnixSeconds:      quoteTestFutureUnix(),
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "report.bin",
+		MaxBlocksPerBatch:              64,
 	}
 	quote, err := NewSignedFileQuote(context.Background(), terms, quoteTestSigner())
 	if err != nil {
@@ -179,6 +180,7 @@ func quoteTestTerms(t *testing.T) *FileQuoteTerms {
 		QuoteExpiresAtUnixSeconds:      quoteTestFutureUnix(),
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "file.bin",
+		MaxBlocksPerBatch:              64,
 	}
 }
 

@@ -58,6 +58,7 @@ outbound, terms, err := seller.CreateQuote(ctx, facts, signerSeller, seller.Quot
     QuoteExpiresAtUnixSeconds:  content.UnixSeconds(facts.Now.Add(time.Hour).Unix()),
     SupportedArbiterPublicKeys: []protocol.PublicKey{arbiterPubKey},
     RecommendedFilename:        "file.bin", // 先 sanitize 再进入签名条款
+    MaxBlocksPerBatch:           4, // 卖方每批最多接受 4 个 Block
 })
 rawKind1 := outbound.Bytes() // 应用先持久化 exact Kind 1 bytes 再发送
 
@@ -127,3 +128,13 @@ make test
 go test ./...
 npm ci --prefix typescript && npm test --prefix typescript
 ```
+
+## 0.4.0 卖方批次上限
+
+卖方报价必须显式提供 `MaxBlocksPerBatch`（Go）/ `maxBlocksPerBatch`（TypeScript）：每次授权最多接受多少个非 Seed Block，范围 1–64。Seed 不计入 Block 数，内容条目总数仍不得超过 64。该字段作为报价第九项进入签名及报价 ID；缺失或越界会在签名前拒绝。
+
+买方在生成正常请求前、卖方在接受正常请求时执行上限校验；实际批次大小由应用下载策略器决定，SDK 不增加买方批次配置、下限或开池协商字段。历史仲裁与仲裁取回只核验已签授权和交付证据，不追溯批次上限。
+
+本次为开发期报价结构直接调整，`WireVersion` 保持 1，libp2p 协议仍是 `/bitfs/wire/1.0.0`。0.4.0 只接受九项报价，不兼容旧八项报价。应用必须升级 SDK 并提供卖方参数后才能生成新报价。
+
+0.4.0 正式源码包含历史交付仲裁、买方本地付款证据取回、`arbitrationContentPayloadBytes` 与 `inspectArbitrationCandidate`，这些能力无需应用修改 npm 包的 `dist` 文件或安装本地补丁。

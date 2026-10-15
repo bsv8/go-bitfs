@@ -193,6 +193,7 @@ func (f *buyerFixture) createQuoteRaw(t *testing.T, mutate func(*seller.QuoteDra
 		QuoteExpiresAtUnixSeconds:  content.UnixSeconds(f.QuoteExpiresAt),
 		SupportedArbiterPublicKeys: mustTypedArbiterKeys(t, [][]byte{f.arbiterPubKey[:]}),
 		RecommendedFilename:        "file.bin",
+		MaxBlocksPerBatch:          64,
 	}
 	if mutate != nil {
 		mutate(&draft)

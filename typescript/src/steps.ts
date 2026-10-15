@@ -378,15 +378,12 @@ export async function completeSellerCloseArtifact (facts: Readonly<PureFunctionF
  */
 export async function prepareSellerArbitration (facts: Readonly<PureFunctionFacts>, input: PrepareArbitrationInput, signer: Signer): Promise<{ outbound: Artifact, claimID: Uint8Array }> {
   const bound = bindSigner(signer, 'seller_signer')
-  const now = requireNow(facts)
   const checkpoint = await sellerPoolCheckpoint(input.pool)
   const opening = checkpoint.opening
   if (!equal(bound.publicKey(), opening.sellerPublicKey)) throw new WireError('unauthorized', 0, 'seller_public_key', 'Signer 与开池卖方不一致')
   const { request } = decodeSignedContentRequest(input.requestRaw)
   const details = await deriveOpeningDetails(opening)
-  checkRefundNotExpired(facts, details.refundLockTime)
   const built = await buildClaimFromAuthorization(opening, request)
-  if (!(now < built.authorization.deliveryDeadlineUnixSeconds)) throw new WireError('expired', 8, 'delivery_deadline_unix_seconds', '交付截止时间已过')
   const authorizationID = sha256(request.paymentAuthorizationCBOR)
   const delivery = decodeKind6Delivery(input.deliveryRaw)
   const deliveryAuthorizationID = decodeContentDeliveryDocument(delivery.contentDeliveryCBOR)
@@ -424,7 +421,6 @@ export async function completeSellerArbitratedPayment (facts: Readonly<PureFunct
   if (!equal(receipt.arbitrationClaimID, localClaimID)) throw new WireError('state_conflict', 9, 'arbitration_claim_id', '回执 Claim ID 与独立重算值不一致')
   try { verifyWireDocument(keys.arbiterPublicKey, 9, response.arbitrationReceiptCBOR, response.arbiterArbitrationReceiptSignature) } catch (error) { throw rethrow(error, 'invalid_signature', 9, 'arbiter_arbitration_receipt_signature') }
   const unsigned = buildArbitrationPaymentFromClaim(claim.poolOutputSatoshis, claim.poolOutputLockingScript, claim.refundTemplateRaw, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis, receipt.arbiterAmountSatoshis)
-  checkRefundNotExpired(facts, refundTemplateLockTime(claim.refundTemplateRaw))
   const engine = new MultisigPoolEngine(keys)
   try { engine.verifyRole('arbiter', unsigned.unsignedRaw, unsigned.poolOutputSatoshis, receipt.arbiterPaymentTransactionSignature) } catch (error) { throw rethrow(error, 'invalid_signature', 9, 'arbiter_payment_transaction_signature') }
   const sellerSignature = await engine.signRole(bound, 'seller', unsigned.unsignedRaw, unsigned.poolOutputSatoshis)
@@ -746,7 +742,7 @@ export async function verifyBuyerArbitratedContent (input: ArbitratedContentInpu
   const effectiveSeed = await verifyContentPayloads(quoteTerms, hashes, result.payloads, input.seed)
   const price = await contentHashesPriceSatoshis(quoteTerms, hashes, effectiveSeed)
   if (previous.paymentSequence + 1 !== authorization.paymentSequence || previous.paymentSequence >= FINAL_POOL_SEQUENCE - 1) throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号陈旧')
-  await verifyAcceptedPayment(previous, opening)
+  if (checkpoint.buyerLocal !== true) await verifyAcceptedPayment(previous, opening)
   if (previous.sellerAmountSatoshis > MAX_UINT64 - price || authorization.sellerAmountAfterSatoshis !== previous.sellerAmountSatoshis + price) throw new WireError('invalid_evidence', 11, 'seller_amount_after_satoshis', '卖方金额与聚合内容价格不一致')
   outcome.payloads = result.payloads.map(copyBytes)
   return outcome
@@ -1390,3 +1386,13 @@ function rethrow (error: unknown, code: 'invalid_signature', kind: number, field
 
 function equal (left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]) }
 function copyBytes (value: Uint8Array): Uint8Array { return new Uint8Array(value) }
+
+/** 已严格解析的 exact Kind 8 中，服务端计费使用的 ContentPayloadsCBOR 字节数。 */
+export function arbitrationContentPayloadBytes(rawKind8: Uint8Array): number {
+  return decodeKind8Request(rawKind8).contentPayloadsCBOR.byteLength
+}
+
+/** 离线校验仲裁证据并按预期费用构造唯一候选，供卖方检查回执金额。 */
+export function inspectArbitrationCandidate(rawKind8: Uint8Array, feeSatoshis: bigint): PreparedArbitrationEvidence {
+  return prepareArbiterArbitration(rawKind8, feeSatoshis)
+}

@@ -89,7 +89,7 @@ func main() {
 	store := &custodyRecord{requestBytes: append([]byte(nil), rawKind8...)}
 	debug("[arbiter] exact Kind 8 persisted; record is CustodyPrepared (no Kind 9 yet)")
 
-	prepared, err := arbiter.PrepareArbitration(f.Facts(now), rawKind8, protocol.Satoshis(demoFeePolicy(len(deliveryDTO.ContentPayloadsCBOR))))
+	prepared, err := arbiter.PrepareArbitration(rawKind8, protocol.Satoshis(demoFeePolicy(len(deliveryDTO.ContentPayloadsCBOR))))
 	if err != nil {
 		fail(fmt.Errorf("arbiter.PrepareArbitration: %w", err))
 	}
@@ -127,7 +127,7 @@ func main() {
 	debug("[arbiter] answered signed not_ready; buyer must retry with a NEW nonce")
 
 	// Kind 9 落库：记录进入 Retrievable。
-	signed, err := arbiter.SignPreparedArbitration(ctx, f.Facts(now), *prepared, f.ArbiterSigner)
+	signed, err := arbiter.SignPreparedArbitration(ctx, *prepared, f.ArbiterSigner)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.SignPreparedArbitration: %w", err))
 	}

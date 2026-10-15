@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"time"
 
 	"github.com/bsv8/go-bitfs/arbitration"
 	"github.com/bsv8/go-bitfs/pool"
@@ -45,64 +44,11 @@ func (workflow *workflow) PublicKey() []byte {
 	return append([]byte(nil), workflow.publicKey[:]...)
 }
 
-// PrepareArbitration 对 exact Kind 8 托管请求做完整证据验证但绝不签名：
-// Claim 结构、买方授权签名、卖方 Claim 签名、逐 payload 哈希、按显式正仲裁费
-// 独立重建 candidate、Claim 归属本 Arbiter、交付截止未过（Facts.Now）、退款
-// 模板尚未到期（只读取锁定类型对应的事实）。本步骤不签名也无长计算，因此不
-// 接收 context。应用必须在调用 SignPreparedArbitration 之前先持久化 exact
-// 托管证据（preparedArbitration.RequestCBOR、Claim ID、费用与 payload bundle）。
-func (workflow *workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (*preparedArbitration, error) {
-	const op = "arbiter.PrepareArbitration"
-	if workflow == nil || workflow.signer == nil {
-		return nil, protocol.Errorf(op, protocol.CodeUnauthorized, 8, "workflow", "arbitration workflow is required")
-	}
-	if fee == 0 {
-		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 8, "fee_satoshis", "successful arbitration requires a positive arbiter amount")
-	}
-	request, err := arbitration.UnmarshalRequest(rawKind8)
-	if err != nil {
-		return nil, err
-	}
-	now, err := facts.RequireNow()
-	if err != nil {
-		return nil, err
-	}
-	claim, authorization, payloads, unsigned, claimID, authID, keys, err := arbitration.ValidateRequestEvidence(request, uint64(fee))
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(keys.ArbiterPublicKey, workflow.publicKey[:]) {
-		return nil, protocol.Errorf(op, protocol.CodeUnauthorized, 8, "arbiter_public_key", "Claim arbiter key does not match workflow key")
-	}
-	if !now.Before(unixSeconds(authorization.DeliveryDeadlineUnixSeconds)) {
-		return nil, protocol.Errorf(op, protocol.CodeExpired, 8, "delivery_deadline_unix_seconds", "delivery deadline has passed")
-	}
-	claimLockTime, err := pool.RefundTemplateLockTime(claim.RefundTemplateRaw)
-	if err != nil {
-		return nil, err
-	}
-	// 退款门禁只读取锁定类型对应的事实；timestamp 锁定复用本次 Now。
-	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
-		return nil, protocol.WrapClassified(fmt.Errorf("refund template is no longer available for arbitration: %w", err), op, 8, "refund_template_raw")
-	}
-	exactRequest, err := arbitration.MarshalRequest(request)
-	if err != nil {
-		return nil, err
-	}
-	return &preparedArbitration{
-		request: request, claim: claim, unsigned: cloneUnsigned(unsigned), payloads: cloneByteSlices(payloads),
-		arbitrationClaimID: claimID, paymentAuthorizationID: authID, arbiterAmountSatoshis: fee,
-		arbiterPublicKey:    append([]byte(nil), keys.ArbiterPublicKey...),
-		evidenceCommitment:  preparedEvidenceCommitment(exactRequest, claimID[:], uint64(fee), unsigned),
-		deadlineUnixSeconds: authorization.DeliveryDeadlineUnixSeconds,
-	}, nil
-}
-
 // SignPreparedArbitration 是先持久化后的签名步骤：从冻结的 exact Kind 8 字节
-// 独立重建交易与 digest，重新比较 Claim ID、费用、角色、deadline（用本次
-// 显式 Facts.Now）与 candidate，然后按固定顺序签名——先仲裁交易签名，再编码
+// 独立重建交易与 digest，重新比较 Claim ID、费用、角色
+// 与 candidate，然后按固定顺序签名——先仲裁交易签名，再编码
 // 回执，最后生成并自验统一回执消息签名。绝不信任缓存的 mutable candidate。
-func (workflow *workflow) SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared *preparedArbitration) (wire.Artifact, error) {
+func (workflow *workflow) SignPreparedArbitration(ctx context.Context, prepared *preparedArbitration) (wire.Artifact, error) {
 	const op = "arbiter.SignPreparedArbitration"
 	if workflow == nil || workflow.signer == nil {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeUnauthorized, 9, "workflow", "arbitration workflow is required")
@@ -115,13 +61,6 @@ func (workflow *workflow) SignPreparedArbitration(ctx context.Context, facts pro
 	}
 	if err := ctx.Err(); err != nil {
 		return wire.Artifact{}, protocol.Wrap(err, op, protocol.CodeCanceled, 9, "")
-	}
-	now, err := facts.RequireNow()
-	if err != nil {
-		return wire.Artifact{}, err
-	}
-	if !now.Before(unixSeconds(prepared.deadlineUnixSeconds)) {
-		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeExpired, 9, "delivery_deadline_unix_seconds", "delivery deadline passed before custody signing")
 	}
 	if !bytes.Equal(workflow.publicKey[:], prepared.arbiterPublicKey) {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeUnauthorized, 9, "arbiter_public_key", "prepared arbitration belongs to another arbiter")
@@ -143,17 +82,8 @@ func (workflow *workflow) SignPreparedArbitration(ctx context.Context, facts pro
 	if rebuilt.ArbiterAmountSatoshis != uint64(frozenFeeSatoshis) || !equalUnsigned(rebuilt, prepared.unsigned) {
 		return wire.Artifact{}, protocol.Errorf(op, protocol.CodeStateConflict, 9, "unsigned_candidate", "prepared candidate changed")
 	}
-	// Prepare→Sign 间隙重检退款锁（timestamp/height 两种锁定都覆盖）：
-	// 持久化或排队期间退款一旦成熟，退款交易与仲裁交易将竞态花费同一池
-	// 输出。此门禁在任何 Signer 调用之前执行——被拒时 Signer 调用次数为 0，
-	// 不产生任何部分签名。Restore 产物与本门禁同源。
-	claimLockTime, err := pool.RefundTemplateLockTime(freshClaim.RefundTemplateRaw)
-	if err != nil {
-		return wire.Artifact{}, err
-	}
-	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
-		return wire.Artifact{}, protocol.WrapClassified(fmt.Errorf("refund gate between prepare and sign: %w", err), op, 9, "refund_template_raw")
-	}
+	// 离线仲裁只验证证据与费用。退款已可执行不使证据失效；链上花费竞争由
+	// 交易广播方承担，仲裁方不伪造高度也不查询 UTXO。
 	exactRequest, err := arbitration.MarshalRequest(prepared.request)
 	if err != nil {
 		return wire.Artifact{}, err
@@ -284,4 +214,3 @@ func (workflow *workflow) BuildAvailableRetrieval(ctx context.Context, requestID
 }
 
 // unixSeconds 把协议 UTC Unix 秒还原为 UTC time.Time（纯函数，无时钟读取）。
-func unixSeconds(value int64) time.Time { return time.Unix(value, 0).UTC() }

@@ -815,8 +815,8 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
     expect(toHex(claim.outbound.bytes())).toBe(roleFixture.arbitration.kind8_hex)
     expect(toHex(claim.claimID)).toBe(roleFixture.arbitration.claim_id)
 
-    const prepared = prepareArbiterArbitration(roleFacts, claim.outbound.bytes(), 500n)
-    const signed = await signArbiterPreparedArbitration(roleFacts, prepared, arbiter)
+    const prepared = prepareArbiterArbitration(claim.outbound.bytes(), 500n)
+    const signed = await signArbiterPreparedArbitration(prepared, arbiter)
     expect(toHex(signed.outbound.bytes())).toBe(roleFixture.arbitration.kind9_hex)
 
     const claimElements = outer(claim.outbound.bytes())
@@ -1018,7 +1018,7 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
     await expect(prepareBuyerClose(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(requestBuyerArbitratedContent({} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(verifyBuyerArbitratedContent({} as never)).rejects.toMatchObject({ code: 'invalid_evidence' })
-    await expect(signArbiterPreparedArbitration(roleFacts, {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
+    await expect(signArbiterPreparedArbitration({} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(buildArbiterAvailableRetrieval(new Uint8Array(32), {} as never, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
     await expect(buildArbiterUnavailableRetrieval(new Uint8Array(32), 1, invalidSigner)).rejects.toMatchObject({ code: 'invalid_evidence' })
 
@@ -1034,11 +1034,11 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
 
     const countingArbiter = new FixtureSigner('33')
     const tamperedPrepared = { rawKind8: kind8, candidateRaw: flipLastByte(outer(kind8)[2] as Uint8Array), arbitrationClaimID: hex(roleFixture.arbitration.claim_id), feeSatoshis: 500n }
-    await expect(signArbiterPreparedArbitration(roleFacts, tamperedPrepared, countingArbiter)).rejects.toMatchObject({ code: 'state_conflict' })
+    await expect(signArbiterPreparedArbitration(tamperedPrepared, countingArbiter)).rejects.toMatchObject({ code: 'state_conflict' })
     expect(countingArbiter.calls).toBe(0)
 
-    expect(() => prepareArbiterArbitration(roleFacts, kind9, 500n)).toThrowError(expect.objectContaining({ code: 'unsupported_kind' }))
-    expect(() => prepareArbiterArbitration(roleFacts, kind8, 0n)).toThrowError(expect.objectContaining({ code: 'invalid_evidence' }))
+    expect(() => prepareArbiterArbitration(kind9, 500n)).toThrowError(expect.objectContaining({ code: 'unsupported_kind' }))
+    expect(() => prepareArbiterArbitration(kind8, 0n)).toThrowError(expect.objectContaining({ code: 'invalid_evidence' }))
     expect(() => authenticateArbiterRetrieval(encodeCanonical([1n, 10n, encodeCanonical([outer(outer(kind10)[2] as Uint8Array)[0]!, new Uint8Array(32)]), copy(outer(kind10)[3] as Uint8Array)]), kind8)).toThrowError(expect.objectContaining({ code: 'invalid_evidence' }))
     await expect(buildBuyerMaturedRefund(roleFacts, buyerPaidEvidence())).rejects.toMatchObject({ code: 'not_matured' })
   })

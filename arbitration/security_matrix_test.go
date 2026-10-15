@@ -44,7 +44,7 @@ func TestPrepareRejectsTamperedSellerArbitrationClaimSignature(t *testing.T) {
 	}
 }
 
-func TestPrepareRejectsWrongArbiterAndExpiredRefund(t *testing.T) {
+func TestPrepareRejectsWrongArbiterAcceptsMatureRefund(t *testing.T) {
 	evidence := makeArbitrationEvidence(t)
 	rawKind8, err := arbitration.MarshalRequest(arbitration.CloneRequest(evidence.request))
 	if err != nil {
@@ -59,8 +59,8 @@ func TestPrepareRejectsWrongArbiterAndExpiredRefund(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mustArbiterWorkflow(t).PrepareArbitration(testFacts(), expiredRawKind8, protocol.Satoshis(testArbitrationFeeSat)); !protocol.IsCode(err, protocol.CodeExpired) {
-		t.Fatalf("refund template already at its arbitral maturity height error = %v, want expired", err)
+	if _, err := mustArbiterWorkflow(t).PrepareArbitration(testFacts(), expiredRawKind8, protocol.Satoshis(testArbitrationFeeSat)); err != nil {
+		t.Fatalf("offline evidence with mature refund rejected: %v", err)
 	}
 }
 
@@ -154,10 +154,10 @@ func TestSignPreparedRejectsTamperedCustodyEvidence(t *testing.T) {
 	if _, err := stranger.SignPreparedArbitration(context.Background(), testFacts(), prepared); !protocol.IsCode(err, protocol.CodeUnauthorized) {
 		t.Fatalf("foreign workflow signed another arbiter's prepared evidence: %v", err)
 	}
-	// 外部可触发的拒签路径二：签名时刻的显式 Facts.Now 越过交付截止秒。
+	// 时间经过不影响证据有效性。
 	expiredSignFacts := protocol.Facts{Now: time.Unix(int64(prepared.DeadlineUnixSeconds()), 0).UTC(), BlockHeight: 900000}
-	if _, err := workflow.SignPreparedArbitration(context.Background(), expiredSignFacts, prepared); !protocol.IsCode(err, protocol.CodeExpired) {
-		t.Fatalf("signing after deadline expiry in the persistence gap was accepted: %v", err)
+	if _, err := workflow.SignPreparedArbitration(context.Background(), expiredSignFacts, prepared); err != nil {
+		t.Fatalf("offline signing after deadline rejected: %v", err)
 	}
 }
 
@@ -486,11 +486,8 @@ func makeArbitrationEvidenceWithDeadline(t *testing.T, deadlineUnix int64) arbit
 	return evidence
 }
 
-// TestDeadlineBoundariesGatePrepareAndSigning pins the exact delivery-deadline
-// second (inclusive rejection), acceptance before it, and expiry inside the
-// persistence gap between PrepareArbitration and SignPreparedArbitration.
-// 新模型下时间全部来自显式 Facts，无需真实等待即可跨越边界。
-func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
+// 交付截止是签名证据字段，不是离线仲裁的当前时间门禁。
+func TestDeadlineDoesNotGateOfflinePrepareOrSigning(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Second)
 	workflow := mustArbiterWorkflow(t)
 	prepareFacts := protocol.Facts{Now: base, BlockHeight: 900000}
@@ -500,8 +497,8 @@ func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workflow.PrepareArbitration(prepareFacts, exactRawKind8, protocol.Satoshis(testArbitrationFeeSat)); !protocol.IsCode(err, protocol.CodeExpired) {
-		t.Fatalf("prepare at the exact deadline second was accepted: %v", err)
+	if _, err := workflow.PrepareArbitration(prepareFacts, exactRawKind8, protocol.Satoshis(testArbitrationFeeSat)); err != nil {
+		t.Fatalf("offline prepare at deadline rejected: %v", err)
 	}
 
 	beforeDeadline := makeArbitrationEvidenceWithDeadline(t, base.Add(30*time.Second).Unix())
@@ -517,10 +514,10 @@ func TestDeadlineBoundariesGatePrepareAndSigning(t *testing.T) {
 		t.Fatalf("prepared deadline drifted: %d", int64(prepared.DeadlineUnixSeconds()))
 	}
 
-	// 持久化间隙过期：把签名时的 Facts.Now 推到截止秒（含），必须拒签。
+	// 证据不因持久化期间经过截止秒失效，离线仲裁仍应签名。
 	gapFacts := protocol.Facts{Now: time.Unix(int64(prepared.DeadlineUnixSeconds()), 0).UTC(), BlockHeight: 900000}
-	if _, err := workflow.SignPreparedArbitration(context.Background(), gapFacts, prepared); !protocol.IsCode(err, protocol.CodeExpired) {
-		t.Fatalf("signing after deadline expiry in the persistence gap was accepted: %v", err)
+	if _, err := workflow.SignPreparedArbitration(context.Background(), gapFacts, prepared); err != nil {
+		t.Fatalf("offline signing after deadline rejected: %v", err)
 	}
 	// 对照基线：截止前一秒仍可正常签署。
 	okFacts := protocol.Facts{Now: time.Unix(int64(prepared.DeadlineUnixSeconds())-1, 0).UTC(), BlockHeight: 900000}

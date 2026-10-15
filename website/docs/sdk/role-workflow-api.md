@@ -21,7 +21,7 @@ Recommended application ordering for every step:
 
 ```
 load（按 RefundTemplateTxID / 授权 ID 加载应用自己的原始 bytes 与证据包）
-→ SDK 纯函数 compute/verify（显式传入全部前序原始证据与 Facts）
+→ SDK 纯函数 compute/verify（显式传入全部前序原始证据；只有时间相关步骤传入 Facts，仲裁方 Prepare/Sign 不需要 Facts）
 → persist exact bytes 与证据包（先保存后发送）
 → send/broadcast → record outcome
 ```
@@ -182,15 +182,15 @@ type SellerDeliveryEvidence struct {
 ```go
 // package arbiter
 
-// PrepareArbitration 对 exact Kind 8 托管请求做完整时间相关证据验证但绝不
+// PrepareArbitration 对 exact Kind 8 托管请求做离线证据与金额验证但绝不
 // 签名：Claim 结构、买卖双方签名、逐 payload 哈希、按显式正仲裁费独立重建
-// candidate、交付截止与退款锁定门禁。返回可直接持久化的普通证据包。
-func PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (prepared *PreparedArbitrationEvidence, err error)
+// candidate。交付截止/退款锁不作为仲裁准入门禁，不需要链高或当前时间。
+func PrepareArbitration(rawKind8 []byte, fee protocol.Satoshis) (prepared *PreparedArbitrationEvidence, err error)
 
 // SignPreparedArbitration 从普通证据包重新验证全部证据后才签名：Claim ID、
-// 费用、角色、deadline（用本次显式 Facts.Now）与 candidate 逐项重算比对，
+// 费用、角色与 candidate 逐项重算比对，
 // 先签仲裁交易，再编码回执并自验统一回执消息签名。
-func SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared PreparedArbitrationEvidence, signer protocol.Signer) (signed *SignedArbitrationEvidence, err error)
+func SignPreparedArbitration(ctx context.Context, prepared PreparedArbitrationEvidence, signer protocol.Signer) (signed *SignedArbitrationEvidence, err error)
 
 // AuthenticateRetrieval 仅完成 Kind 10 买方鉴权：时间无关，不需要 Kind 9 存在。
 // 持有 storedKind8 记录的一方即托管仲裁方。

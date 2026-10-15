@@ -37,12 +37,11 @@ as an unspendable-source reconciliation failure.
 
 ## Arbiter boundary
 
-The application MUST complete the on-chain UTXO pre-check before pricing and
-signing. The SDK never queries a node; the production service must verify that
-the Claim's outpoint exists, its amount matches the Claim, its script matches
-the pool locking script, and it is confirmed and unspent. A failed, timed-out,
-or uncertain UTXO lookup MUST reject signing — uncertainty is never treated as
-spendable, and no degraded or free response may be produced.
+The Arbiter MUST validate evidence and the arbitration amount offline. It does
+not connect to the BSV network, query UTXOs, confirmations or block height, or
+broadcast transactions. A passed delivery deadline or mature refund lock does
+not invalidate otherwise correct custody evidence. Signing does not guarantee
+that the fee can be collected on-chain.
 
 The application MUST compute the positive `arbiter_amount_sat` with its own
 fee policy over exactly `len(ContentPayloadsCBOR)` (integer formulas only),
@@ -51,12 +50,11 @@ frozen fee before requesting any signature:
 
 ```text
 raw Kind 8 received -> strict decode -> evidence verification
-  -> application verifies the on-chain UTXO
   -> application prices the fee
-  -> arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
+  -> arbiter.PrepareArbitration(rawKind8, arbiterAmountSatoshis)
   -> atomic custody persistence (append-only: request, payload, Claim ID,
      fee stay immutable once written)
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
+  -> arbiter.SignPreparedArbitration(ctx, prepared, signer)
   -> persist/send exact Kind 9
 ```
 

@@ -186,55 +186,34 @@ func (f *sellerFixture) buildCustodyKind8ForBoundary(t *testing.T, tc refundLock
 	return kind8.Bytes()
 }
 
-// TestSignPreparedArbitrationRechecksRefundLockAfterPrepare 覆盖两种锁定类型
-// 的 Prepare→Sign 成熟跨越：签署必须 expired 且 Field=refund_template_raw，
-// Signer 调用增量必须为 0；prepared 与 restored 产物走同一门禁。
-func TestSignPreparedArbitrationRechecksRefundLockAfterPrepare(t *testing.T) {
+// 仲裁只检验证据和费用：timestamp/height 锁成熟后仍可离线签名，
+// 不声称资金尚未花费或签名一定可兑现。
+func TestSignPreparedArbitrationAcceptsMatureRefundEvidence(t *testing.T) {
 	for _, tc := range refundLockBoundaryCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSellerFixture(t)
-			rawKind8 := f.buildCustodyKind8ForBoundary(t, tc)
-
+			raw := f.buildCustodyKind8ForBoundary(t, tc)
 			counter := &countingSigner{delegate: mustSigner(t, f.arbiterKey)}
 			wf, err := arbiter.NewWorkflow(counter)
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			assertRefundGateRefusal := func(what string, prepared *arbiter.PreparedArbitration) {
-				t.Helper()
-				before := counter.callsSnapshot()
-				_, err = wf.SignPreparedArbitration(context.Background(), tc.signFacts, prepared)
-				after := counter.callsSnapshot()
-				if !protocol.IsCode(err, protocol.CodeExpired) {
-					t.Fatalf("%s: error = %v, want expired", what, err)
-				}
-				var perr *protocol.Error
-				if !errors.As(err, &perr) || perr.Field != "refund_template_raw" {
-					t.Fatalf("%s: field = %v (err=%v), want refund_template_raw", what, perr, err)
-				}
-				if after-before != 0 {
-					t.Fatalf("%s: signer delta = %d, want 0", what, after-before)
-				}
-			}
-
-			// Prepare（未成熟）应成功。
-			prepared, err := wf.PrepareArbitration(tc.prepareFacts, rawKind8, testArbitrationFeeSatoshis)
-			if err != nil {
-				t.Fatalf("prepare before maturity failed: %v", err)
-			}
-			assertRefundGateRefusal("prepared", prepared)
-
-			// Restore 产物走同一门禁。
-			restored, err := arbiter.RestorePreparedArbitration(rawKind8, testArbitrationFeeSatoshis)
+			prepared, err := wf.PrepareArbitration(tc.signFacts, raw, testArbitrationFeeSatoshis)
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertRefundGateRefusal("restored", restored)
-
-			// 未跨越边界的事实下仍可正常签署（证明门禁没有误伤成功路径）。
-			if _, err := wf.SignPreparedArbitration(context.Background(), tc.prepareFacts, prepared); err != nil {
-				t.Fatalf("sign with valid facts failed: %v", err)
+			if _, err = wf.SignPreparedArbitration(context.Background(), tc.signFacts, prepared); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := arbiter.RestorePreparedArbitration(raw, testArbitrationFeeSatoshis)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = wf.SignPreparedArbitration(context.Background(), tc.signFacts, restored); err != nil {
+				t.Fatal(err)
+			}
+			if counter.callsSnapshot() != 4 {
+				t.Fatalf("signer calls=%d want 4", counter.callsSnapshot())
 			}
 		})
 	}
@@ -319,7 +298,7 @@ func TestSellerDeliverContentMissingHeightFactStaysInvalidEvidence(t *testing.T)
 // TestSignPreparedArbitrationMissingFactKeepsInvalidEvidence 托管签署入口的
 // 事实缺失分类矩阵：timestamp 锁缺 Now 与 height 锁缺 BlockHeight 都必须
 // 保持 invalid_evidence，且 Signer 调用增量为 0（不产生任何部分签名）。
-func TestSignPreparedArbitrationMissingFactKeepsInvalidEvidence(t *testing.T) {
+func TestSignPreparedArbitrationNeedsNoChainFacts(t *testing.T) {
 	tsLock := uint32(testBaseTime.Add(30 * time.Minute).Unix())
 	for _, tc := range []struct {
 		name         string
@@ -363,9 +342,11 @@ func TestSignPreparedArbitrationMissingFactKeepsInvalidEvidence(t *testing.T) {
 			before := counter.callsSnapshot()
 			_, err = wf.SignPreparedArbitration(context.Background(), tc.signFacts, prepared)
 			after := counter.callsSnapshot()
-			requireGateClassification(t, err, protocol.CodeInvalidEvidence, tc.name)
-			if after-before != 0 {
-				t.Fatalf("%s: signer delta = %d, want 0", tc.name, after-before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after-before != 2 {
+				t.Fatalf("%s: signer delta = %d, want 2", tc.name, after-before)
 			}
 		})
 	}

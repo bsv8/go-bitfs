@@ -21,24 +21,23 @@ SDK 验证角色脚本、Buyer 条款签名、RefundTx ID 与条款绑定、Refu
 
 ## 仲裁方边界
 
-应用必须在计价和签名之前完成链上 UTXO 前置检查。SDK 绝不查询节点；生产服务必须验证 Claim 的 outpoint 存在、金额与 Claim 一致、script 与池锁定脚本一致，且已确认、未花费。UTXO 查询失败、超时或状态不确定时必须拒绝签名——“不确定”绝不能当作可花费，也不得产生降级或免费响应。
+仲裁服务只离线校验证据和仲裁金额，不连接 BSV 网络，不查询 UTXO、确认数、区块高度或实际可兑现性，不广播交易。交付截止、退款时间或高度已过不构成仲裁拒签条件；服务接受签署后费用无法兑现的风险。
 
 应用必须用自己的收费策略对精确 `len(ContentPayloadsCBOR)` 计算（只允许整数公式）正的 `arbiter_amount_sat`，然后在请求任何签名之前原子持久化精确入站请求、payload bundle、派生的 Claim ID 与冻结费用：
 
 ```text
 收到 raw Kind 8 -> 严格解码 -> 证据验证
-  -> 应用验证链上 UTXO
   -> 应用计价
-  -> arbiter.PrepareArbitration(facts, rawKind8, arbiterAmountSatoshis)
+  -> arbiter.PrepareArbitration(rawKind8, arbiterAmountSatoshis)
   -> 原子托管持久化（只追加：request、payload、Claim ID 与费用一旦写入
      即不可变）
-  -> arbiter.SignPreparedArbitration(ctx, facts, prepared, signer)
+  -> arbiter.SignPreparedArbitration(ctx, prepared, signer)
   -> 持久化/发送精确 Kind 9
 ```
 
 零费用在任何持久化或签名之前按 invalid evidence 失败；扣除 Buyer 授权 Seller 金额后放不下的费用返回 `CodeInsufficientBalance` 错误分类，不存在免费或部分收费回退。
 
-`arbiter.PrepareArbitration` 不产生交易签名副作用，返回带深复制 getter 的 opaque prepared evidence（Claim ID、冻结费用、授权哈希、payload、deadline、unsigned candidate）。应用重启后必须从已保存的精确原始 Kind 8 字节与保存的费用重新 Prepare，不得伪造 opaque 值。托管记录只追加：签名完成后，exact canonical Kind 9 字节附加到同一记录上，不覆盖 request、payload、Claim ID 或费用。
+`arbiter.PrepareArbitration` 不签名，返回可直接持久化的普通证据包（exact Kind 8、candidate、Claim ID、冻结正仲裁费）。签名前从普通证据独立重验签名、哈希、角色及金额，不信任调用方修改的 candidate。应用重启后用保存的 exact Kind 8 与冻结费用重新校验。签名后的 exact Kind 9 追加到同一托管记录，不覆盖原证据。
 
 回执通过 `SignWireDocument(1, 9, exact_receipt_cbor)` 普通消息签名把 Claim ID、绝对仲裁金额和精确 `ForkID|All` 交易签名绑定在一起。回执消息签名与交易签名是两份独立凭证，不能互相替代。
 

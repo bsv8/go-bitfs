@@ -772,34 +772,28 @@ export function newRetrievalNonce (raw: Uint8Array): Uint8Array {
 // ---------------------------------------------------------------------------
 
 /**
- * 仲裁方准备：对 exact Kind 8 做完整时间相关证据验证但绝不签名；返回可持久化
+ * 仲裁方准备：离线校验证据、角色与正仲裁费，不判断链状态或是否过期；返回可持久化
  * 的普通证据包（exact Kind 8、独立重建 candidate、Claim ID 与冻结费用）。
  */
-export function prepareArbiterArbitration (facts: Readonly<PureFunctionFacts>, rawKind8: Uint8Array, feeSatoshis: bigint): PreparedArbitrationEvidence {
+export function prepareArbiterArbitration (rawKind8: Uint8Array, feeSatoshis: bigint): PreparedArbitrationEvidence {
   if (feeSatoshis <= 0n) throw new WireError('invalid_evidence', 8, 'fee_satoshis', '成功仲裁需要正仲裁费')
-  const now = requireNow(facts)
   const request = decodeKind8Request(rawKind8)
   const validated = validateRequestEvidence(request, feeSatoshis)
-  if (!(now < validated.authorization.deliveryDeadlineUnixSeconds)) throw new WireError('expired', 8, 'delivery_deadline_unix_seconds', '交付截止时间已过')
-  checkRefundNotExpired(facts, refundTemplateLockTime(validated.claim.refundTemplateRaw))
   return { rawKind8: copyBytes(rawKind8), candidateRaw: copyBytes(validated.unsigned.unsignedRaw), arbitrationClaimID: validated.claimID, feeSatoshis }
 }
 
 /**
  * 仲裁方签署：从冻结的 exact Kind 8 独立重建交易与 digest，重新比较 Claim ID、
- * 费用、角色、deadline 与 candidate，然后按固定顺序签名——先仲裁交易签名，
+ * 费用、角色与 candidate，然后按固定顺序签名——先仲裁交易签名，
  * 再编码回执，最后生成并自验统一回执消息签名。
  */
-export async function signArbiterPreparedArbitration (facts: Readonly<PureFunctionFacts>, prepared: PreparedArbitrationEvidence, signer: Signer): Promise<SignedArbitrationEvidence> {
+export async function signArbiterPreparedArbitration (prepared: PreparedArbitrationEvidence, signer: Signer): Promise<SignedArbitrationEvidence> {
   const bound = bindSigner(signer, 'arbiter_signer')
-  const now = requireNow(facts)
   const request = decodeKind8Request(prepared.rawKind8)
   const validated = validateRequestEvidence(request, prepared.feeSatoshis)
   if (!equal(validated.claimID, prepared.arbitrationClaimID)) throw new WireError('state_conflict', 9, 'claim_id', 'Prepare 证据 Claim ID 与重验结果不一致')
   if (!equal(validated.unsigned.unsignedRaw, prepared.candidateRaw)) throw new WireError('state_conflict', 9, 'unsigned_candidate', 'Prepare candidate 与独立重建交易不一致')
   if (!equal(bound.publicKey(), validated.keys.arbiterPublicKey)) throw new WireError('unauthorized', 9, 'arbiter_public_key', 'Claim 仲裁方与 Signer 不一致')
-  if (!(now < validated.authorization.deliveryDeadlineUnixSeconds)) throw new WireError('expired', 9, 'delivery_deadline_unix_seconds', '签署前交付截止时间已过')
-  checkRefundNotExpired(facts, refundTemplateLockTime(validated.claim.refundTemplateRaw))
   const engine = new MultisigPoolEngine(validated.keys)
   const arbiterTransactionSignature = await engine.signRole(bound, 'arbiter', validated.unsigned.unsignedRaw, validated.unsigned.poolOutputSatoshis)
   const receiptCBOR = marshalReceipt(validated.claimID, prepared.feeSatoshis, arbiterTransactionSignature)

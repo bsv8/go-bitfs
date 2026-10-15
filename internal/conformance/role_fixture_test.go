@@ -329,11 +329,11 @@ func buildRoleFixture(t *testing.T) *roleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := arbiter.PrepareArbitration(roleFacts(1999999000), kind8.Bytes(), protocol.Satoshis(500))
+	prepared, err := arbiter.PrepareArbitration(kind8.Bytes(), protocol.Satoshis(500))
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := arbiter.SignPreparedArbitration(ctx, roleFacts(1999999000), *prepared, arbiterSigner)
+	signed, err := arbiter.SignPreparedArbitration(ctx, *prepared, arbiterSigner)
 	if err != nil {
 		t.Fatal(err)
 	}

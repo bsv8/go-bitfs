@@ -525,8 +525,8 @@ func TestExpiredCustodyEvidenceRemainsVerifiable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mustArbiterWorkflow(t).PrepareArbitration(testFacts(), rawKind8, protocol.Satoshis(testArbitrationFeeSat)); !protocol.IsCode(err, protocol.CodeExpired) {
-		t.Fatalf("premise broken: expired evidence still prepares (want expired): %v", err)
+	if _, err := mustArbiterWorkflow(t).PrepareArbitration(testFacts(), rawKind8, protocol.Satoshis(testArbitrationFeeSat)); err != nil {
+		t.Fatalf("offline prepare of expired custody evidence failed: %v", err)
 	}
 	response := forceSignCustodyResponse(t, evidence.request, keys[2])
 	verified, err := arbitration.VerifyCustodiedContent(evidence.request, response)

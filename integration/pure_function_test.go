@@ -243,10 +243,10 @@ func TestPureFunctionBoundaryRejectsBeforeSigning(t *testing.T) {
 
 	// 仲裁 Prepare：零费用 → invalid_evidence，且不触碰任何 Signer。
 	kind8 := fixtureHex(t, view.Arbitration.Kind8Hex)
-	if _, err := arbiter.PrepareArbitration(facts, kind8, 0); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
+	if _, err := arbiter.PrepareArbitration(kind8, 0); !protocol.IsCode(err, protocol.CodeInvalidEvidence) {
 		t.Fatalf("zero arbitration fee error = %v", err)
 	}
-	prepared, err := arbiter.PrepareArbitration(facts, kind8, protocol.Satoshis(500))
+	prepared, err := arbiter.PrepareArbitration(kind8, protocol.Satoshis(500))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestPureFunctionBoundaryRejectsBeforeSigning(t *testing.T) {
 	tampered := *prepared
 	tampered.CandidateRaw = append([]byte(nil), prepared.CandidateRaw...)
 	tampered.CandidateRaw[len(tampered.CandidateRaw)-1] ^= 0x01
-	if _, err := arbiter.SignPreparedArbitration(ctx, facts, tampered, arbiterSigner); !protocol.IsCode(err, protocol.CodeStateConflict) {
+	if _, err := arbiter.SignPreparedArbitration(ctx, tampered, arbiterSigner); !protocol.IsCode(err, protocol.CodeStateConflict) {
 		t.Fatalf("tampered candidate error = %v", err)
 	}
 	if arbiterSigner.calls != 0 {
@@ -262,7 +262,7 @@ func TestPureFunctionBoundaryRejectsBeforeSigning(t *testing.T) {
 	}
 
 	// 成功路径：仲裁 Sign 在合法证据上恰好调用 Signer 一次并产出 exact Kind 9。
-	signed, err := arbiter.SignPreparedArbitration(ctx, facts, *prepared, arbiterSigner)
+	signed, err := arbiter.SignPreparedArbitration(ctx, *prepared, arbiterSigner)
 	if err != nil {
 		t.Fatal(err)
 	}

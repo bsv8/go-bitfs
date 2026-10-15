@@ -81,7 +81,7 @@ func main() {
 	fee := protocol.Satoshis(demoFeePolicy(len(deliveryDTO.ContentPayloadsCBOR)))
 	// PrepareArbitration 完整验证但绝不签名；应用必须在 Sign 之前先持久化
 	// exact 托管证据（Kind 8 原始字节、Claim ID、冻结费用与 payload bundle）。
-	prepared, err := arbiter.PrepareArbitration(f.Facts(now), rawKind8, fee)
+	prepared, err := arbiter.PrepareArbitration(rawKind8, fee)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.PrepareArbitration: %w", err))
 	}
@@ -108,7 +108,7 @@ func main() {
 	}
 	debug("[arbiter] persisted exact Kind 8 bytes under claim id %s with frozen fee %d; SignPreparedArbitration independently rebuilds and signs", custodyClaimID.String(), saved.ArbiterAmountSatoshis)
 
-	signed, err := arbiter.SignPreparedArbitration(ctx, f.Facts(now), *prepared, f.ArbiterSigner)
+	signed, err := arbiter.SignPreparedArbitration(ctx, *prepared, f.ArbiterSigner)
 	if err != nil {
 		fail(fmt.Errorf("arbiter.SignPreparedArbitration: %w", err))
 	}

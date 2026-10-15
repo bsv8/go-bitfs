@@ -42,51 +42,30 @@ type SignedArbitrationEvidence struct {
 	ArbiterTransactionSignature []byte
 }
 
-// PrepareArbitration 对 exact Kind 8 托管请求做完整时间相关证据验证但绝不签名：
-// Claim 结构、买方授权签名、卖方 Claim 签名、逐 payload 哈希、按显式正仲裁费
-// 独立重建 candidate、交付截止未过（Facts.Now）、退款模板尚未到期（只读取锁定
-// 类型对应的事实）。本步骤不签名也无长计算，因此不接收 context。应用必须在调用
-// SignPreparedArbitration 之前先持久化返回的证据包。
-func PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (*PreparedArbitrationEvidence, error) {
-	const op = "arbiter.PrepareArbitration"
+// PrepareArbitration 离线校验 exact Kind 8 的签名、内容哈希、角色与金额，
+// 按调用方给出的正仲裁费独立重建 candidate；不查询链状态或读取时间事实。
+// deadline/退款锁是证据字段，不作为仲裁服务拒签条件；签名不保证链上可兑现。
+// 应用须先持久化此证据包，再调用 SignPreparedArbitration。
+func PrepareArbitration(rawKind8 []byte, fee protocol.Satoshis) (*PreparedArbitrationEvidence, error) {
 	if fee == 0 {
-		return nil, protocol.Errorf(op, protocol.CodeInvalidEvidence, 8, "fee_satoshis", "successful arbitration requires a positive arbiter amount")
+		return nil, protocol.Errorf("arbiter.PrepareArbitration", protocol.CodeInvalidEvidence, 8, "fee_satoshis", "successful arbitration requires a positive arbiter amount")
 	}
 	request, err := arbitration.UnmarshalRequest(rawKind8)
 	if err != nil {
 		return nil, err
 	}
-	now, err := facts.RequireNow()
+	_, _, _, unsigned, claimID, _, _, err := arbitration.ValidateRequestEvidence(request, uint64(fee))
 	if err != nil {
 		return nil, err
 	}
-	claim, authorization, _, unsigned, claimID, _, _, err := arbitration.ValidateRequestEvidence(request, uint64(fee))
-	if err != nil {
-		return nil, err
-	}
-	if !now.Before(unixSeconds(authorization.DeliveryDeadlineUnixSeconds)) {
-		return nil, protocol.Errorf(op, protocol.CodeExpired, 8, "delivery_deadline_unix_seconds", "delivery deadline has passed")
-	}
-	claimLockTime, err := pool.RefundTemplateLockTime(claim.RefundTemplateRaw)
-	if err != nil {
-		return nil, err
-	}
-	if err := facts.CheckRefundNotExpired(claimLockTime); err != nil {
-		return nil, protocol.WrapClassified(fmt.Errorf("refund template is no longer available for arbitration: %w", err), op, 8, "refund_template_raw")
-	}
-	return &PreparedArbitrationEvidence{
-		RawKind8:           bytes.Clone(rawKind8),
-		CandidateRaw:       bytes.Clone(unsigned.RawTx),
-		ArbitrationClaimID: claimID,
-		FeeSatoshis:        fee,
-	}, nil
+	return &PreparedArbitrationEvidence{RawKind8: bytes.Clone(rawKind8), CandidateRaw: bytes.Clone(unsigned.RawTx), ArbitrationClaimID: claimID, FeeSatoshis: fee}, nil
 }
 
 // SignPreparedArbitration 是先持久化后的签名步骤：从冻结的 exact Kind 8 字节
-// 独立重建交易与 digest，重新比较 Claim ID、费用、角色、deadline（用本次显式
-// Facts.Now）与 candidate，然后按固定顺序签名——先仲裁交易签名，再编码回执，
+// 独立重建交易与 digest，重新比较 Claim ID、费用、角色
+// 与 candidate，然后按固定顺序签名——先仲裁交易签名，再编码回执，
 // 最后生成并自验统一回执消息签名。绝不信任缓存的 mutable candidate。
-func SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared PreparedArbitrationEvidence, signer protocol.Signer) (*SignedArbitrationEvidence, error) {
+func SignPreparedArbitration(ctx context.Context, prepared PreparedArbitrationEvidence, signer protocol.Signer) (*SignedArbitrationEvidence, error) {
 	const op = "arbiter.SignPreparedArbitration"
 	internal, err := restorePreparedArbitration(prepared.RawKind8, prepared.FeeSatoshis)
 	if err != nil {
@@ -102,7 +81,7 @@ func SignPreparedArbitration(ctx context.Context, facts protocol.Facts, prepared
 	if err != nil {
 		return nil, err
 	}
-	outbound, err := workflow.SignPreparedArbitration(ctx, facts, internal)
+	outbound, err := workflow.SignPreparedArbitration(ctx, internal)
 	if err != nil {
 		return nil, err
 	}

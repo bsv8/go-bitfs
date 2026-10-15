@@ -178,7 +178,7 @@ func (p *PreparedArbitration) PreparedBelongsTo(publicKey []byte) bool {
 
 // PrepareArbitration 完整验证 exact Kind 8 并返回可持久化的普通证据包。
 func (w *Workflow) PrepareArbitration(facts protocol.Facts, rawKind8 []byte, fee protocol.Satoshis) (*PreparedArbitration, error) {
-	evidence, err := realarbiter.PrepareArbitration(facts, rawKind8, fee)
+	evidence, err := realarbiter.PrepareArbitration(rawKind8, fee)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ func (w *Workflow) SignPreparedArbitration(ctx context.Context, facts protocol.F
 	if prepared == nil {
 		return wire.Artifact{}, protocol.Errorf("arbiter.SignPreparedArbitration", protocol.CodeInvalidEvidence, 9, "prepared", "prepared arbitration is required")
 	}
-	signed, err := realarbiter.SignPreparedArbitration(ctx, facts, prepared.evidence, w.signer)
+	signed, err := realarbiter.SignPreparedArbitration(ctx, prepared.evidence, w.signer)
 	if err != nil {
 		return wire.Artifact{}, err
 	}

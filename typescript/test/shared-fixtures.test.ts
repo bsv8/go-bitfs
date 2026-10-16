@@ -305,7 +305,7 @@ function priceVectorTerms (vector: RoleFixture['price_vectors'][number]): FileQu
     fileSizeBytes: BigInt(vector.file_size_bytes),
     quoteExpiresAtUnixSeconds: 2000000000n,
     supportedArbiterPublicKeys: [arbiter.publicKey()],
-    maxBlocksPerBatch: 64, recommendedFilename: 'file.bin'
+    mediaType: 'application/octet-stream', maxBlocksPerBatch: 64, recommendedFilename: 'file.bin'
   }
 }
 
@@ -543,7 +543,7 @@ describe('Go 与 TypeScript 共享 wire 真值', () => {
       fileSizeBytes: 4096n,
       quoteExpiresAtUnixSeconds: 2000000000n,
       supportedArbiterPublicKeys: [new TestSigner(0x33).publicKey()],
-      maxBlocksPerBatch: 64, recommendedFilename: 'file.bin'
+      mediaType: 'application/octet-stream', maxBlocksPerBatch: 64, recommendedFilename: 'file.bin'
     }
     const generated = await createFileQuote(new TestSigner(0x22), terms)
     const frozen = manifest.entries.find(entry => entry.kind === 1)!
@@ -642,7 +642,7 @@ describe('角色纯函数跨语言真值（fixtures/role-v1.json）', () => {
       fileSizeBytes: BigInt(roleFixture.quote.file_size_bytes),
       quoteExpiresAtUnixSeconds: 2000000000n,
       supportedArbiterPublicKeys: [arbiter.publicKey()],
-      maxBlocksPerBatch: 64, recommendedFilename: roleFixture.quote.recommended_filename
+      mediaType: 'application/octet-stream', maxBlocksPerBatch: 64, recommendedFilename: roleFixture.quote.recommended_filename
     })
     expect(toHex(quote.outbound.bytes())).toBe(roleFixture.quote.kind1_hex)
     expect(digest(outer(quote.outbound.bytes())[2] as Uint8Array)).toBe(roleFixture.quote.terms_id)

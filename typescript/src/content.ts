@@ -116,6 +116,7 @@ export function decodeSupportedArbiterPublicKeys (raw: Uint8Array): Uint8Array[]
 export function validateFileQuoteTerms (terms: FileQuoteTerms): void {
   const op = 'content.ValidateFileQuoteTerms'
   if (terms == null) throw invalid(op, 'terms', '报价条款不能为空')
+  if (typeof terms.mediaType !== 'string' || terms.mediaType.length > 255 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(terms.mediaType)) throw invalid(op, 'media_type', '需要不超过 255 字节的规范小写 MIME type/subtype')
   if (terms.seedHash.byteLength !== CONTENT_DIGEST_SIZE) throw malformed(op, 'seed_hash', `seed_hash 必须是 ${CONTENT_DIGEST_SIZE} bytes`)
   if (terms.buyerPublicKey.byteLength !== 33 || !secp256k1.utils.isValidPublicKey(terms.buyerPublicKey, true)) throw invalid(op, 'buyer_public_key', '报价买方公钥无效')
   validateUint64(terms.seedPriceSatoshis, op, 'seed_price_satoshis')
@@ -132,7 +133,7 @@ export function validateFileQuoteTerms (terms: FileQuoteTerms): void {
 /** 严格解码 exact 规范报价条款字节。 */
 export function decodeFileQuoteTerms (raw: Uint8Array): FileQuoteTerms {
   const op = 'content.DecodeFileQuoteTerms'
-  const values = decodeStrictArray(raw, 9, op, 'file_quote_terms_cbor')
+  const values = decodeStrictArray(raw, 10, op, 'file_quote_terms_cbor')
   const terms: FileQuoteTerms = {
     seedHash: bytesField(values[0], op, 'seed_hash'),
     buyerPublicKey: bytesField(values[1], op, 'buyer_public_key'),
@@ -142,7 +143,8 @@ export function decodeFileQuoteTerms (raw: Uint8Array): FileQuoteTerms {
     quoteExpiresAtUnixSeconds: uintField(values[5], op, 'quote_expires_at_unix_seconds'),
     supportedArbiterPublicKeys: decodeSupportedArbiterPublicKeys(bytesField(values[6], op, 'supported_arbiter_public_keys_cbor')),
     recommendedFilename: textField(values[7], op, 'recommended_filename'),
-    maxBlocksPerBatch: Number(uintField(values[8], op, 'max_blocks_per_batch'))
+    maxBlocksPerBatch: Number(uintField(values[8], op, 'max_blocks_per_batch')),
+    mediaType: textField(values[9], op, 'media_type')
   }
   validateFileQuoteTerms(terms)
   if (!equalBytes(encodeFileQuoteTerms(terms), raw)) throw new WireError('non_canonical', 1, 'file_quote_terms_cbor', '报价条款不是确定性编码')
@@ -464,7 +466,7 @@ function encodeTerms (terms: FileQuoteTerms): Uint8Array {
   return encodeCanonical([
     copyBytes(terms.seedHash), copyBytes(terms.buyerPublicKey), terms.seedPriceSatoshis,
     terms.fullBlockPriceSatoshis, terms.fileSizeBytes, terms.quoteExpiresAtUnixSeconds,
-    encodeArbiterKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch)
+    encodeArbiterKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch), terms.mediaType
   ])
 }
 function encodeAuthorization (authorization: PaymentAuthorization): Uint8Array {

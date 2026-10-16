@@ -166,6 +166,7 @@ func newCddlFixtures(t *testing.T) *cddlFixtures {
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "file.bin",
 		MaxBlocksPerBatch:              64,
+		MediaType:                      "application/octet-stream",
 	}, signer)
 	if err != nil {
 		t.Fatal(err)

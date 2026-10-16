@@ -108,6 +108,7 @@ func (workflow *workflow) CreateQuote(ctx context.Context, facts protocol.Facts,
 		SupportedArbiterPublicKeysCBOR: supportedCBOR,
 		RecommendedFilename:            content.SanitizeRecommendedFilename(draft.RecommendedFilename),
 		MaxBlocksPerBatch:              draft.MaxBlocksPerBatch,
+		MediaType:                      draft.MediaType,
 	}
 	if err := content.ValidateFileQuoteTerms(terms); err != nil {
 		return nil, invalidEvidence(err)

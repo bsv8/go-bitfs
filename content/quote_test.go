@@ -26,6 +26,7 @@ func TestSignedFileQuoteRoundTripAndVerification(t *testing.T) {
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "report.bin",
 		MaxBlocksPerBatch:              64,
+		MediaType:                      "application/octet-stream",
 	}
 	quote, err := NewSignedFileQuote(context.Background(), terms, quoteTestSigner())
 	if err != nil {
@@ -181,6 +182,7 @@ func quoteTestTerms(t *testing.T) *FileQuoteTerms {
 		SupportedArbiterPublicKeysCBOR: arbiters,
 		RecommendedFilename:            "file.bin",
 		MaxBlocksPerBatch:              64,
+		MediaType:                      "application/octet-stream",
 	}
 }
 

@@ -32,6 +32,8 @@ type FileQuoteTerms struct {
 	RecommendedFilename string
 	// MaxBlocksPerBatch 是卖方每次付款授权接受的最大 Block 数（1..64）；Seed 不计入，缺失或零值拒绝。
 	MaxBlocksPerBatch uint64
+	// MediaType 是卖方声明的规范小写 MIME（type/subtype），与文件名一起签名。
+	MediaType string
 }
 
 // SignedFileQuote is the complete Kind 1 FileQuote wire message payload:

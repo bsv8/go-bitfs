@@ -57,6 +57,7 @@ outbound, terms, err := seller.CreateQuote(ctx, facts, signerSeller, seller.Quot
     FileSizeBytes:              uint64(len(fileBytes)),
     QuoteExpiresAtUnixSeconds:  content.UnixSeconds(facts.Now.Add(time.Hour).Unix()),
     SupportedArbiterPublicKeys: []protocol.PublicKey{arbiterPubKey},
+    MediaType:                  "application/octet-stream",
     RecommendedFilename:        "file.bin", // 先 sanitize 再进入签名条款
     MaxBlocksPerBatch:           4, // 卖方每批最多接受 4 个 Block
 })
@@ -138,3 +139,7 @@ npm ci --prefix typescript && npm test --prefix typescript
 本次为开发期报价结构直接调整，`WireVersion` 保持 1，libp2p 协议仍是 `/bitfs/wire/1.0.0`。0.4.0 只接受九项报价，不兼容旧八项报价。应用必须升级 SDK 并提供卖方参数后才能生成新报价。
 
 0.4.0 正式源码包含历史交付仲裁、买方本地付款证据取回、`arbitrationContentPayloadBytes` 与 `inspectArbitrationCandidate`，这些能力无需应用修改 npm 包的 `dist` 文件或安装本地补丁。
+
+## 0.5.0 报价 MIME
+
+报价第十项为必填 `MediaType`（Go）/ `mediaType`（TypeScript）：卖方声明的规范小写 `type/subtype`，最多 255 字节，不携带参数。此字段与文件名一起进入签名和报价 ID；不得从扩展名补默认值。开发期直接采用十项报价，拒绝缺失 MIME 的旧结构；WireVersion 仍为 1，协议路径不变。内容类型是卖方声明的展示元数据，不改变 Seed/Block 的内容哈希或仲裁计费。多个卖家的类型选择由应用策略负责。

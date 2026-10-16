@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -15,6 +16,8 @@ import (
 	masterseed "github.com/bsv8/MasterSeed"
 	"github.com/bsv8/go-bitfs/protocol"
 )
+
+var quoteMediaTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$`)
 
 // fileQuoteWireVersion and fileQuoteWireKind fix the Kind 1 signature context.
 // The encoder injects the same outer pair into the complete wire message.
@@ -81,13 +84,14 @@ func EncodeFileQuoteTerms(terms *FileQuoteTerms) ([]byte, error) {
 		bstr(terms.SupportedArbiterPublicKeysCBOR),
 		terms.RecommendedFilename,
 		terms.MaxBlocksPerBatch,
+		terms.MediaType,
 	})
 }
 
 // DecodeFileQuoteTerms validates and decodes canonical FileQuoteTerms bytes.
 func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	const op = "content.DecodeFileQuoteTerms"
-	values, err := decodeArray(data, 9)
+	values, err := decodeArray(data, 10)
 	if err != nil {
 		return nil, malformed(op, "file_quote_terms_cbor", err)
 	}
@@ -118,6 +122,9 @@ func DecodeFileQuoteTerms(data []byte) (*FileQuoteTerms, error) {
 	}
 	if err := decode(values[8], &terms.MaxBlocksPerBatch); err != nil {
 		return nil, malformed(op, "max_blocks_per_batch", err)
+	}
+	if err := decode(values[9], &terms.MediaType); err != nil {
+		return nil, malformed(op, "media_type", err)
 	}
 	if err := ValidateFileQuoteTerms(terms); err != nil {
 		return nil, invalidEvidence(op, err)
@@ -317,6 +324,9 @@ func ValidateFileQuoteTerms(terms *FileQuoteTerms) error {
 		if !bytes.Equal(terms.SeedHash, emptySeedHash.Bytes()) {
 			return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "seed_hash", "empty-file quote seed_hash must equal sha256 of empty seed")
 		}
+	}
+	if len(terms.MediaType) > 255 || !quoteMediaTypePattern.MatchString(terms.MediaType) {
+		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "media_type", "需要不超过 255 字节的规范小写 MIME type/subtype")
 	}
 	if terms.MaxBlocksPerBatch < 1 || terms.MaxBlocksPerBatch > MaxContentBatchItems {
 		return protocol.Errorf(op, protocol.CodeInvalidEvidence, 1, "max_blocks_per_batch", "卖方每批最大 Block 数必须为 1..%d", MaxContentBatchItems)

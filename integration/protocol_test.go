@@ -225,6 +225,7 @@ func newProtocolFixture(t *testing.T) *protocolFixture {
 		SupportedArbiterPublicKeys: []protocol.PublicKey{mustTypedPublicKey(t, f.arbiterPubKey[:])},
 		RecommendedFilename:        "file.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType: "application/octet-stream",
 	})
 	if err != nil {
 		t.Fatal(err)

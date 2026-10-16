@@ -405,6 +405,7 @@ func TestWorkflowBindsSignerPublicKeyAcrossKinds(t *testing.T) {
 		SupportedArbiterPublicKeys: []protocol.PublicKey{f.arbiterPubKey},
 		RecommendedFilename:        "rotate.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -451,6 +452,7 @@ func TestWorkflowBindsSignerPublicKeyAcrossKinds(t *testing.T) {
 		SupportedArbiterPublicKeys: []protocol.PublicKey{f.arbiterPubKey},
 		RecommendedFilename:        "rotate2.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	})
 	assertInvalidSignatureOrUnauthorized(t, err, "seller.CreateQuote after key rotation")
 

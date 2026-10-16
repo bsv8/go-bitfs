@@ -131,6 +131,7 @@ func run(privateKeyHex, privateKeyFile, filePath string, seedPrice, blockPrice u
 		SupportedArbiterPublicKeys: arbiterPubkeys,
 		RecommendedFilename:        filename,
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	})
 	if err != nil {
 		return fmt.Errorf("seller.CreateQuote: %w", err)

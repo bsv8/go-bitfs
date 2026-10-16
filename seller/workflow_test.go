@@ -180,6 +180,7 @@ func (f *sellerFixture) createQuoteRaw(t *testing.T, mutate func(*QuoteDraft)) [
 		SupportedArbiterPublicKeys: mustTypedArbiterKeys(t, [][]byte{f.arbiterPubKey[:]}),
 		RecommendedFilename:        "file.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	}
 	if mutate != nil {
 		mutate(&draft)
@@ -355,6 +356,7 @@ func TestCreateQuoteSignsDraftAndSanitizesFilename(t *testing.T) {
 		SupportedArbiterPublicKeys: mustTypedArbiterKeys(t, [][]byte{f.arbiterPubKey[:]}),
 		RecommendedFilename:        "../../evil name.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	}
 	quoteResult, err := f.Seller.CreateQuote(context.Background(), testFacts(testBaseTime), draft)
 	if err != nil {

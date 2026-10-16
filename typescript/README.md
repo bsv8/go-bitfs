@@ -96,3 +96,7 @@ seed 或满足授权价格；读取后仍须把同一 Kind 5 和池证据连同 
 `createSellerQuote` 和 `createFileQuote` 的报价必填 `maxBlocksPerBatch: number`（卖方每批最多接受的非 Seed Block 数，整数 1–64）。`acceptBuyerQuote` 返回验签后的同名字段；买方策略器据此选择本批块数，`prepareBuyerContentRequest` 在签名前、`inspectSellerDeliveryRequest` / `prepareSellerDelivery` 在接受请求前检查上限。SDK 不提供买方批次设置，也不自动拆分请求。Seed 不占 Block 数，总条目仍受 64 限制。
 
 Wire v1 与传输标识保持不变；本次开发期升级以九项报价直接替换旧八项报价。历史仲裁与买方取回不追加批次上限追溯检查。历史仲裁、买方本地证据取回及仲裁费用检查接口已包含在正式源码与构建产物中，不需要应用侧 patch。
+
+## 0.5.0 报价 MIME
+
+报价第十项为必填 `MediaType`（Go）/ `mediaType`（TypeScript）：卖方声明的规范小写 `type/subtype`，最多 255 字节，不携带参数。此字段与文件名一起进入签名和报价 ID；不得从扩展名补默认值。开发期直接采用十项报价，拒绝缺失 MIME 的旧结构；WireVersion 仍为 1，协议路径不变。内容类型是卖方声明的展示元数据，不改变 Seed/Block 的内容哈希或仲裁计费。多个卖家的类型选择由应用策略负责。

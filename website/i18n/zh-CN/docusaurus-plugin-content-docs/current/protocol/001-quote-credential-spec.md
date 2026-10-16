@@ -37,6 +37,7 @@ CBOR 数组位置固定如下：
 | 5 | `quote_expires_at_unix_seconds` | 报价失效 Unix 秒时间。 |
 | 6 | `supported_arbiter_public_keys_cbor` | 仲裁公钥数组的独立 deterministic CBOR。 |
 | 7 | `recommended_filename` | 经 sanitize 的展示建议；与其他条款一样由卖方签名。 |
+| 9 | `media_type` | 卖方声明的规范小写 MIME（最多 255 字节，无参数）；签名及报价 ID 覆盖。 |
 | 8 | `max_blocks_per_batch` | 卖方每批最大 Block 数；必填整数 1–64，计入签名和报价 ID，Seed 不计入。 |
 
 认证文档不携带版本或 Kind 字段。块数必须由 `file_size_bytes` 推导：`0` 对应 `0` 块；正数对应 `ceil(file_size_bytes / 262144)`。每个 payload 不超过一个 MasterSeed 块（256 KiB）。仲裁公钥数组可为空，但其中公钥不得为空或重复。`recommended_filename` 必须先通过 sanitize 规则再编码和签名；因为它进入条款，仅文件名不同的两份报价具有不同的 `file_quote_terms_id`。
@@ -88,3 +89,5 @@ quoteID, err := content.FileQuoteTermsID(signedQuote.FileQuoteTermsCBOR)
 签名能力只经受约束的 `protocol.Signer` 端口进入；签名与验证都走固定的 `SignWireDocument` helper，调用方无需提供签名域、验签回调或曲线实现。时间敏感判断使用调用方显式事实（`protocol.Facts`）；SDK 绝不读钟。
 
 `max_blocks_per_batch`（卖方每批最多接受的 Block 数）是报价的第九项必填整数，范围 1–64，进入卖方签名及报价 ID；Seed 不计入 Block 数，总内容条目仍不得超过 64。买方策略器可请求更少的块。0.4.0 在开发阶段保持 Wire v1，直接以九项报价替换旧八项报价，不设置默认值或兼容分支。
+
+0.5.0 报价为十项，第十项 MIME 为必填；开发期 WireVersion 保持 1。

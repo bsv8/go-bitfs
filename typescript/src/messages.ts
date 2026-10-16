@@ -25,6 +25,8 @@ export interface FileQuoteTerms {
   recommendedFilename: string
   /** 卖方每次付款授权接受的最大 Block 数（1..64）；Seed 不计入，无默认值。 */
   maxBlocksPerBatch: number
+  /** 卖方声明的规范小写 MIME，进入报价签名与 ID。 */
+  mediaType: string
 }
 
 /** Kind 5 买方累计付款授权。 */
@@ -80,7 +82,7 @@ export function encodeFileQuoteTerms (terms: Readonly<FileQuoteTerms>): Uint8Arr
   return encodeCanonical([
     copy(terms.seedHash), copy(terms.buyerPublicKey), terms.seedPriceSatoshis,
     terms.fullBlockPriceSatoshis, terms.fileSizeBytes, terms.quoteExpiresAtUnixSeconds,
-    encodeSupportedArbiterPublicKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch)
+    encodeSupportedArbiterPublicKeys(terms.supportedArbiterPublicKeys), terms.recommendedFilename, BigInt(terms.maxBlocksPerBatch), terms.mediaType
   ])
 }
 

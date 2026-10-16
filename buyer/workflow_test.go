@@ -194,6 +194,7 @@ func (f *buyerFixture) createQuoteRaw(t *testing.T, mutate func(*seller.QuoteDra
 		SupportedArbiterPublicKeys: mustTypedArbiterKeys(t, [][]byte{f.arbiterPubKey[:]}),
 		RecommendedFilename:        "file.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType:                  "application/octet-stream",
 	}
 	if mutate != nil {
 		mutate(&draft)

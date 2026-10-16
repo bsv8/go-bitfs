@@ -62,12 +62,14 @@ function validateOuter (kind: WireKind, value: CBORValue[]): void {
 }
 
 function validateQuote (raw: Uint8Array): void {
-  const value = child(raw, 1, 'file_quote_terms_cbor', 9)
+  const value = child(raw, 1, 'file_quote_terms_cbor', 10)
   hash(value[0], 1, 'seed_hash'); pubkey(value[1], 1, 'buyer_public_key')
   uint(value[2], 1, 'seed_price_satoshis'); uint(value[3], 1, 'full_block_price_satoshis'); const fileSize = uint(value[4], 1, 'file_size_bytes'); const expiry = integer(value[5], 1, 'quote_expires_at')
   if (fileSize > 8192n * 262144n) malformed(1, 'file_size_bytes', '文件大小超过单个 seed 可描述的上限')
   if (fileSize === 0n && !equal(value[0] as Uint8Array, sha256(new Uint8Array()))) malformed(1, 'seed_hash', '空文件的 seed_hash 必须是空 seed 的 SHA-256')
   if (expiry <= 0n) malformed(1, 'quote_expires_at', '报价失效时间必须为正 Unix 秒')
+  if (typeof value[9] !== 'string') malformed(1, 'media_type', 'MIME 必须是文本')
+  if ((value[9] as string).length > 255 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(value[9] as string)) invalid(1, 'media_type', '需要规范小写 MIME type/subtype')
   const maxBlocks = uint(value[8], 1, 'max_blocks_per_batch')
   if (maxBlocks < 1n || maxBlocks > BigInt(MAX_CONTENT_BATCH_ITEMS)) invalid(1, 'max_blocks_per_batch', '卖方每批最大 Block 数必须为 1..64')
   const arbiters = array(decodeCanonical(bytes(value[6], 1, 'supported_arbiters_cbor'), 'supported_arbiters_cbor'), 1, 'supported_arbiters_cbor')

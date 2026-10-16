@@ -42,6 +42,7 @@ CBOR array positions are fixed as follows:
 | 5 | `quote_expires_at_unix_seconds` | Quote expiration as a Unix timestamp in seconds. |
 | 6 | `supported_arbiter_public_keys_cbor` | Independent deterministic CBOR of an array of arbiter public keys. |
 | 7 | `recommended_filename` | Sanitized display suggestion; signed by the seller like every other term. |
+| 9 | `media_type` | 卖方声明的规范小写 MIME（最多 255 字节，无参数）；签名及报价 ID 覆盖。 |
 | 8 | `max_blocks_per_batch` | 卖方每批最大 Block 数；必填整数 1–64，计入签名和报价 ID，Seed 不计入。 |
 
 The authentication document carries no version or kind field. The block
@@ -122,3 +123,5 @@ implementation. Time-sensitive checks take the caller's explicit facts
 (`protocol.Facts`); the SDK never reads a clock.
 
 `max_blocks_per_batch`（卖方每批最多接受的 Block 数）是报价的第九项必填整数，范围 1–64，进入卖方签名及报价 ID；Seed 不计入 Block 数，总内容条目仍不得超过 64。买方策略器可请求更少的块。0.4.0 在开发阶段保持 Wire v1，直接以九项报价替换旧八项报价，不设置默认值或兼容分支。
+
+0.5.0 报价为十项，第十项 MIME 为必填；开发期 WireVersion 保持 1。

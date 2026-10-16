@@ -34,6 +34,8 @@ type QuoteDraft struct {
 	RecommendedFilename string
 	// MaxBlocksPerBatch 是卖方声明的每批最大 Block 数（1..64），无隐式默认值。
 	MaxBlocksPerBatch uint64
+	// MediaType 是卖方声明的规范小写 MIME（type/subtype），与文件名一起签名。
+	MediaType string
 }
 
 // quoteResult 是 CreateQuote 的统一 Result：Outbound 是待发送 exact Kind 1；

@@ -23,6 +23,7 @@ func TestNewWirePreservesTypedCBOR(t *testing.T) {
 		SupportedArbiterPublicKeysCBOR: mustArbiterCBOR(t),
 		RecommendedFilename:            "file.bin",
 		MaxBlocksPerBatch:              64,
+		MediaType:                      "application/octet-stream",
 	}
 	signer, err := protocol.NewPrivateKeySigner(wireTestKey())
 	if err != nil {

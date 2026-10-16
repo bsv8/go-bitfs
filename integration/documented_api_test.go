@@ -78,6 +78,7 @@ func TestDocumentedMainPathSignerWorkflowQuoteAccept(t *testing.T) {
 		SupportedArbiterPublicKeys: []protocol.PublicKey{typedArbiter},
 		RecommendedFilename:        "file.bin",
 		MaxBlocksPerBatch:          64,
+		MediaType: "application/octet-stream",
 	})
 	if err != nil {
 		t.Fatal(err)
